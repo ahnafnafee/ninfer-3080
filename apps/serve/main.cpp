@@ -9,11 +9,14 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <typeinfo>
 #include <utility>
 
 namespace {
@@ -25,9 +28,29 @@ void handle_signal(int) {
     if (server != nullptr) { server->stop(); }
 }
 
+// An exception that escapes a request boundary ends the process through std::terminate, and the
+// default handler's message is the only record of which exception it was. Under a container this
+// process is pid 1: the kernel discards the SIGABRT that abort() raises against itself, glibc falls
+// through to its abort instruction, and all the kernel reports is a protection fault inside libc.
+[[noreturn]] void log_terminate() {
+    std::string detail = "terminate called with no active exception";
+    if (std::current_exception() != nullptr) {
+        try {
+            std::rethrow_exception(std::current_exception());
+        } catch (const std::exception& error) {
+            detail = std::string("terminate called after throwing ") + typeid(error).name() + ": " +
+                     error.what();
+        } catch (...) { detail = "terminate called after throwing a non-std exception"; }
+    }
+    std::fprintf(stderr, "ninfer-serve: %s\n", detail.c_str());
+    std::fflush(stderr);
+    std::abort();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+    std::set_terminate(log_terminate);
     ninfer::serve::ServeOptions options;
     try {
         options = ninfer::serve::parse_serve_options(argc, argv);
