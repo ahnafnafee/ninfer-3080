@@ -145,6 +145,7 @@ private:
     // Written by attach() together with service_, before ready_ is published.
     LoadCapacity load_capacity_;
     std::chrono::steady_clock::time_point attached_at_;
+    ninfer::ModelMetadata model_metadata_;
     OpenAIResponsesStore openai_responses_store_;
     OperationalLog operational_log_;
     JsonlRequestLog request_jsonl_;

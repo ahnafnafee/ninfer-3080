@@ -88,7 +88,7 @@ staged <MiB>)` and the JSON record carries `vision_overlay`, including `exclusiv
 | `GET /metrics` | Prometheus text with llama.cpp's `--metrics` series plus NInfer's (see [Metrics](#metrics)) |
 | `GET /slots` | llama.cpp-shaped lane table: one entry per lane, the first `running` marked processing |
 | `GET /props` | llama.cpp-shaped server properties: default sampling, context, lanes, modalities |
-| `GET /v1/models` | configured OpenAI model alias, effective `max_model_len` (also as `context_window`), and whether it accepts images |
+| `GET /v1/models` | configured OpenAI model alias, effective `max_model_len` (also as `context_window`), whether it accepts images, and a llama.cpp-compatible `meta` object (see [Models](#models)) |
 | `GET /v1/models/{id}` | lookup of the configured alias with the same fields |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
 | `POST /v1/responses` | OpenAI Responses Core generation, state, typed Items, and SSE |
@@ -221,6 +221,26 @@ configure with.
 ./scripts/fetch-webui.sh
 cmake -S . -B build -DNINFER_WEBUI_DIR=<the directory it printed>
 ```
+
+### Models
+
+`GET /v1/models` and `GET /v1/models/{id}` return the configured public OpenAI model alias
+(defaults to the artifact `metadata.name`, overridable with `--model-id`) together with the
+effective `max_model_len` (the `--max-context` ceiling, also as `context_window`), `modalities.vision`
+(whether `--vision` accepts images), and a `meta` object in the shape exposed by `llama.cpp`. The `meta` facts describe the registered artifact behind the alias:
+
+| Field | Meaning |
+|---|---|
+| `n_vocab` | tokenizer token domain |
+| `n_ctx` | configured per-request context ceiling (equal to `max_model_len`) |
+| `n_ctx_train` | model native/training context |
+| `n_embd` | model embedding width |
+| `n_params` | total logical weight elements across the registered artifact tensors |
+| `size` | encoded weight payload bytes of the registered artifact |
+| `ftype` | encoded tensor formats of the artifact, joined with `+` when mixed |
+
+`GET /v1/models/{id}` returns the same object for the single configured alias and a `404` for any
+other id.
 
 ## OpenAI Chat Completions
 

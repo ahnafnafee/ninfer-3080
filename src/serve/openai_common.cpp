@@ -198,31 +198,43 @@ void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCa
 namespace {
 
 // vLLM/llama.cpp-compatible discovery metadata for the configured per-request context limit, under
-// both names clients read it by, and whether the model accepts images.
+// both names clients read it by, whether the model accepts images, and llama.cpp's `meta` facts
+// about the registered artifact behind the alias: n_ctx is the per-request context ceiling,
+// n_ctx_train the model's native context, ftype the registered weights profile.
 Json model_json(const std::string& model_id, std::int64_t created, std::uint32_t max_model_len,
-                bool vision) {
+                bool vision, const ninfer::ModelMetadata& metadata) {
     return Json{{"id", model_id},
                 {"object", "model"},
                 {"created", created},
                 {"owned_by", "ninfer"},
                 {"max_model_len", max_model_len},
                 {"context_window", max_model_len},
-                {"modalities", Json{{"vision", vision}}}};
+                {"modalities", Json{{"vision", vision}}},
+                {"meta",
+                 Json{{"n_vocab", metadata.vocab_size},
+                      {"n_ctx", max_model_len},
+                      {"n_ctx_train", metadata.native_context},
+                      {"n_embd", metadata.embedding_size},
+                      {"n_params", metadata.parameters},
+                      {"size", metadata.weight_bytes},
+                      {"ftype", metadata.weights_id}}}};
 }
 
 } // namespace
 
 std::string make_models_list(const std::string& model_id, std::int64_t created,
-                             std::uint32_t max_model_len, bool vision) {
+                             std::uint32_t max_model_len, bool vision,
+                             const ninfer::ModelMetadata& metadata) {
     const Json payload = {
         {"object", "list"},
-        {"data", Json::array({model_json(model_id, created, max_model_len, vision)})}};
+        {"data", Json::array({model_json(model_id, created, max_model_len, vision, metadata)})}};
     return payload.dump();
 }
 
 std::string make_model_object(const std::string& model_id, std::int64_t created,
-                              std::uint32_t max_model_len, bool vision) {
-    return model_json(model_id, created, max_model_len, vision).dump();
+                              std::uint32_t max_model_len, bool vision,
+                              const ninfer::ModelMetadata& metadata) {
+    return model_json(model_id, created, max_model_len, vision, metadata).dump();
 }
 
 std::string make_error_body(const ApiError& error) {

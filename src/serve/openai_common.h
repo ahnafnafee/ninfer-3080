@@ -38,9 +38,11 @@ void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCa
 [[nodiscard]] bool is_hosted_openai_tool_type(std::string_view type) noexcept;
 
 std::string make_models_list(const std::string& model_id, std::int64_t created,
-                             std::uint32_t max_model_len, bool vision);
+                             std::uint32_t max_model_len, bool vision,
+                             const ninfer::ModelMetadata& metadata);
 std::string make_model_object(const std::string& model_id, std::int64_t created,
-                              std::uint32_t max_model_len, bool vision);
+                              std::uint32_t max_model_len, bool vision,
+                              const ninfer::ModelMetadata& metadata);
 std::string make_error_body(const ApiError& error);
 std::int64_t unix_time_now();
 

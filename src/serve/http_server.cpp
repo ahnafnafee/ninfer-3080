@@ -637,7 +637,8 @@ void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) c
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {
     res.set_content(make_models_list(public_model_id_, unix_time_now(), options_.max_context,
-                                     options_.enable_vision),
+                                     options_.enable_vision,
+                                     model_metadata_),
                     "application/json");
 }
 
@@ -653,7 +654,8 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
         return;
     }
     res.set_content(make_model_object(public_model_id_, unix_time_now(), options_.max_context,
-                                      options_.enable_vision),
+                                      options_.enable_vision,
+                                      model_metadata_),
                     "application/json");
 }
 
@@ -694,6 +696,7 @@ void HttpServer::attach(GenerationService& service) {
     }
     const ninfer::LoadSummary load = service.load_summary();
     public_model_id_               = resolve_public_model_id(options_, load.model_name);
+    model_metadata_                = service.model_metadata();
     service_                       = &service;
     // memory_summary() takes the Engine execution lock; read it once here, never per /v1/load poll.
     const ninfer::MemorySummary memory = service.memory_summary();
