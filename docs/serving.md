@@ -375,6 +375,87 @@ and reasoning-token details; choices carry `logprobs: null` when log probabiliti
 requested, and aggregate assistant messages carry `refusal: null` because refusal output is not
 supported.
 
+### llama.cpp-compatible request observations
+
+Every successful Chat Completions response includes a top-level `timings` object. This is a
+llama.cpp-compatible response extension, not an OpenAI field. In a stream it is attached to the
+last JSON chunk before `[DONE]`: the empty `choices` usage chunk when
+`stream_options.include_usage` is true, otherwise the finish-reason chunk.
+
+```json
+{
+  "timings": {
+    "cache_n": 4096,
+    "prompt_n": 4096,
+    "prompt_ms": 83.0,
+    "prompt_per_token_ms": 0.020263671875,
+    "prompt_per_second": 49349.39759036145,
+    "predicted_n": 129,
+    "predicted_ms": 1140.0,
+    "predicted_per_token_ms": 8.90625,
+    "predicted_per_second": 112.28070175438596
+  }
+}
+```
+
+`cache_n` is the exact Engine-proven reused prompt prefix and `prompt_n` is the remaining prompt
+suffix, so `cache_n + prompt_n` equals `usage.prompt_tokens`. Prompt time starts when admission
+commits that exact reuse choice and ends when the first output token is committed. Generation time
+starts at that first token and ends at the last committed output token. Accordingly, generation
+speed uses `max(predicted_n - 1, 0)` token intervals; the first token belongs to prompt latency and
+is not counted again as a decode interval. Zero-token, one-token, zero-duration, and exact-cache-hit
+cases report finite zero rates rather than `NaN` or infinity. Speculative requests additionally
+include terminal `draft_n` and `draft_n_accepted` when draft work occurred.
+
+Set top-level `timings_per_token: true` on a streaming request to attach the latest cumulative
+timing snapshot to each visible reasoning or content chunk and, when `return_progress` is also
+enabled, to each prompt-processing chunk. During prompt processing that snapshot is prompt-only:
+`predicted_n`, `predicted_ms`, `predicted_per_token_ms`, and `predicted_per_second` remain zero
+until the first output commit, `prompt_ms` is the elapsed wall time since committed admission, and
+the prompt rates span the processed suffix (`processed - cache`) tokens rather than the complete
+prompt. This does not enable terminal timings, which are always present. A model commit that is
+temporarily hidden by UTF-8, stop-string, reasoning, or tool-call buffering still advances the
+cumulative token count; the next visible chunk observes that committed frontier. The option
+increases response serialization and transport volume and is off by default.
+
+Set top-level `return_progress: true` together with `stream: true` to receive prompt-processing
+chunks:
+
+```json
+{
+  "prompt_progress": {
+    "total": 8192,
+    "cache": 4096,
+    "processed": 6144,
+    "time_ms": 41
+  },
+  "timings": {
+    "cache_n": 4096,
+    "prompt_n": 4096,
+    "prompt_ms": 41.5,
+    "prompt_per_token_ms": 0.020263671875,
+    "prompt_per_second": 49349.39759036145,
+    "predicted_n": 0,
+    "predicted_ms": 0.0,
+    "predicted_per_token_ms": 0.0,
+    "predicted_per_second": 0.0
+  }
+}
+```
+
+The `timings` object appears only when `timings_per_token: true` is also set. It reports the same
+prompt-only live snapshot described above: `time_ms` is integral milliseconds while
+`timings.prompt_ms` keeps sub-millisecond precision, and the prompt rates cover the 2,048
+processed suffix tokens so far.
+
+The initial event has `processed == cache`. Later cumulative events are published only after the
+corresponding prefill unit commits, may be coalesced when the consumer is slower than prefill, and
+never move backwards. The final event has `processed == total` and precedes the first output delta.
+For an exact full-prefix hit, the initial event already has `cache == processed == total` and no
+synthetic prompt work is reported. `time_ms` is elapsed wall time since committed admission;
+clients may calculate actual suffix progress as `(processed-cache)/(total-cache)` when the
+denominator is nonzero.
+
 ### Multimodal request
 
 Start the server with `--vision` before sending media:
