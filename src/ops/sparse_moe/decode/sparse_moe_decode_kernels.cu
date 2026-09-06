@@ -202,32 +202,59 @@ __device__ __forceinline__ void dot_two_rows(const std::uint8_t* codes, const st
         // Four adjacent Q4 groups form one 128-byte warp transaction. Each lane owns eight
         // consecutive K values, so one mantissa decode feeds eight FP32 FMAs instead of issuing
         // four scalar code-pair/decode iterations.
+        //
+        // Two such quads are in flight at a time. Both quads' code words and scales are issued
+        // before either is decoded, so the decode and the FMA chain of the first quad cover the
+        // memory latency of the second. One quad in flight leaves the load unit idle for the
+        // whole decode, and this path is latency-bound rather than bandwidth-bound: at the
+        // operator bench's trace-like point it demands 55% of the measured DRAM read ceiling.
+        //
+        // The groups are still visited in ascending order, so the order of additions into acc0
+        // and acc1 is unchanged and the output is bit-identical.
+        constexpr int kQuadsInFlight = 2;
+        // What the pairing needs is that the span this loop walks, (k_end - k_begin) /
+        // Codec::kGroupK, is a multiple of 4 * kQuadsInFlight. That is a property of the
+        // arguments and cannot be asserted here; every caller passes k_begin = 0 and
+        // k_end = K, which reduces it to the compile-time condition below.
+        static_assert(kGroups % (4 * kQuadsInFlight) == 0);
         const int lane_group    = lane >> 3;
         const int lane_in_group = lane & 7;
-        for (int group_base = first_group; group_base < last_group; group_base += 4) {
-            const int group           = group_base + lane_group;
-            const std::int64_t index0 = static_cast<std::int64_t>(row0) * kGroups + group;
-            const std::int64_t index1 = static_cast<std::int64_t>(row1) * kGroups + group;
-            const std::uint32_t packed0 =
-                *reinterpret_cast<const std::uint32_t*>(codes + index0 * 32 + lane_in_group * 4);
-            const std::uint32_t packed1 =
-                *reinterpret_cast<const std::uint32_t*>(codes + index1 * 32 + lane_in_group * 4);
-            const auto scale0 = *reinterpret_cast<const std::uint16_t*>(scales + index0 * 2);
-            const auto scale1 = *reinterpret_cast<const std::uint16_t*>(scales + index1 * 2);
-            float weights0[8];
-            float weights1[8];
-            Q4SimtDecodeAtom::decode_eight(packed0, scale0, weights0);
-            Q4SimtDecodeAtom::decode_eight(packed1, scale1, weights1);
-            const uint4 input     = load_vec<uint4>(x + group * Codec::kGroupK + lane_in_group * 8);
-            const float2 x0       = bf16x2_bits_to_float2(input.x);
-            const float2 x1       = bf16x2_bits_to_float2(input.y);
-            const float2 x2       = bf16x2_bits_to_float2(input.z);
-            const float2 x3       = bf16x2_bits_to_float2(input.w);
-            const float values[8] = {x0.x, x0.y, x1.x, x1.y, x2.x, x2.y, x3.x, x3.y};
+        for (int group_base = first_group; group_base < last_group;
+             group_base += 4 * kQuadsInFlight) {
+            std::uint32_t packed0[kQuadsInFlight];
+            std::uint32_t packed1[kQuadsInFlight];
+            std::uint16_t scale0[kQuadsInFlight];
+            std::uint16_t scale1[kQuadsInFlight];
 #pragma unroll
-            for (int item = 0; item < 8; ++item) {
-                acc0 = fmaf(weights0[item], values[item], acc0);
-                acc1 = fmaf(weights1[item], values[item], acc1);
+            for (int quad = 0; quad < kQuadsInFlight; ++quad) {
+                const int group           = group_base + quad * 4 + lane_group;
+                const std::int64_t index0 = static_cast<std::int64_t>(row0) * kGroups + group;
+                const std::int64_t index1 = static_cast<std::int64_t>(row1) * kGroups + group;
+                packed0[quad] = *reinterpret_cast<const std::uint32_t*>(codes + index0 * 32 +
+                                                                        lane_in_group * 4);
+                packed1[quad] = *reinterpret_cast<const std::uint32_t*>(codes + index1 * 32 +
+                                                                        lane_in_group * 4);
+                scale0[quad]  = *reinterpret_cast<const std::uint16_t*>(scales + index0 * 2);
+                scale1[quad]  = *reinterpret_cast<const std::uint16_t*>(scales + index1 * 2);
+            }
+#pragma unroll
+            for (int quad = 0; quad < kQuadsInFlight; ++quad) {
+                const int group = group_base + quad * 4 + lane_group;
+                float weights0[8];
+                float weights1[8];
+                Q4SimtDecodeAtom::decode_eight(packed0[quad], scale0[quad], weights0);
+                Q4SimtDecodeAtom::decode_eight(packed1[quad], scale1[quad], weights1);
+                const uint4 input = load_vec<uint4>(x + group * Codec::kGroupK + lane_in_group * 8);
+                const float2 x0   = bf16x2_bits_to_float2(input.x);
+                const float2 x1   = bf16x2_bits_to_float2(input.y);
+                const float2 x2   = bf16x2_bits_to_float2(input.z);
+                const float2 x3   = bf16x2_bits_to_float2(input.w);
+                const float values[8] = {x0.x, x0.y, x1.x, x1.y, x2.x, x2.y, x3.x, x3.y};
+#pragma unroll
+                for (int item = 0; item < 8; ++item) {
+                    acc0 = fmaf(weights0[item], values[item], acc0);
+                    acc1 = fmaf(weights1[item], values[item], acc1);
+                }
             }
         }
     } else if constexpr (Codec::kD3Q8Plane) {
