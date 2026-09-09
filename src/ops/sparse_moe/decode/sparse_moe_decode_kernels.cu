@@ -187,7 +187,7 @@ struct Q8Codec {
     }
 };
 
-template <class Codec, int K>
+template <class Codec, int K, int QuadsInFlight = 2>
 __device__ __forceinline__ void dot_two_rows(const std::uint8_t* codes, const std::uint8_t* high,
                                              const std::uint8_t* scales, int row0, int row1,
                                              const __nv_bfloat16* x, int k_begin, int k_end,
@@ -203,15 +203,20 @@ __device__ __forceinline__ void dot_two_rows(const std::uint8_t* codes, const st
         // consecutive K values, so one mantissa decode feeds eight FP32 FMAs instead of issuing
         // four scalar code-pair/decode iterations.
         //
-        // Two such quads are in flight at a time. Both quads' code words and scales are issued
-        // before either is decoded, so the decode and the FMA chain of the first quad cover the
-        // memory latency of the second. One quad in flight leaves the load unit idle for the
-        // whole decode, and this path is latency-bound rather than bandwidth-bound: at the
-        // operator bench's trace-like point it demands 55% of the measured DRAM read ceiling.
+        // QuadsInFlight quads are in flight at a time. All of their code words and scales are
+        // issued before any is decoded, so the decode and the FMA chain of one quad cover the
+        // memory latency of the next. One quad in flight leaves the load unit idle for the whole
+        // decode, which pays off where the path is latency-bound rather than bandwidth-bound: at
+        // the operator bench's trace-like point it demands 55% of the measured DRAM read ceiling.
         //
-        // The groups are still visited in ascending order, so the order of additions into acc0
-        // and acc1 is unchanged and the output is bit-identical.
-        constexpr int kQuadsInFlight = 2;
+        // The two callers want different depths and get them. The T >= 2 path-tiled kernel takes
+        // the default 2; sparse_moe_d3_nine_warp_kernel, the T = 1 decode path, keeps 1, because
+        // at one token per launch it has a fifth of the occupancy and pairing costs it 6% in the
+        // round and 10% on the operator bench.
+        //
+        // The groups are still visited in ascending order at either depth, so the order of
+        // additions into acc0 and acc1 is unchanged and the output is bit-identical.
+        constexpr int kQuadsInFlight = QuadsInFlight;
         // What the pairing needs is that the span this loop walks, (k_end - k_begin) /
         // Codec::kGroupK, is a multiple of 4 * kQuadsInFlight. That is a property of the
         // arguments and cannot be asserted here; every caller passes k_begin = 0 and
@@ -392,9 +397,9 @@ __global__ void sparse_moe_d3_nine_warp_kernel(
         pdl::wait_for_dependencies();
         const int expert   = ids[warp];
         const int row_base = expert * 1024;
-        dot_two_rows<RoutedCodec, kHidden>(routed_codes, routed_high, routed_scales, row_base + j,
-                                           row_base + kIntermediate + j, x_shared, 0, kHidden, gate,
-                                           up);
+        dot_two_rows<RoutedCodec, kHidden, 1>(routed_codes, routed_high, routed_scales,
+                                              row_base + j, row_base + kIntermediate + j, x_shared,
+                                              0, kHidden, gate, up);
     } else {
         dot_two_rows<Q8Codec, kHidden>(shared_codes, nullptr, shared_scales, j, kIntermediate + j,
                                        x_shared, 0, kHidden, gate, up);
