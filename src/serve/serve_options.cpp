@@ -218,6 +218,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     bool kv_capacity_explicit        = false;
     bool device_explicit             = false;
     bool context_capacity_explicit   = false;
+    std::optional<std::size_t> kv_headroom_mib;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
@@ -247,6 +248,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--kv-capacity") {
             options.kv_capacity  = parse_kv_capacity(require_value("--kv-capacity"));
             kv_capacity_explicit = true;
+        } else if (arg == "--kv-headroom-mib") {
+            const std::uint64_t mib =
+                parse_u64(require_value("--kv-headroom-mib"), "kv-headroom-mib");
+            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--kv-headroom-mib is out of range");
+            }
+            kv_headroom_mib = static_cast<std::size_t>(mib);
         } else if (arg == "--max-concurrency") {
             options.max_concurrency = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-concurrency"), "max-concurrency"));
@@ -484,6 +492,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    }
+    if (kv_headroom_mib.has_value()) {
+        if (options.kv_capacity.mode != KvCapacityMode::Automatic) {
+            throw std::invalid_argument("--kv-headroom-mib requires --kv-capacity auto");
+        }
+        options.kv_capacity = KvCapacityPolicy::automatic(*kv_headroom_mib << 20);
     }
     if (!options.allow_prefix_reuse) {
         if (context_capacity_explicit) {
