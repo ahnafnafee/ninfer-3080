@@ -55,6 +55,10 @@ void validate_options(const EngineOptions& options) {
         throw std::invalid_argument(
             "Engine media_live_bytes must be nonzero when Vision is enabled");
     }
+    if (options.cuda_graph_allowance_bytes != 0 && !options.use_cuda_graph) {
+        throw std::invalid_argument(
+            "Engine cuda_graph_allowance_bytes requires CUDA graphs to be enabled");
+    }
     if (options.media_preprocess_threads > 64) {
         throw std::invalid_argument("Engine media_preprocess_threads must be in [0,64]");
     }

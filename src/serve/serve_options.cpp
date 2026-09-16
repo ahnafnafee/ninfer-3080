@@ -91,7 +91,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--default-reasoning-effort none|minimal|low|medium|high|xhigh|max] "
            "[--vision] [--vision-residency resident|overlay] [--vision-max-merged N] "
-           "[--no-cuda-graph] [--no-prefix-reuse] [--auto-prefix-grid] [--devices N,M,...] [--stage-layers A,B,...] "
+           "[--no-cuda-graph] [--cuda-graph-allowance-mib N] [--no-prefix-reuse] [--auto-prefix-grid] [--devices N,M,...] [--stage-layers A,B,...] "
            "[--chat-template FILE] "
            "[--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] "
            "[--gdn-state-fp16] [--rope-yarn] [--wddm-evictable-budget] "
@@ -134,6 +134,9 @@ std::string serve_usage_text(const char* argv0) {
            "       --auto-prefix-grid offers shared candidates on a token grid so unrelated "
            "callers whose prompts start alike share a cached prefix without any client hint; a grid "
            "frontier is only published once two callers have both asked for it\n"
+           "       --cuda-graph-allowance-mib N overrides the total CUDA Graph driver-state "
+           "allowance in MiB, which is subtracted from the KV sizing budget; "
+           "0 keeps the computed per-profile allowance\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
            "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
@@ -414,6 +417,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.vision_max_merged_tokens = static_cast<std::uint32_t>(merged);
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
+        } else if (arg == "--cuda-graph-allowance-mib") {
+            const std::uint64_t mib =
+                parse_u64(require_value("--cuda-graph-allowance-mib"), "cuda-graph-allowance-mib");
+            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--cuda-graph-allowance-mib is out of range");
+            }
+            options.cuda_graph_allowance_mib = mib;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
         } else if (arg == "--auto-prefix-grid") {
@@ -548,6 +558,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (options.enable_thinking == false && options.default_reasoning_effort &&
         *options.default_reasoning_effort != RequestedReasoningEffort::None) {
         throw std::invalid_argument("--default-reasoning-effort conflicts with --no-thinking");
+    }
+    if (options.cuda_graph_allowance_mib != 0 && !options.use_cuda_graph) {
+        throw std::invalid_argument(
+            "--cuda-graph-allowance-mib requires CUDA graphs (omit --no-cuda-graph)");
     }
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {

@@ -536,6 +536,29 @@ int main() {
     failures += check(!secret_present, "startup argv retained the API key");
     failures += check(redaction_present, "startup argv omitted the API-key redaction marker");
 
+    const ServeOptions graph_allowance =
+        parse({"ninfer-serve", "model.ninfer", "--cuda-graph-allowance-mib", "512"});
+    failures += check(graph_allowance.cuda_graph_allowance_mib == 512 &&
+                          graph_allowance.use_cuda_graph,
+                      "--cuda-graph-allowance-mib did not preserve its value");
+    failures += check(defaults.cuda_graph_allowance_mib == 0,
+                      "omitted --cuda-graph-allowance-mib must keep the computed allowance");
+    failures += check(serve_usage_text("ninfer-serve").find("--cuda-graph-allowance-mib") !=
+                          std::string::npos,
+                      "serve help omits --cuda-graph-allowance-mib");
+    for (const auto& extra : std::vector<std::vector<std::string>>{
+             {"--no-cuda-graph", "--cuda-graph-allowance-mib", "512"},
+             {"--cuda-graph-allowance-mib", "18446744073709551615"},
+             {"--cuda-graph-allowance-mib", "not-a-number"}}) {
+        std::vector<std::string> args{"ninfer-serve", "model.ninfer"};
+        args.insert(args.end(), extra.begin(), extra.end());
+        bool rejected = false;
+        try {
+            (void)parse(args);
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "invalid --cuda-graph-allowance-mib contract admitted");
+    }
+
     if (failures == 0) { std::cout << "ok\n"; }
 
     {

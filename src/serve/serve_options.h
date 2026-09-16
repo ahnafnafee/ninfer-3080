@@ -74,6 +74,8 @@ struct ServeOptions {
     bool prefill_a8         = true;
     bool prefill_cublas     = false;
     bool prefill_cublas_projections = true;
+    // Explicit total CUDA Graph driver-state allowance in MiB; 0 keeps the computed allowance.
+    std::uint64_t cuda_graph_allowance_mib = 0;
     bool allow_prefix_reuse = true;
     // Offer shared-prefix candidates on a content-independent token grid so unrelated callers whose
     // prompts merely start alike converge on the same frontier. Off by default: it adds host-side

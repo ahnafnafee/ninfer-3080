@@ -274,6 +274,9 @@ struct EngineOptions {
     // preprocessing. Also bounds the overlay window.
     std::uint32_t vision_max_merged_tokens = 16384;
     bool use_cuda_graph                    = true;
+    // Explicit total CUDA Graph driver-state allowance in bytes; zero keeps the
+    // computed per-profile allowance.
+    std::size_t cuda_graph_allowance_bytes = 0;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;

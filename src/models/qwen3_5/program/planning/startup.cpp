@@ -1024,6 +1024,9 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
                                 "DFlash exact-b graph allowance");
             }
         }
+        if (inputs.cuda_graph_allowance_bytes != 0) {
+            impl->graph_allowance_bytes = inputs.cuda_graph_allowance_bytes;
+        }
     }
 
     impl->device_reservation_bytes = checked_add(
@@ -1084,6 +1087,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .rope_yarn           = planned_rope_yarn(parameters, options),
         .features            = models::load_options(options),
         .use_cuda_graph      = options.use_cuda_graph,
+        .cuda_graph_allowance_bytes = options.cuda_graph_allowance_bytes,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
         .structured_output   = options.structured_output,
         .device              = options.device,
