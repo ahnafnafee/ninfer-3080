@@ -1091,6 +1091,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--no-webui` | stop serving a WebUI built in with `NINFER_WEBUI_DIR` | served when built in |
 | `--structured-output` | accept JSON and JSON Schema response formats (see [Structured output](#structured-output)) | off |
+| `--thinking-budget-message TEXT` | message a thinking-enabled request receives at its thinking budget instead of the built-in notice; the canonical `</think>` close is appended when missing | built-in |
 | `--default-reasoning-effort E` | effort for requests that name none: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
 | `--vision-residency resident\|overlay` | `overlay` keeps the Vision tower in pinned host memory and encodes each image inside a window borrowed from the evict-ranked text weight tail, so `--vision` no longer reserves device memory and `--kv-capacity auto` resolves the no-vision capacity; requires `--vision` and CUDA virtual memory management | `resident` |

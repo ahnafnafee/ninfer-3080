@@ -86,6 +86,9 @@ struct ServeOptions {
     std::optional<std::uint32_t> default_thinking_budget;
     // Effort for requests that name none; a request that disables thinking is left alone.
     std::optional<RequestedReasoningEffort> default_reasoning_effort;
+    // End-of-thinking message fed to the model when it hits the thinking budget; empty
+    // preserves the model's built-in control suffix.
+    std::string thinking_budget_message;
     int default_max_tokens = kDefaultMaxTokens;
     bool enable_cors       = false; // send permissive CORS headers for browser UIs
     bool enable_webui      = true;  // serve a WebUI compiled in with NINFER_WEBUI_DIR

@@ -88,7 +88,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
-           "[--default-max-tokens N] [--default-thinking-budget N] "
+           "[--default-max-tokens N] [--default-thinking-budget N] [--thinking-budget-message TEXT] "
            "[--default-reasoning-effort none|minimal|low|medium|high|xhigh|max] "
            "[--vision] [--vision-residency resident|overlay] [--vision-max-merged N] "
            "[--no-cuda-graph] [--cuda-graph-allowance-mib N] [--no-prefix-reuse] [--auto-prefix-grid] [--devices N,M,...] [--stage-layers A,B,...] "
@@ -143,6 +143,8 @@ std::string serve_usage_text(const char* argv0) {
            "--host-kv-mib uses MiB\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
            "control tokens count toward the request output limit\n"
+           "       --thinking-budget-message replaces the end-of-thinking notice a request gets "
+           "at its thinking budget; the canonical </think> close is appended when missing\n"
            "       --default-reasoning-effort applies to requests that set no effort and do not "
            "disable thinking; a request effort overrides it\n"
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
@@ -397,6 +399,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                                             "medium, high, xhigh, or max");
             }
             options.default_reasoning_effort = *effort;
+        } else if (arg == "--thinking-budget-message") {
+            options.thinking_budget_message = require_value("--thinking-budget-message");
+            if (options.thinking_budget_message.empty()) {
+                throw std::invalid_argument("--thinking-budget-message must not be empty");
+            }
         } else if (arg == "--vision") {
             options.enable_vision = true;
         } else if (arg == "--vision-residency") {
