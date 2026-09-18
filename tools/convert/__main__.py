@@ -19,6 +19,17 @@ from .sources.safetensors import SafetensorsSource
 from .ternary import RECIPES as TERNARY_RECIPES
 
 
+def _open_named_source(name: str, path: Path):
+    if path.suffix == ".gguf":
+        # The ternary recipe reads PrismML's block formats itself, without gguf-py.
+        if name == "ternary":
+            return GGUFFile(path)
+        from .sources.gguf_source import GGUFSource
+
+        return GGUFSource(path)
+    return SafetensorsSource(path)
+
+
 class SourceInputs(Mapping):
     """Named optional sources are opened only when a recipe or component requests one."""
 
@@ -33,12 +44,9 @@ class SourceInputs(Mapping):
                 raise ValueError(
                     f"selected recipe requires source {name!r}; provide --source {name}=PATH"
                 )
-            opener = (
-                GGUFFile
-                if Path(self._paths[name]).suffix == ".gguf"
-                else SafetensorsSource
+            self._sources[name] = self._stack.enter_context(
+                _open_named_source(name, self._paths[name])
             )
-            self._sources[name] = self._stack.enter_context(opener(self._paths[name]))
         return self._sources[name]
 
     def __iter__(self):
