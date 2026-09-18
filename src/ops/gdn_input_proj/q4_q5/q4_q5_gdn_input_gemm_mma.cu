@@ -119,6 +119,23 @@ void q4_q5_gdn_input_grouped_mma_c64_launch(const Tensor& x, const Weight& qk_we
     launch_route<GdnInputC64Schedule>(x, qk_weight, value_z_weight, qkv, z, stream);
 }
 
+// Upstream's 32-row tiles for the 13..32 and 33..64 column bands of a native sm_120 build.
+void q4_q5_gdn_input_grouped_mma_r32_c32_s2_launch(const Tensor& x, const Weight& qk_weight,
+                                                   const Weight& value_z_weight, Tensor& qkv,
+                                                   Tensor& z, cudaStream_t stream) {
+    launch_route<GemmCfg<32, 32, 64, 16, 16, 2, 1, false, true, true>>(x, qk_weight,
+                                                                        value_z_weight, qkv, z,
+                                                                        stream);
+}
+
+void q4_q5_gdn_input_grouped_mma_r32_c64_s4_launch(const Tensor& x, const Weight& qk_weight,
+                                                   const Weight& value_z_weight, Tensor& qkv,
+                                                   Tensor& z, cudaStream_t stream) {
+    launch_route<GemmCfg<32, 64, 64, 16, 16, 4, 1, false, true, true>>(x, qk_weight,
+                                                                        value_z_weight, qkv, z,
+                                                                        stream);
+}
+
 void q4_q5_gdn_input_grouped_mma_launch(const Tensor& x, const Weight& qk_weight,
                                         const Weight& value_z_weight, Tensor& qkv, Tensor& z,
                                         cudaStream_t stream) {

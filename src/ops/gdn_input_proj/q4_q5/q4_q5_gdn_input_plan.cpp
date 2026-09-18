@@ -26,6 +26,7 @@ struct RouteSpec {
     Q4Q5GdnInputScheduleId schedule;
 };
 
+#if defined(NINFER_SM8X_COMPAT)
 // The 1..6 / 7..32 boundary is measured, and it is not where the kernels' own limits suggest.
 // q4_q5_gdn_input_independent.cu accepts T up to 15 -- launch_q4 and launch_q5 both carry a
 // dedicated R8C8 route for 5..15 -- so widths 7..15 look like a free extension of the cheap
@@ -189,6 +190,15 @@ constexpr std::array<RouteSpec, 3> kRoutes{{
     {{33, 64}, Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C64},
     {{65, kAnyCols}, Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128},
 }};
+#else
+// The native sm_120 build keeps upstream's column bands, tuned on that architecture.
+constexpr std::array<RouteSpec, 4> kRoutes{{
+    {{1, 12}, Q4Q5GdnInputScheduleId::IndependentDirectFixed},
+    {{13, 32}, Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C32S2},
+    {{33, 64}, Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C64S4},
+    {{65, kAnyCols}, Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128},
+}};
+#endif
 
 constexpr bool catalog_is_closed() noexcept {
     std::int64_t expected = 1;
@@ -225,6 +235,10 @@ const char* q4_q5_gdn_input_schedule_name(Q4Q5GdnInputScheduleId schedule) noexc
         return "gdn_input_proj.q4_q5.grouped_mixed.mma.r64.c128";
     case Q4Q5GdnInputScheduleId::SmallTMma:
         return "gdn_input_proj.q4_q5.small_t.mma";
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C32S2:
+        return "gdn_input_proj.q4_q5.grouped_mixed.mma.r32.c32.s2";
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C64S4:
+        return "gdn_input_proj.q4_q5.grouped_mixed.mma.r32.c64.s4";
     }
     return "gdn_input_proj.q4_q5.unknown";
 }
@@ -278,6 +292,14 @@ void q4_q5_gdn_input_execute_schedule(Q4Q5GdnInputScheduleId schedule, const Ten
         return;
     case Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128:
         q4_q5_gdn_input_grouped_mma_launch(x, qk_weight, value_z_weight, qkv, z, stream);
+        return;
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C32S2:
+        q4_q5_gdn_input_grouped_mma_r32_c32_s2_launch(x, qk_weight, value_z_weight, qkv, z,
+                                                      stream);
+        return;
+    case Q4Q5GdnInputScheduleId::GroupedMixedMmaR32C64S4:
+        q4_q5_gdn_input_grouped_mma_r32_c64_s4_launch(x, qk_weight, value_z_weight, qkv, z,
+                                                      stream);
         return;
     case Q4Q5GdnInputScheduleId::SmallTMma: {
         Tensor qk    = qkv.slice(0, 0, problem.qk_rows);

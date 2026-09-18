@@ -120,6 +120,8 @@ const char* q4_q5_attn_input_schedule_name(Q4Q5AttnInputScheduleId schedule) noe
         return "attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c32.s4";
     case Q4Q5AttnInputScheduleId::GroupedHomogeneousPairMmaR32C64S4:
         return "attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c64.s4";
+    case Q4Q5AttnInputScheduleId::MixedR32C32S2:
+        return "attn_input_proj.q4_q5.mixed.r32.c32.s2";
     case Q4Q5AttnInputScheduleId::MixedR32C64S3:
         return "attn_input_proj.q4_q5.mixed.r32.c64.s3";
     case Q4Q5AttnInputScheduleId::PairR32C64S3:
@@ -144,12 +146,23 @@ Q4Q5AttnInputPlan q4_q5_attn_input_resolve_plan(const Q4Q5AttnInputProblem& prob
             "Q4/Q5 attention input: exact problem or column count is not admitted");
     }
 
+#if defined(NINFER_SM8X_COMPAT)
     // One source of truth: the table above. It used to sit here as dead code next to a hardcoded
     // if-chain carrying upstream's sm_120 boundaries, so the tuned table was never consulted.
     for (const RouteSpec& route : kRoutes) {
         if (route.cols.contains(problem.cols)) { return {route.schedule}; }
     }
     throw std::invalid_argument("Q4/Q5 attention input: column count is not covered by any route");
+#else
+    // The native sm_120 build keeps upstream's column bands, tuned on that architecture.
+    if (problem.cols <= 12) return {Q4Q5AttnInputScheduleId::ParentSplitFixed};
+    if (problem.cols <= 32) return {Q4Q5AttnInputScheduleId::MixedR32C32S2};
+    if (problem.cols <= 64) return {Q4Q5AttnInputScheduleId::MixedR32C64S3};
+    if (problem.cols <= 104) return {Q4Q5AttnInputScheduleId::PairR32C64S3};
+    if (problem.cols <= 128 || problem.cols >= 193)
+        return {Q4Q5AttnInputScheduleId::MixedR64C128S2};
+    return {Q4Q5AttnInputScheduleId::PairR32C64S4};
+#endif
 }
 
 void q4_q5_attn_input_execute_plan(const Q4Q5AttnInputPlan& plan, const Tensor& x,
@@ -175,6 +188,10 @@ void q4_q5_attn_input_execute_plan(const Q4Q5AttnInputPlan& plan, const Tensor& 
     case Q4Q5AttnInputScheduleId::GroupedHomogeneousPairMmaR32C64S4:
         q4_q5_attn_input_grouped_mma_r32_c64_s4_launch(x, query_key_weight, gate_value_weight, q,
                                                        gate, k, v, stream);
+        return;
+    case Q4Q5AttnInputScheduleId::MixedR32C32S2:
+        q4_q5_attn_input_mixed_r32_c32_s2_launch(x, query_key_weight, gate_value_weight, q, gate, k,
+                                                 v, stream);
         return;
     case Q4Q5AttnInputScheduleId::MixedR32C64S3:
         q4_q5_attn_input_mixed_r32_c64_s3_launch(x, query_key_weight, gate_value_weight, q, gate, k,

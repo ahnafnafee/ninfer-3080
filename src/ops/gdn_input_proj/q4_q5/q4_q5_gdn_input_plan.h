@@ -19,6 +19,8 @@ enum class Q4Q5GdnInputScheduleId {
     GroupedMixedMmaR64C64,
     GroupedMixedMmaR64C128,
     SmallTMma,
+    GroupedMixedMmaR32C32S2,
+    GroupedMixedMmaR32C64S4,
 };
 
 struct Q4Q5GdnInputProblem {

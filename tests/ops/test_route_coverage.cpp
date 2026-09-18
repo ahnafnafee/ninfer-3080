@@ -212,6 +212,7 @@ int main() {
                        })},
                        {"attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c32.s4",
                         "attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c64.s4",
+                        "attn_input_proj.q4_q5.mixed.r32.c32.s2",
                         "attn_input_proj.q4_q5.pair.r32.c64.s3",
                         "attn_input_proj.q4_q5.pair.r32.c64.s4",
                         "attn_input_proj.q4_q5.parent_split_fixed"}));
@@ -264,11 +265,12 @@ int main() {
     //   q4_q5_attn_input    4  grouped_r32_c64_s4, pair_r32_c64_s3, pair_r32_c64_s4 -- the family
     //                          whose dispatch held both switch bugs the catch-up merge shipped --
     //                          and ParentSplitFixed since 2026-09-11, when the small-T MMA took
-    //                          1..8 from it (q4_q5_attn_input_plan.cpp).
+    //                          1..8 from it (q4_q5_attn_input_plan.cpp); MixedR32C32S2 since the
+    //                          2026-09-24 catch-up, upstream's 13..32 band on a native sm_120 build.
     //
     // All of them are kept on purpose: deleting an upstream schedule costs merge effort at every
     // future catch-up for no measured gain here. The point is that the set is written down.
-    constexpr std::size_t kExpectedUnrouted = 30;
+    constexpr std::size_t kExpectedUnrouted = 31;
     if (total != kExpectedUnrouted) {
         std::cerr << "route coverage changed: " << total << " unrouted schedules, expected "
                   << kExpectedUnrouted
