@@ -168,7 +168,7 @@ std::string usage_text(const char* argv0) {
            "--vision-residency overlay keeps the Vision tower in host memory and borrows device "
            "memory per image; --vision-max-merged bounds one item's merged tokens (default 16384).\n"
            "--json constrains output to a JSON object; --json-schema FILE enforces a supported "
-           "JSON schema. Both disable thinking.\n"
+           "JSON schema. Thinking defaults off; an explicit effort or budget enables it.\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "
            "toward --max-new.\n"
            "--devices N,M,... splits the model's layers into one pipeline stage per GPU, each owning "
@@ -380,12 +380,13 @@ Options parse_options(int argc, char** argv) {
     }
     if (options.structured_output.kind != StructuredOutputKind::None) {
         if (options.raw_output || !options.stop_strings.empty() ||
-            !options.stop_token_ids.empty() || options.thinking_budget ||
-            (options.reasoning_effort && options.reasoning_effort != ReasoningEffort::None)) {
+            !options.stop_token_ids.empty()) {
             throw std::invalid_argument(
-                "structured output requires decoded text, default stops, and thinking disabled");
+                "structured output requires decoded text and default stops");
         }
-        options.enable_thinking = false;
+        if (!options.reasoning_effort && !options.thinking_budget) {
+            options.enable_thinking = false;
+        }
     }
     if (options.enable_thinking == false && options.reasoning_effort &&
         *options.reasoning_effort != ReasoningEffort::None) {
