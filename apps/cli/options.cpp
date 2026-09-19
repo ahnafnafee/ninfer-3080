@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string_view>
 
@@ -165,6 +167,8 @@ std::string usage_text(const char* argv0) {
            "--vision enables image/video input and loads the fixed Vision GPU allocations.\n"
            "--vision-residency overlay keeps the Vision tower in host memory and borrows device "
            "memory per image; --vision-max-merged bounds one item's merged tokens (default 16384).\n"
+           "--json constrains output to a JSON object; --json-schema FILE enforces a supported "
+           "JSON schema. Both disable thinking.\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "
            "toward --max-new.\n"
            "--devices N,M,... splits the model's layers into one pipeline stage per GPU, each owning "
@@ -267,6 +271,17 @@ Options parse_options(int argc, char** argv) {
             options.prefill_cublas = true;
         } else if (arg == "--no-prefill-cublas-projections") {
             options.prefill_cublas_projections = false;
+        } else if (arg == "--json" || arg == "--json-schema") {
+            if (options.structured_output.kind != StructuredOutputKind::None) {
+                throw std::invalid_argument("choose exactly one structured output mode");
+            }
+            options.structured_output.kind = arg == "--json" ? StructuredOutputKind::JsonObject
+                                                             : StructuredOutputKind::JsonSchema;
+            if (arg == "--json-schema") {
+                std::ifstream schema(value(arg));
+                if (!schema) { throw std::invalid_argument("cannot read JSON schema file"); }
+                options.structured_output.schema.assign(std::istreambuf_iterator<char>(schema), {});
+            }
         } else if (arg == "--raw-output") {
             options.raw_output = true;
         } else if (arg == "--print-token-ids") {
@@ -362,6 +377,15 @@ Options parse_options(int argc, char** argv) {
     product::validate_speculative_cli_options(options.speculative);
     if (options.vision_residency == VisionResidency::Overlay && !options.enable_vision) {
         throw std::invalid_argument("--vision-residency overlay requires --vision");
+    }
+    if (options.structured_output.kind != StructuredOutputKind::None) {
+        if (options.raw_output || !options.stop_strings.empty() ||
+            !options.stop_token_ids.empty() || options.thinking_budget ||
+            (options.reasoning_effort && options.reasoning_effort != ReasoningEffort::None)) {
+            throw std::invalid_argument(
+                "structured output requires decoded text, default stops, and thinking disabled");
+        }
+        options.enable_thinking = false;
     }
     if (options.enable_thinking == false && options.reasoning_effort &&
         *options.reasoning_effort != ReasoningEffort::None) {

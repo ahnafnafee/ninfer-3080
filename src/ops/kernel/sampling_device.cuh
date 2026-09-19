@@ -259,6 +259,10 @@ __device__ __forceinline__ int sampling_dist_offset(int col, int j) {
 __device__ __forceinline__ float sampling_adjusted_logit(float raw, int v, const SamplingConfig& c,
                                                          const std::int32_t* overlay = nullptr,
                                                          int overlay_len             = 0) {
+    if (c.token_mask != nullptr &&
+        (c.token_mask[overlay_len * c.token_mask_stride + v / 32] & (1U << (v % 32))) == 0) {
+        return -CUDART_INF_F;
+    }
     // A non-finite raw logit must sort as itself, unperturbed. Penalty subtraction on NaN is legal
     // IEEE-754 but not required to preserve the operand's bit pattern, and CUDA's hardware NaN
     // canonicalization does not: `NaN - presence_penalty` comes back as a different NaN encoding
@@ -340,7 +344,7 @@ __device__ __forceinline__ void sampling_normalize_support(const SamplingConfig&
         float cum                = 0.0f;
         int support              = 0;
         for (int j = 0; j < n; ++j) {
-            if (min_p_thresh >= 0.0f && prob[j] < min_p_thresh) { break; }
+            if (prob[j] == 0.0f || (min_p_thresh >= 0.0f && prob[j] < min_p_thresh)) { break; }
             cum += prob[j];
             support = j + 1;
             if (top_p_active && cum >= top_p_target) { break; }

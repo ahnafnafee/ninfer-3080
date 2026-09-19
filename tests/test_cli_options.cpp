@@ -154,5 +154,15 @@ int main() {
                                        "--devices", "0,0", "--stage-layers", "0,64"});
                       }),
                       "a stage with no layers was accepted");
+    const auto structured = parse({"ninfer", "model.ninfer", "--prompt", "hello", "--json"});
+    failures +=
+        check(structured.structured_output.kind == ninfer::StructuredOutputKind::JsonObject &&
+                  structured.enable_thinking == false,
+              "CLI JSON mode");
+    failures += check(
+        rejects([] {
+            (void)parse({"ninfer", "model.ninfer", "--prompt", "x", "--json", "--raw-output"});
+        }),
+        "raw JSON output should be rejected");
     return failures == 0 ? 0 : 1;
 }

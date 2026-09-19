@@ -123,3 +123,8 @@ ninfer_add_test(ninfer_qwen3_5_mlp_a8_decode_test
 ninfer_add_test(ninfer_qwen3_5_lookup_draft_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_lookup_draft.cpp"
   LIBRARIES ninfer_core)
+
+ninfer_add_test(ninfer_qwen3_5_structured_round_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_structured_round.cpp"
+  LIBRARIES ninfer_model_runtime ninfer_core)
+set_tests_properties(ninfer_qwen3_5_structured_round_test PROPERTIES SKIP_RETURN_CODE 77)

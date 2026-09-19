@@ -210,6 +210,7 @@ struct GenerationRequest {
     // client can actually observe.
     bool parallel_tool_calls = true;
     SamplingParams sampling;
+    StructuredOutputOptions structured_output;
 
     [[nodiscard]] bool uses_tools() const noexcept {
         return !tools.empty() && tool_choice.mode != ToolChoiceMode::None;

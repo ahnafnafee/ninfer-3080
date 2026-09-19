@@ -1,3 +1,4 @@
+#include "serve/structured_output.h"
 #include "serve/openai_chat.h"
 #include "serve/openai_common.h"
 #include "serve/request_validation.h"
@@ -135,19 +136,6 @@ void validate_standard_output_controls(const Json& body) {
                 "nonzero top_logprobs requires alternative-token probabilities in the response, "
                 "which NInfer does not provide",
                 "top_logprobs", "logprobs_not_supported");
-        }
-    }
-
-    if (body.contains("response_format") && !body.at("response_format").is_null()) {
-        const Json& format = body.at("response_format");
-        if (!format.is_object() || !format.contains("type") || !format.at("type").is_string()) {
-            bad_request("response_format must contain a string type", "response_format");
-        }
-        if (format.at("type").get<std::string>() != "text") {
-            bad_request(
-                "this response_format requires constrained output, which NInfer cannot guarantee; "
-                "only {\"type\":\"text\"} is available",
-                "response_format", "response_format_not_supported");
         }
     }
 
@@ -975,6 +963,10 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     validate_compatibility_hints(body);
 
     OpenAIChatRequest output;
+    if (body.contains("response_format") && !body.at("response_format").is_null()) {
+        output.generation.structured_output =
+            parse_structured_output(body.at("response_format"), true, "response_format");
+    }
     // One model is resident, so an omitted model means that one; llama.cpp's WebUI omits it.
     if (body.contains("model")) {
         if (!body.at("model").is_string() || body.at("model").get<std::string>().empty()) {
