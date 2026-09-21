@@ -42,6 +42,11 @@ it a model:
 ssh -p PORT root@HOST 'MODEL_URL=https://.../model.ninfer bash -s -- --engine' < scripts/sm80-probe/probe.sh
 ```
 
+`--tests` builds and runs the op correctness suites on the card itself (they need no model), and the
+two flags combine: `bash -s -- --engine --tests`. For `--engine`, rent with at least 80 GB of disk (a
+20 GB artifact, a build tree and the CUDA image), and pass `MODEL_SHA256` next to `MODEL_URL` to check
+the download.
+
 `bash probe.sh --summarize DIR` re-prints the summary of a finished run from its output files.
 
 ## Reading the summary
