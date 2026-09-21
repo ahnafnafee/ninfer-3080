@@ -1118,6 +1118,7 @@ public:
     [[nodiscard]] FakeReleaseResult
     release_continuation(FakeContinuationHandle&& continuation) noexcept {
         released_continuations.push_back(continuation.id);
+        if (capture_feasible_after_release) { capture_assessment.physically_feasible = true; }
         advance_revision();
         return FakeReleaseResult{.status = ConsumeStatus::Consumed};
     }
@@ -1164,6 +1165,7 @@ public:
     std::uint64_t admission_inspections       = 0;
     std::uint64_t pressure_planning_sessions  = 0;
     std::uint64_t pressure_target_assessments = 0;
+    bool capture_feasible_after_release        = false;
     std::uint64_t start_calls                 = 0;
     std::uint64_t finish_calls                = 0;
     std::uint64_t abort_calls                 = 0;
@@ -3096,6 +3098,127 @@ void test_aborted_shared_capture_start_rolls_back_logical_claims() {
     (void)finish_active(manager, program, active);
 }
 
+// Portfolio arbitration cannot justify publishing a zero-demand private checkpoint over a
+// resident that still carries demand, so a saturated catalog ossifies on the first conversation.
+// A resident whose conversation continued would have been consumed into the active lane, so one
+// left catalogued with no active edge is reclaimable by publication order.
+void test_private_only_capture_reclaims_stale_resident_by_publication_order() {
+    FakeManager manager = make_manager(1, 4, 1);
+    FakeProgram program;
+    const ActiveRequest resident = start_active(manager, program, 341, make_base(341), 7);
+    (void)finish_active(manager, program, resident);
+
+    const ActiveRequest active              = start_active(manager, program, 342, make_base(342), 9);
+    program.capture_feasible_after_release  = true;
+    program.capture_assessment              = FakeCaptureAssessment{
+                     .shortlist_key          = FakeShortlistKey{.digest = 342, .frontier = 64},
+                     .protected_rebuild_work = PrefillWork{.tokens = 64},
+                     .publishes_private      = true,
+                     .publishes_shared       = false,
+                     .physically_feasible    = false,
+    };
+
+    const auto reserved =
+        manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 71}, 0, {});
+    require(reserved == FakeManager::ActiveCaptureReserveResult::Reserved,
+            "private-only capture did not reclaim a stale resident");
+    require(program.released_continuations.size() == 1,
+            "stale reclamation released the wrong number of continuations");
+    require(manager.catalog_state(0) == FakeManager::CatalogState::Vacant,
+            "reclaimed resident was left catalogued");
+
+}
+
+void test_stale_reclamation_prefers_the_oldest_publication_order() {
+    FakeManager manager = make_manager(1, 4, 1);
+    FakeProgram program;
+    // Catalogued newest-first, so a correct choice cannot come from slot order.
+    const ActiveRequest newer = start_active(manager, program, 351, make_base(351), 40);
+    (void)finish_active(manager, program, newer);
+    const ActiveRequest older = start_active(manager, program, 352, make_base(352), 5);
+    (void)finish_active(manager, program, older);
+
+    const ActiveRequest active             = start_active(manager, program, 353, make_base(353), 60);
+    program.capture_feasible_after_release = true;
+    program.capture_assessment             = FakeCaptureAssessment{
+                    .shortlist_key          = FakeShortlistKey{.digest = 353, .frontier = 64},
+                    .protected_rebuild_work = PrefillWork{.tokens = 64},
+                    .publishes_private      = true,
+                    .publishes_shared       = false,
+                    .physically_feasible    = false,
+    };
+
+    const auto reserved =
+        manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 72}, 0, {});
+    require(reserved == FakeManager::ActiveCaptureReserveResult::Reserved,
+            "stale reclamation did not reserve");
+    require(program.released_continuations.size() == 1 &&
+                program.released_continuations.front() == older.sequence.id,
+            "stale reclamation did not choose the oldest publication_order");
+
+}
+
+void test_stale_reclamation_never_takes_a_retained_active_source() {
+    FakeManager manager = make_manager(2, 3, 1);
+    FakeProgram program;
+    const FakeCacheSessionKey first_session{1};
+    const FakeCacheSessionKey second_session{2};
+    const ActiveRequest seed = start_active(
+        manager, program, 9, make_base(9, first_session, RetentionClass::LiveSession), 1);
+    (void)finish_active(manager, program, seed);
+    const ActiveRequest fork = start_active(
+        manager, program, 9, make_base(9, second_session, RetentionClass::LiveSession), 2);
+    require(program.started_source_mode == PrivateSourceMode::Retain,
+            "the resident continuation was consumed instead of retained");
+
+    program.capture_feasible_after_release = true;
+    program.capture_assessment             = FakeCaptureAssessment{
+                    .shortlist_key          = FakeShortlistKey{.digest = 9, .frontier = 64},
+                    .protected_rebuild_work = PrefillWork{.tokens = 64},
+                    .publishes_private      = true,
+                    .publishes_shared       = false,
+                    .physically_feasible    = false,
+    };
+
+    const auto reserved =
+        manager.reserve_active_capture(program, fork.lane, FakeCaptureOffer{.id = 73}, 0, {});
+    require(reserved == FakeManager::ActiveCaptureReserveResult::Skipped,
+            "stale reclamation took a source an active request still holds");
+    require(program.released_continuations.empty(),
+            "stale reclamation released a live continuation");
+    require(manager.catalog_state(0) == FakeManager::CatalogState::Catalogued,
+            "stale reclamation disturbed the retained active source");
+
+    (void)manager.abort(program, fork.lane, fork.sequence);
+}
+
+void test_stale_reclamation_does_not_run_when_the_capture_is_feasible() {
+    FakeManager manager = make_manager(1, 4, 1);
+    FakeProgram program;
+    const ActiveRequest resident = start_active(manager, program, 361, make_base(361), 3);
+    (void)finish_active(manager, program, resident);
+
+    const ActiveRequest active             = start_active(manager, program, 362, make_base(362), 4);
+    program.capture_feasible_after_release = true;
+    program.capture_assessment             = FakeCaptureAssessment{
+                    .shortlist_key          = FakeShortlistKey{.digest = 362, .frontier = 64},
+                    .protected_rebuild_work = PrefillWork{.tokens = 64},
+                    .publishes_private      = true,
+                    .publishes_shared       = false,
+                    .physically_feasible    = true,
+    };
+
+    const auto reserved =
+        manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 74}, 0, {});
+    require(reserved == FakeManager::ActiveCaptureReserveResult::Reserved,
+            "a feasible private capture did not reserve");
+    require(program.released_continuations.empty(),
+            "stale reclamation ran even though the capture was already feasible");
+    require(manager.catalog_state(0) == FakeManager::CatalogState::Catalogued,
+            "a feasible capture reclaimed a resident it did not need");
+
+}
+
 void test_capture_result_is_validated_before_any_adoption() {
     FakeManager manager = make_manager(1, 4, 1);
     FakeProgram program;
@@ -3519,6 +3642,14 @@ int main() {
              test_shared_capture_combines_two_pressure_owners);
     run_test("aborted shared capture logical rollback",
              test_aborted_shared_capture_start_rolls_back_logical_claims);
+    run_test("stale private reclamation by publication order",
+             test_private_only_capture_reclaims_stale_resident_by_publication_order);
+    run_test("stale reclamation prefers oldest publication order",
+             test_stale_reclamation_prefers_the_oldest_publication_order);
+    run_test("stale reclamation never takes a retained active source",
+             test_stale_reclamation_never_takes_a_retained_active_source);
+    run_test("stale reclamation is not run for a feasible capture",
+             test_stale_reclamation_does_not_run_when_the_capture_is_feasible);
     run_test("validate complete capture result before adoption",
              test_capture_result_is_validated_before_any_adoption);
     run_test("capture result owner identity", test_capture_result_is_adopted_by_owner_identity);

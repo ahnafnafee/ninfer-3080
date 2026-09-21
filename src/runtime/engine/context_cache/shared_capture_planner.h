@@ -238,7 +238,8 @@ private:
     };
 
     static void validate(const Input& input) {
-        if (input.capture == nullptr || !input.capture->publishes_shared ||
+        if (input.capture == nullptr ||
+            (!input.capture->publishes_shared && !input.capture->publishes_private) ||
             input.target_budget == 0 || input.target_budget > kTargetBudget ||
             input.private_owners.size() != input.private_owner_ids.size() ||
             input.shared_owners.size() != input.shared_owner_ids.size()) {

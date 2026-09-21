@@ -281,7 +281,8 @@ ProgramImpl::inspect_capture(const CaptureOffer& offer, const SharedPrefixHandle
 
 std::unique_ptr<CapturePressureCandidateImpl>
 ProgramImpl::make_capture_physical_candidate(const CaptureAssessment& assessment) const {
-    if (assessment.implementation == nullptr || !assessment.publishes_shared ||
+    if (assessment.implementation == nullptr ||
+        (!assessment.publishes_shared && !assessment.publishes_private) ||
         assessment.frontier == 0) {
         throw std::invalid_argument("capture pressure candidate is incomplete");
     }
