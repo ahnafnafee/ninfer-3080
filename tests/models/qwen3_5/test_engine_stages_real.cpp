@@ -91,6 +91,7 @@ Outputs generate(const char* artifact, const Configuration& configuration) {
 #else
     setenv("NINFER_FORCE_STAGED_LINKS", configuration.force_staged ? "1" : "0", 1);
 #endif
+    std::cout << "running: " << configuration.label << std::endl;
     ninfer::Engine engine(engine_options(artifact, configuration));
     Outputs out;
     out.short_run = engine.generate(engine.prepare_tokens(short_prompt()), greedy(24)).generated_token_ids;

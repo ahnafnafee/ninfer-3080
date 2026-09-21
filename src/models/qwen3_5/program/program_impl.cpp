@@ -91,9 +91,7 @@ make_stage_runtime(DeviceContext& device, const execution::Parameters& parameter
         runtime->state_first_layer.push_back(state.shard(shard).first_layer);
     }
 
-    const std::uint64_t columns = std::max<std::uint64_t>(
-        std::min(plan.prefill_chunk, plan.capacity),
-        static_cast<std::uint64_t>(plan.max_concurrency) * (plan.draft_window + 1U));
+    const std::uint64_t columns = stage_boundary_columns(plan);
     const std::size_t hidden = static_cast<std::size_t>(parameters.model.config().text.hidden_size);
     const bool force_staged  = [] {
         const char* value = std::getenv("NINFER_FORCE_STAGED_LINKS");

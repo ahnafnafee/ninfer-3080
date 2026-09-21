@@ -780,6 +780,18 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     out.general_capacity =
         std::max({out.text_prefill, out.ordinary_round, out.mtp_prefill, out.mtp_round,
                   out.dflash_context, out.dflash_round, out.causal_score});
+    if (parameters.text.split_execution()) {
+        // Around its layers a stage holds the residual it received and its copy of the control
+        // block (rank 0 holds the packed block instead, which is smaller), alive for the whole pass
+        // and so on top of the layers' own peak. Alignment slack for both allocations.
+        const std::uint64_t columns = stage_boundary_columns(plan);
+        const std::size_t residual =
+            static_cast<std::size_t>(columns) * static_cast<std::size_t>(config.hidden_size) * 2U;
+        const std::size_t control = (6U * static_cast<std::size_t>(columns) + 16U) * 4U;
+        out.general_capacity =
+            checked_add(out.general_capacity, checked_add(residual, control, "stage boundary") + 1024U,
+                        "stage boundary workspace");
+    }
     out.capacity = out.general_capacity;
     if (plan.features.vision) {
         const std::uint32_t merged = vision_item_token_bound(plan.capacity, plan.features);

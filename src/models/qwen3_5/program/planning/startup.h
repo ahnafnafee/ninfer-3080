@@ -11,6 +11,7 @@
 #include "models/qwen3_5/state/state_image.h"
 #include "models/load_options.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -130,6 +131,14 @@ struct SequencePlanImpl {
     // stage runs in, and its share of the graph allowance.
     std::vector<std::size_t> extra_rank_reservation_bytes;
 };
+
+// The widest forward pass a pipeline stage boundary carries: prefill columns, or every lane's
+// verification columns. Sizes the boundary links and the scratch each stage needs around its layers.
+[[nodiscard]] inline std::uint64_t stage_boundary_columns(const SequencePlanImpl& plan) noexcept {
+    return std::max<std::uint64_t>(
+        std::min(plan.prefill_chunk, plan.capacity),
+        static_cast<std::uint64_t>(plan.max_concurrency) * (plan.draft_window + 1U));
+}
 
 struct SequencePlannerImpl {
     SequencePlanningInputs inputs;
