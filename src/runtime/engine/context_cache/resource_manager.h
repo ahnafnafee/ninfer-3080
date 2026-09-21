@@ -746,7 +746,7 @@ public:
                     }
                     return found->id;
                 };
-                if (pressure_evidence) {
+                if (pressure_evidence || !scenario.assessment.physically_feasible) {
                     private_owners.reserve(catalog_count_);
                     private_owner_ids.reserve(catalog_count_);
                     shared_owners.reserve(shared_catalog_count_);

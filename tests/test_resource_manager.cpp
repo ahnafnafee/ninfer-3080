@@ -3049,6 +3049,54 @@ void test_shared_capture_combines_two_pressure_owners() {
     (void)finish_active(manager, program, active);
 }
 
+// A shared publication that is physically infeasible has to be able to look for something to
+// reclaim.  Victim enumeration used to be gated on pressure_evidence alone -- evidence that says
+// whether DISPLACING a shared slot is warranted, which is a different question from whether a
+// state image can be FREED.  With no explicit boundary and a single reuse domain the gate is
+// false, so an infeasible capture was handed zero victims and could never plan: the shared
+// frontier stopped advancing the moment the State pools saturated, while a vacant shared slot
+// sat unusable behind them.
+void test_infeasible_shared_capture_may_reclaim_without_pressure_evidence() {
+    FakeManager manager = make_manager(1, 4, 2);
+    FakeProgram program;
+    const ActiveRequest first = start_active(manager, program, 401, make_base(401), 1);
+    (void)finish_active(manager, program, first);
+    const ActiveRequest second = start_active(manager, program, 402, make_base(402), 2);
+    (void)finish_active(manager, program, second);
+
+    // No ExplicitBoundary and no RequestedAutomatic: pressure_evidence is false, which is the
+    // ordinary case for a single conversation walking its own context forward.
+    FakeRequestBasePlan request = make_base(403);
+    request.cache.opportunities.push_back(FakeContextCache::Opportunity{
+        .kind     = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+        .evidence = ninfer::SharedCandidateEvidence::None,
+        .frontier = 64,
+    });
+    const ActiveRequest active            = start_active(manager, program, 403, request, 3);
+    program.required_pressure_actions     = 1;
+    program.pressure_action_immediate_ns  = 0;
+    program.capture_assessment            = FakeCaptureAssessment{
+                   .shortlist_key          = FakeShortlistKey{.digest = 403, .frontier = 64},
+                   .protected_rebuild_work = PrefillWork{.tokens = 64},
+                   .publishes_shared       = true,
+                   .physically_feasible    = false,
+    };
+
+    const auto reserved =
+        manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 81}, 0, {});
+    require(reserved == FakeManager::ActiveCaptureReserveResult::Reserved,
+            "an infeasible shared capture was denied any reclamation victim");
+    require(program.started_action_ids.size() == program.required_pressure_actions,
+            "infeasible shared capture reserved without the reclamation it needed");
+    auto progress      = manager.progress_context_transaction(program, {});
+    const auto outcome = std::get<FakeManager::ActiveCaptureOutcome>(std::move(progress));
+    require(outcome.status == ContextTransactionStatus::Published,
+            "reclaiming shared capture did not publish");
+
+    program.required_pressure_actions = 0;
+    (void)finish_active(manager, program, active);
+}
+
 void test_aborted_shared_capture_start_rolls_back_logical_claims() {
     FakeManager manager = make_manager(1, 4, 1);
     FakeProgram program;
@@ -3640,6 +3688,8 @@ int main() {
              test_shared_fanout_keeps_owner_edges_live_across_summary_refresh);
     run_test("shared capture multi-owner pressure",
              test_shared_capture_combines_two_pressure_owners);
+    run_test("infeasible shared capture may reclaim without pressure evidence",
+             test_infeasible_shared_capture_may_reclaim_without_pressure_evidence);
     run_test("aborted shared capture logical rollback",
              test_aborted_shared_capture_start_rolls_back_logical_claims);
     run_test("stale private reclamation by publication order",
