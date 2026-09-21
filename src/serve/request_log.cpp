@@ -98,6 +98,7 @@ Json tool_call_parse_json(const ninfer::ToolCallParseDiagnostics& diagnostics) {
                 {"structured_call_count", diagnostics.structured_call_count},
                 {"empty_arguments_omitted", diagnostics.empty_arguments_omitted},
                 {"schema_mismatch_arguments", diagnostics.schema_mismatch_arguments},
+                {"duplicate_parameters_repaired", diagnostics.duplicate_parameters_repaired},
                 {"forced_call_closed", diagnostics.forced_call_closed},
                 {"recovered", diagnostics.recovered},
                 {"recovered_call_count", diagnostics.recovered_call_count},

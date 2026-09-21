@@ -426,6 +426,10 @@ public:
         return parse_tool_call(pos, call);
     }
 
+    [[nodiscard]] std::uint32_t duplicate_parameters_repaired() const noexcept {
+        return duplicate_parameters_repaired_;
+    }
+
     FallbackReason parse(std::vector<RawToolCall>& calls) const {
         std::size_t pos = 0;
         for (;;) {
@@ -498,25 +502,29 @@ private:
             return FallbackReason::MalformedStructure;
         }
         const std::string_view name = text_.substr(name_begin, name_end - name_begin);
-        if (std::any_of(call.parameters.begin(), call.parameters.end(),
-                        [&](const RawParameter& existing) { return existing.name == name; })) {
-            return FallbackReason::DuplicateParameter;
-        }
 
         const std::size_t value_begin = name_end + 1;
         std::size_t value_end         = 0;
+        std::size_t next              = 0;
         if (lenient_ && find_unclosed_parameter_end(value_begin, value_end)) {
-            call.parameters.push_back(RawParameter{
-                .name = name, .value = text_.substr(value_begin, value_end - value_begin)});
-            pos = value_end;
-            return FallbackReason::None;
-        }
-        if (!find_parameter_close(value_begin, value_end)) {
+            next = value_end;
+        } else if (find_parameter_close(value_begin, value_end)) {
+            next = value_end + kParamClose.size();
+        } else {
             return FallbackReason::MalformedStructure;
         }
-        call.parameters.push_back(RawParameter{
-            .name = name, .value = text_.substr(value_begin, value_end - value_begin)});
-        pos = value_end + kParamClose.size();
+        const std::string_view value = text_.substr(value_begin, value_end - value_begin);
+        // A repeated parameter keeps its last value, as JSON object syntax would, rather than
+        // discarding an otherwise well-formed call.
+        const auto existing = std::find_if(call.parameters.begin(), call.parameters.end(),
+                                           [&](const RawParameter& p) { return p.name == name; });
+        if (existing != call.parameters.end()) {
+            existing->value = value;
+            ++duplicate_parameters_repaired_;
+        } else {
+            call.parameters.push_back(RawParameter{.name = name, .value = value});
+        }
+        pos = next;
         return FallbackReason::None;
     }
 
@@ -577,6 +585,7 @@ private:
     std::size_t max_name_length_;
     const Contract& contract_;
     bool lenient_;
+    mutable std::uint32_t duplicate_parameters_repaired_ = 0;
 };
 
 GeneratedToolCall normalize_raw_tool_call(const RawToolCall& raw, const Contract& contract,
@@ -668,13 +677,19 @@ void recover_tool_calls(std::string_view region, std::size_t max_name_length,
         }
         const std::size_t start = pos;
         RawToolCall call;
+        const std::uint32_t strict_repaired = strict.duplicate_parameters_repaired();
         if (strict.parse_one(pos, call) == FallbackReason::None) {
+            out.diagnostics.duplicate_parameters_repaired +=
+                strict.duplicate_parameters_repaired() - strict_repaired;
             out.tool_calls.push_back(normalize_raw_tool_call(call, contract, out.diagnostics));
             continue;
         }
         pos  = start;
         call = {};
+        const std::uint32_t lenient_repaired = lenient.duplicate_parameters_repaired();
         if (lenient.parse_one(pos, call) == FallbackReason::None) {
+            out.diagnostics.duplicate_parameters_repaired +=
+                lenient.duplicate_parameters_repaired() - lenient_repaired;
             ++out.diagnostics.recovered_call_count;
             out.tool_calls.push_back(normalize_raw_tool_call(call, contract, out.diagnostics));
             continue;
@@ -730,6 +745,7 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
         if (failure == FallbackReason::None) {
             accepted  = candidate;
             raw_calls = std::move(calls);
+            out.diagnostics.duplicate_parameters_repaired = parser.duplicate_parameters_repaired();
             break;
         }
         if (!first_failure_recorded) {

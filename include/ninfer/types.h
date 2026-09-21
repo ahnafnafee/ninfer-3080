@@ -439,6 +439,8 @@ struct ToolCallParseDiagnostics {
     std::uint32_t structured_call_count         = 0;
     std::uint32_t empty_arguments_omitted       = 0;
     std::uint32_t schema_mismatch_arguments     = 0;
+    // Repeated parameters of a call, resolved to their last value.
+    std::uint32_t duplicate_parameters_repaired = 0;
     // Why the strict pass rejected the region. With recovered set, the region still produced
     // calls and nothing went out as text.
     ToolCallParseFallbackReason fallback_reason = ToolCallParseFallbackReason::None;

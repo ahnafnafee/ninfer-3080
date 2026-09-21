@@ -607,11 +607,6 @@ int test_recovery_of_strict_failures() {
                           !unclosed.diagnostics.malformed_call_reported,
                       "a parameter closed by its function was not recovered");
 
-    const std::string duplicate = tool_call("configure", {{"value", "first"}, {"value", "second"}});
-    failures += check_reported(duplicate, contract,
-                               ninfer::ToolCallParseFallbackReason::DuplicateParameter, "configure",
-                               "duplicate parameter was silently overwritten");
-
     const std::string unknown_tool = tool_call("other", {{"value", "x"}});
     const auto unknown             = fi::parse_qwen_tool_call_output(unknown_tool, 64, contract);
     failures += check(unknown.is_tool_call_response && unknown.tool_calls.size() == 1 &&
@@ -984,8 +979,32 @@ int test_forced_call_decoder() {
     return failures;
 }
 
+// A repeated parameter keeps its last value, as JSON object syntax would, and the repair is counted.
+int test_duplicate_parameter_keeps_last_value() {
+    int failures = 0;
+    const fi::ToolCallOutputContract contract =
+        contract_for("configure", Json{{"value", Json{{"type", "string"}}}});
+    const std::string duplicate = tool_call("configure", {{"value", "first"}, {"value", "second"}});
+    const auto parsed = fi::parse_qwen_tool_call_output(duplicate, 64, contract);
+
+    failures += check(parsed.is_tool_call_response, "duplicate parameter still fell back to text");
+    failures += check(parsed.content.empty(), "duplicate parameter left prose behind");
+    failures += check(parsed.tool_calls.size() == 1, "duplicate parameter did not yield one call");
+    if (parsed.tool_calls.size() == 1) {
+        failures += check(parsed.tool_calls.front().arguments_json == R"({"value":"second"})",
+                          "duplicate parameter did not keep the last value");
+    }
+    failures += check(parsed.diagnostics.fallback_reason ==
+                          ninfer::ToolCallParseFallbackReason::None,
+                      "duplicate parameter still reported a fallback reason");
+    failures += check(parsed.diagnostics.duplicate_parameters_repaired == 1,
+                      "duplicate parameter repair was not recorded in diagnostics");
+    return failures;
+}
+
 int main() {
     int failures = 0;
+    failures += test_duplicate_parameter_keeps_last_value();
     failures += test_basic_legacy_parsing();
     failures += test_forced_call_decoder();
     failures += test_multiple_calls();
