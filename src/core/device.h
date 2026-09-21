@@ -280,6 +280,7 @@ private:
 class CudaCompletionEvent {
 public:
     explicit CudaCompletionEvent(const DeviceContext& ctx);
+    explicit CudaCompletionEvent(const RankContext& rank);
     ~CudaCompletionEvent();
 
     CudaCompletionEvent(const CudaCompletionEvent&)            = delete;
@@ -295,6 +296,28 @@ public:
 private:
     int device_        = 0;
     cudaEvent_t event_ = nullptr;
+};
+
+// One completion event per rank, for work that fans out across ranks and has to be fenced on all of
+// them: a context transaction copies state on every rank's transfer stream, and is complete only
+// when the last of them is. A single stream converts implicitly, so a one-rank set behaves as one
+// event; a set of several ranks given one stream fails on the first rank past 0.
+class RankFenceSet {
+public:
+    explicit RankFenceSet(const DeviceContext& context);
+
+    RankFenceSet(const RankFenceSet&)            = delete;
+    RankFenceSet& operator=(const RankFenceSet&) = delete;
+
+    // Records rank r's event on its stream.
+    void record(RankStreams streams);
+    // Makes rank r's stream wait for rank r's event.
+    void wait(RankStreams streams) const;
+    [[nodiscard]] bool ready() const;
+    void synchronize() const;
+
+private:
+    std::vector<CudaCompletionEvent> events_;
 };
 
 } // namespace ninfer

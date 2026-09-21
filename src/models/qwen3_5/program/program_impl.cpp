@@ -180,7 +180,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
                       ? std::make_optional<PinnedHostBuffer>(sizeof(qwen3_5::DFlashDecodeIngress) +
                                                              sizeof(qwen3_5::DFlashDecodeEgress))
                       : std::nullopt),
-      context_source_ready_(device_in), context_completion_(device_in),
+      compute_streams(RankStreams::compute(device_in)),
+      transfer_streams(RankStreams::transfer(device_in)), context_source_ready_(device_in),
+      context_completion_(device_in),
       context_transfer_timers_{CudaEventTimer(device_in, device_in.transfer_stream),
                                CudaEventTimer(device_in, device_in.transfer_stream),
                                CudaEventTimer(device_in, device_in.transfer_stream)} {
@@ -267,9 +269,6 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     }
     state_images = std::make_unique<qwen3_5::StateImageDevicePool>(backings,
                                                                     plan.persistent.state_images);
-    if (parameters.text.split_execution()) {
-        stage_runtime = make_stage_runtime(device, parameters, *state_images, plan);
-    }
     if (plan.context_cache.host_state_slots != 0) {
         const std::uint64_t host_state_bytes =
             static_cast<std::uint64_t>(state_images->host_layout().image_bytes) *
@@ -298,12 +297,29 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     }
     pressure_state_scratch_.reserve(static_cast<std::size_t>(logical_state_capacity));
     if (plan.persistent.replay_records) {
-        replay_records.emplace(backing, *plan.persistent.replay_records);
-        replay_fold.emplace(*replay_records, state_images->linear().all_layers_view());
+        replay_records.emplace(backings[state_images->shard(0).rank],
+                               *plan.persistent.replay_records);
+        replay_fold.emplace(*replay_records, state_images->linear(0).all_layers_view());
+        for (std::size_t shard = 1; shard < state_images->shard_count(); ++shard) {
+            extra_replay_records.push_back(std::make_unique<GdnReplayRecords>(
+                backings[state_images->shard(shard).rank],
+                plan.persistent.extra_replay_records.at(shard - 1)));
+            extra_replay_fold.push_back(std::make_unique<ops::GdnReplayFoldPlan>(
+                *extra_replay_records.back(), state_images->linear(shard).all_layers_view()));
+        }
     }
     if (replay_records.has_value() != (speculative_backend != SpeculativeBackend::None) ||
         replay_fold.has_value() != replay_records.has_value()) {
         throw std::logic_error("ReplaySSM records do not match the sequence plan");
+    }
+    if (parameters.text.split_execution()) {
+        stage_runtime = make_stage_runtime(device, parameters, *state_images, plan);
+        if (replay_records) {
+            stage_runtime->replay.push_back(&*replay_records);
+            for (const auto& records : extra_replay_records) {
+                stage_runtime->replay.push_back(records.get());
+            }
+        }
     }
     if (plan.persistent.dflash) {
         CyclicKVCache* local = state_images->dflash_local();
@@ -510,9 +526,17 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     workspace_logical_peak_bytes = 0;
 }
 
+void ProgramImpl::synchronize_transfer_streams() const {
+    for (std::size_t rank = 0; rank < transfer_streams.size(); ++rank) {
+        (void)cudaStreamSynchronize(transfer_streams[rank]);
+    }
+}
+
 ProgramImpl::~ProgramImpl() noexcept {
-    if (device.transfer_stream != nullptr) { (void)cudaStreamSynchronize(device.transfer_stream); }
-    if (device.stream != nullptr) { (void)cudaStreamSynchronize(device.stream); }
+    for (std::size_t rank = 0; rank < transfer_streams.size(); ++rank) {
+        (void)cudaStreamSynchronize(transfer_streams[rank]);
+        (void)cudaStreamSynchronize(compute_streams[rank]);
+    }
 }
 
 std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
@@ -565,14 +589,14 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
     std::uint32_t staged_columns = 0;
 
     try {
-        state = state_store->reserve_reset(device.stream);
+        state = state_store->reserve_reset(compute_streams);
         if (!state) { throw std::bad_alloc(); }
         address = text_kv_addresses->create_active(entitlement, 0);
         if (!address) { throw std::bad_alloc(); }
         if (text_kv_addresses->bound_row(*address) != 0) {
             throw std::logic_error("causal score did not bind the unique Main KV row");
         }
-        text_kv_addresses->ensure_mapped_to_tokens(*address, predictor_count, device.stream);
+        text_kv_addresses->ensure_mapped_to_tokens(*address, predictor_count, compute_streams);
 
         const std::int32_t state_slot = state_store->physical_slot(*state);
         const auto flush              = [&] {

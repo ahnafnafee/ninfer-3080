@@ -1,6 +1,10 @@
 # Multi-GPU test harness
 
-Scripts for validating the expert-offload split (`--devices N,M`) on rented dual-GPU hardware.
+Scripts for validating the layer pipeline split (`--devices N,M`, optionally `--stage-layers`) on
+rented dual-GPU hardware. The tests that need a real second card are
+`ninfer_qwen3_5_stages_real_test` (with `NINFER_TEST_ARTIFACT` set) and `ninfer-tp-probe`, which
+measures the boundary-transfer cost the pipeline pays and decides whether tensor parallelism is
+worth building on that box.
 They assume a vast.ai instance, but nothing here is specific to that provider beyond the CLI calls
 in `iterate.sh`.
 
@@ -32,11 +36,12 @@ bash iterate.sh --capacity      # what KV each mode resolves with --kv-capacity 
 still be reading the wrong device through a stale pointer. The check that matters is greedy text
 from `--devices 0,1` against greedy text from `--device 0`, byte for byte.
 
-**Most of it is testable on one GPU.** `--devices 0,0` puts both ranks on the same card. It frees
-no memory and is not a deployment, but it exercises per-rank binding and materialization, per-rank
-workspaces and the cross-rank copies. Two real defects -- CUDA graph capture rejecting cross-device
-copies, and the expert rank's workspace never being rolled back -- were both found that way in
-seconds rather than by renting two cards.
+**Most of it is testable on one GPU.** `--devices 0,0` puts both stages on the same card. It frees
+no memory and is not a deployment, but it exercises per-stage placement and materialization,
+per-stage workspaces, KV pools and state shards, and the boundary transfers (forced through pinned
+host memory with `NINFER_FORCE_STAGED_LINKS=1`). What it cannot see is a pointer that is valid on
+the wrong device, because both stages can read everything; that, the PCIe cost and the
+compute-capability check are what the second card is for.
 
 ## Downloads
 

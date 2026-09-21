@@ -122,7 +122,7 @@ ceiling)
   echo "=== context ceiling, single GPU ==="
   for c in "1 262144" "1 131072" "2 131072" "4 65536"; do probe 0 $c; done
   # 8 is kMaximumConcurrency; higher is refused at argument parsing, not for want of memory.
-  echo "=== context ceiling, expert offload ==="
+  echo "=== context ceiling, pipeline stages ==="
   for c in "8 262144" "8 131072" "8 65536" "4 262144" "2 262144"; do probe 0,1 $c; done
   ;;
 throughput)

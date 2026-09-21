@@ -620,8 +620,12 @@ public:
     std::unique_ptr<execution::StageRuntime> stage_runtime;
     std::unique_ptr<qwen3_5::HostStatePool> host_state_images;
     std::unique_ptr<StateImageStore> state_store;
+    // ReplaySSM records and their fold, for the first state shard; the rest, on other devices, are
+    // in the `extra_` vectors.
     std::optional<GdnReplayRecords> replay_records;
     std::optional<ops::GdnReplayFoldPlan> replay_fold;
+    std::vector<std::unique_ptr<GdnReplayRecords>> extra_replay_records;
+    std::vector<std::unique_ptr<ops::GdnReplayFoldPlan>> extra_replay_fold;
     std::optional<DFlashPersistentState> dflash;
     qwen3_5::RoundState io;
     Tensor prefill_hidden;
@@ -857,8 +861,12 @@ private:
     };
 
     std::uint64_t next_materialization_id_ = 1;
-    CudaCompletionEvent context_source_ready_;
-    CudaCompletionEvent context_completion_;
+    // Every rank's compute and transfer stream. Context transactions fan their copies out across
+    // ranks and fence on all of them.
+    RankStreams compute_streams;
+    RankStreams transfer_streams;
+    RankFenceSet context_source_ready_;
+    RankFenceSet context_completion_;
     std::vector<TokenId> materialization_ledger_;
     qwen3_5::detail::ResidentPrefixIdentity materialization_identity_;
     qwen3_5::detail::PrefixShortlistDigests materialization_prefix_digests_;
@@ -945,6 +953,7 @@ private:
                                runtime::ContextResourceClass resource);
     void publish_pressure_host_releases(MaterializationTransaction::PressureWork& work);
     void publish_pressure_work(MaterializationTransaction::PressureWork& work) noexcept;
+    void synchronize_transfer_streams() const;
     void abort_pressure_work(MaterializationTransaction::PressureWork& work) noexcept;
     void start_context_transfer_timer(runtime::ContextResourceClass resource);
     void stop_context_transfer_timer(runtime::ContextResourceClass resource);

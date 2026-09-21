@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/gdn_replay_records.h"
 #include "core/linear_attention_state.h"
 #include "core/stage_link.h"
 
@@ -20,6 +21,9 @@ struct StageRuntime {
     // The Linear Attention state pool of each shard, and the global index of the first layer in it.
     std::vector<LinearAttentionStatePool*> state;
     std::vector<std::uint32_t> state_first_layer;
+    // The ReplaySSM record storage of each shard, in the same order; empty without speculative
+    // decoding. A stage records only its own layers, on its own device.
+    std::vector<const GdnReplayRecords*> replay;
 
     // forward[s] carries the residual from stage s to stage s+1; `back` from the last stage to rank
     // 0. `control[s-1]` carries the small position, row and slot tensors the layers read from rank 0

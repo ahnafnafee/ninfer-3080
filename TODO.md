@@ -382,17 +382,23 @@ what it says about kernels and measurements still holds except where this sectio
 - [ ] **A load-time transcode changes nothing in the prefill signature** (it is keyed on the stored
       format), but `--mlp-a8-decode`-style execution choices are not in the signature either. If a
       future preset needs to distinguish them, the signature is the place to say so.
-- [ ] **The multi-GPU split has only been run with `--devices 0,0` on this single-GPU box.** The
-      pinned-host crossing path, the compute-capability rejection and the actual capacity win need a
-      real second card (`scripts/multi-gpu-testing/`). `tests/test_cross_rank_staging.cu` now drives
-      that path directly with both ranks on device 0 -- byte integrity, capturability, and the
-      consumed-fence dependency read off the captured graph -- so what is left for a second card is
-      the PCIe cost and the device-to-device branch, not the protocol.
-- [ ] **A runtime race harness for the crossing buffer has no power on Windows.** Holding the
+- [ ] **The layer pipeline split has only been run with `--devices 0,0` on this single-GPU box.**
+      `tests/test_stage_link.cu` drives the boundary transfer with several stages on device 0 (byte
+      integrity, ring-slot reuse, capturability, the fence dependency read off the captured graph),
+      and `ninfer_qwen3_5_stages_real_test` compares greedy output with `--device 0`. Neither can
+      see a pointer that is valid only on the wrong device. What needs a real second card
+      (`scripts/multi-gpu-testing/`) is that check, the PCIe cost, the compute-capability rejection
+      and the per-card capacity win.
+- [ ] **A runtime race harness for the boundary transfer has no power on Windows.** Holding the
       destination stream, with a spinning kernel or a blocking host function, also stops the driver
       submitting the source stream's copies, so the source stalls whether or not the fence is
       there (measured both ways). The graph assertion replaces it. On Linux the same test could
       also be run as a real race; worth doing if this ever runs there.
+- [ ] **Not built for pipeline stages yet:** vision and DFlash/DFlash2 refuse a split (DFlash needs
+      its feature taps carried across stage boundaries); the default split is even, and
+      `solve_stage_plan` (memory-balanced, in `core/stage_plan.h`) is not yet called by the engine;
+      prefill does not overlap stages (micro-chunk wavefront); tensor parallelism is unbuilt.
+      `docs/maintainer/pipeline-parallel-plan.md` is the design of record.
 
 State as of 2026-09-09. Four passes: a profiling pass that closed six items and refuted five of its
 own hypotheses, a measurement-hygiene pass that closed three more, a counter pass that put a *cause*
@@ -770,7 +776,7 @@ Ordered by expected value, not by section.
 | Speculative decoding not bit-identical to greedy | 3 | decide whether it should be; the divergence is a reduction-order effect in k+1-column verification and MTP reproduces it, so it predates DFlash2 | judgement, not measurement |
 | DFlash2 corpus acceptance on real text | 3 | bake a diverse corpus with `make_bench_corpus.py --source-text`, or extend the real-text sweep to report acceptance | a local HF tokenizer, which this box lacks |
 | `27b_load_plan` DFlash2 binding matrix | 3 | **half of it can run now**: both groupwise artifacts are on this disk (the "old" one is `models/qwen3_8_27b.ninfer`, SHA-verified). The two NVFP4 ones were never published and would have to be converted locally | artifacts nobody has |
-| DFlash2 + multi-GPU expert offload | 2 | genuinely blocked | a second GPU |
+| DFlash2 + pipeline stages | 2 | refused today: its feature taps must cross stage boundaries; then needs a second GPU to check | design, then a second GPU |
 
 Two of those fourteen are hard-blocked on things no amount of work here provides (a second GPU, and
 artifacts that no longer exist). One is a judgement call rather than a measurement. The remaining
@@ -1206,10 +1212,9 @@ unreachable — this section has a poor record of being right about that.
 
 ### Needs a second GPU — one item, and it is the only one
 
-- [ ] **DFlash2 + multi-GPU expert offload.** `nvidia-smi` reports exactly one device here, so the
-      offload path degenerates to the single-rank identity mapping and there is nothing to
-      exercise. Needs the two-card box or a second local GPU. More interesting now that PR #15 has
-      landed and the offload path is no longer hypothetical.
+- [ ] **DFlash2 + pipeline stages.** DFlash refuses `--devices` with several stages: its feature
+      taps are read across layers, so they have to be carried across stage boundaries first. Once
+      they are, checking it needs a second card (`nvidia-smi` reports exactly one device here).
 
 ### Needs an artifact we do not have — nothing is left here
 

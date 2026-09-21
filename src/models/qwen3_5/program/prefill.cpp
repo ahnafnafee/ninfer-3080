@@ -399,7 +399,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         }
         if (text_prefix_fork) {
             text_kv_addresses->commit_prefix_fork(std::move(*transaction.text_prefix_fork),
-                                                  device.stream);
+                                                  compute_streams);
             transaction.text_prefix_fork.reset();
             if (!preserving_source) {
                 const KVAddressSpaceHandle source_address = sequence.kv->text;
@@ -411,12 +411,12 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
             }
         } else {
             text_kv_addresses->commit_activation(std::move(*transaction.text_activation),
-                                                 device.stream);
+                                                 compute_streams);
             transaction.text_activation.reset();
         }
         if (backend_prefix_fork) {
             backend_kv_addresses->commit_prefix_fork(std::move(*transaction.backend_prefix_fork),
-                                                     device.stream);
+                                                     compute_streams);
             transaction.backend_prefix_fork.reset();
             if (!preserving_source) {
                 const KVAddressSpaceHandle source_address = *sequence.kv->backend;
@@ -428,7 +428,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
             }
         } else if (transaction.backend_activation) {
             backend_kv_addresses->commit_activation(std::move(*transaction.backend_activation),
-                                                    device.stream);
+                                                    compute_streams);
             transaction.backend_activation.reset();
         }
         transaction.prefix_forks_ready = false;
@@ -803,8 +803,17 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     const auto tail_started = Clock::now();
     try {
         timing.resume_submit();
-        replay_fold->execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
-                             device.stream);
+        const std::span<const ops::GdnReplayFoldRow> fold_span(fold_rows.data(), lanes.size());
+        {
+            // Each state shard folds its own layers on its own device's stream.
+            RankBinding bind(device, state_images->shard(0).rank);
+            replay_fold->execute(fold_span, compute_streams[state_images->shard(0).rank]);
+        }
+        for (std::size_t shard = 1; shard < state_images->shard_count(); ++shard) {
+            RankBinding bind(device, state_images->shard(shard).rank);
+            extra_replay_fold[shard - 1]->execute(
+                fold_span, compute_streams[state_images->shard(shard).rank]);
+        }
 
         // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
         if (speculative_backend == SpeculativeBackend::DFlash2) {

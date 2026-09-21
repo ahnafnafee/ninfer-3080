@@ -720,7 +720,7 @@ void ProgramImpl::prepare_materialization(MaterializationTransaction& transactio
             transaction.reserved_state_count == 0) {
             throw std::logic_error("root materialization destination is not reserved");
         }
-        state_store->activate_reset(transaction.reserved_states[0], device.stream);
+        state_store->activate_reset(transaction.reserved_states[0], compute_streams);
     }
 
     KVAddressSpaceHandle text_address;
@@ -863,8 +863,8 @@ void ProgramImpl::prepare_materialization(MaterializationTransaction& transactio
         std::optional<StateImageTransfer> restore =
             host_state_fork_destination
                 ? state_store->begin_host_fork(*host_state_restore, *host_state_fork_destination,
-                                               device.transfer_stream)
-                : state_store->begin_host_to_device(*host_state_restore, device.transfer_stream);
+                                               transfer_streams)
+                : state_store->begin_host_to_device(*host_state_restore, transfer_streams);
         if (!restore) { throw std::bad_alloc(); }
         transaction.state_restore.emplace(std::move(*restore));
         stop_context_transfer_timer(runtime::ContextResourceClass::State);
@@ -951,7 +951,7 @@ void ProgramImpl::prepare_prefix_forks(MaterializationTransaction& transaction) 
             text_kv_pages->physical_pool().copy_page(
                 text_kv_addresses->prefix_fork_tail_source(*transaction.text_prefix_fork),
                 text_kv_addresses->prefix_fork_tail_destination(*transaction.text_prefix_fork),
-                device.transfer_stream);
+                transfer_streams);
             stop_context_transfer_timer(runtime::ContextResourceClass::MainKV);
             transaction.transfer_timer_mask |=
                 1U << context_resource_index(runtime::ContextResourceClass::MainKV);
@@ -985,7 +985,7 @@ void ProgramImpl::prepare_prefix_forks(MaterializationTransaction& transaction) 
                 backend_kv_addresses->prefix_fork_tail_source(*transaction.backend_prefix_fork),
                 backend_kv_addresses->prefix_fork_tail_destination(
                     *transaction.backend_prefix_fork),
-                device.transfer_stream);
+                transfer_streams);
             stop_context_transfer_timer(runtime::ContextResourceClass::BackendKV);
             transaction.transfer_timer_mask |=
                 1U << context_resource_index(runtime::ContextResourceClass::BackendKV);
@@ -995,7 +995,7 @@ void ProgramImpl::prepare_prefix_forks(MaterializationTransaction& transaction) 
     }
 
     if (copied_tail) {
-        context_completion_.record(device.transfer_stream);
+        context_completion_.record(transfer_streams);
         transaction.prefix_tail_submitted = true;
         transaction.transfer_submitted    = true;
     } else {
@@ -1031,7 +1031,7 @@ void ProgramImpl::enqueue_materialization_transfers(MaterializationTransaction& 
                 pages.physical_pool().copy_from_host(
                     source,
                     std::span<const DeviceKVPageHandle>(destinations.data() + begin, end - begin),
-                    device.transfer_stream);
+                    transfer_streams);
                 begin = end;
             }
             stop_context_transfer_timer(resource);
@@ -1047,7 +1047,7 @@ void ProgramImpl::enqueue_materialization_transfers(MaterializationTransaction& 
     const bool any = transaction.state_restore.has_value() || !transaction.text_restores.empty() ||
                      !transaction.backend_restores.empty();
     if (any) {
-        context_completion_.record(device.transfer_stream);
+        context_completion_.record(transfer_streams);
         transaction.transfer_submitted = true;
     } else if (transaction.plan && transaction.plan->impl_ &&
                (transaction.plan->impl_->text_prefix_fork_required ||
@@ -1158,7 +1158,7 @@ void ProgramImpl::publish_materialization_transfers(MaterializationTransaction& 
             host_kv_extents->device_sources(*backup, source);
             start_context_transfer_timer(resource);
             pages.physical_pool().copy_to_host(source, host_kv_extents->writable_view(*backup),
-                                               device.transfer_stream);
+                                               transfer_streams);
             stop_context_transfer_timer(resource);
             transaction.transfer_timer_mask |= 1U << context_resource_index(resource);
             submitted = true;
@@ -1170,7 +1170,7 @@ void ProgramImpl::publish_materialization_transfers(MaterializationTransaction& 
                     runtime::ContextResourceClass::BackendKV);
         }
         if (submitted) {
-            context_completion_.record(device.transfer_stream);
+            context_completion_.record(transfer_streams);
             transaction.retained_tail_backup_submitted = true;
             transaction.transfer_submitted             = true;
         }
@@ -1511,7 +1511,7 @@ void ProgramImpl::prepare_pressure_work(MaterializationTransaction::PressureWork
                 pressure_state_source(action, sequence, shared);
             if (!source) { throw std::logic_error("pressure State transfer has no source"); }
             std::optional<StateImageTransfer> transfer =
-                state_store->begin_device_to_host(*source, device.transfer_stream);
+                state_store->begin_device_to_host(*source, transfer_streams);
             if (!transfer) { throw std::bad_alloc(); }
             change.transfer.emplace(std::move(*transfer));
         }
@@ -1570,7 +1570,7 @@ void ProgramImpl::prepare_pressure_work(MaterializationTransaction::PressureWork
         }
         host_kv_extents->device_sources(*reserved, change.sources);
         pages.physical_pool().copy_to_host(
-            change.sources, host_kv_extents->writable_view(*reserved), device.transfer_stream);
+            change.sources, host_kv_extents->writable_view(*reserved), transfer_streams);
         change.backup.emplace(std::move(*reserved));
     };
     const SequenceKVBundle* kv = sequence != nullptr ? (sequence->kv ? &*sequence->kv : nullptr)
@@ -2028,7 +2028,7 @@ ProgramImpl::progress_materialization_transaction(runtime::CancellationFlagView 
                     });
             }
         } catch (...) {
-            (void)cudaStreamSynchronize(device.transfer_stream);
+            synchronize_transfer_streams();
             for_each_pending_pressure(
                 [&](MaterializationTransaction::PressureWork& work) { abort_pressure_work(work); });
             throw;
@@ -2041,7 +2041,7 @@ ProgramImpl::progress_materialization_transaction(runtime::CancellationFlagView 
         pressure_transition.phase = copies_submitted ? PressureTransitionPhase::CopiesInFlight
                                                      : PressureTransitionPhase::CopyPublication;
         if (copies_submitted) {
-            context_completion_.record(device.transfer_stream);
+            context_completion_.record(transfer_streams);
             out.status = runtime::ContextTransactionStatus::InProgress;
             return out;
         }

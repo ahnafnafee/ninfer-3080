@@ -183,6 +183,14 @@ private:
         std::uint32_t local;
     };
     [[nodiscard]] GdnStateRef gdn_state(std::uint32_t layer) const;
+    // The shard holding GDN layer `layer` and the layer's index within it.
+    struct GdnShard {
+        std::size_t shard;
+        std::uint32_t local;
+    };
+    [[nodiscard]] GdnShard gdn_shard(std::uint32_t layer) const;
+    // ReplaySSM record storage for GDN layer `layer`, from the shard that holds it.
+    [[nodiscard]] GdnReplayRecordLayer replay_layer(std::uint32_t layer, std::int32_t batch) const;
     template <class Tap>
     void target_verify_batch_impl(const Tensor& ids, const Tensor& cache_positions,
                                   const Tensor& rope_positions, const Tensor& valid_columns,

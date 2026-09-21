@@ -177,7 +177,9 @@ std::vector<std::uint32_t> parse_stage_layers(std::string_view text) {
                                                                : comma - start);
         if (piece.empty()) { throw std::invalid_argument("--stage-layers entries must not be empty"); }
         const std::string entry(piece);
-        counts.push_back(static_cast<std::uint32_t>(parse_nonnegative_int(entry.c_str(), "stage-layers")));
+        const int count = parse_nonnegative_int(entry.c_str(), "stage-layers");
+        if (count == 0) { throw std::invalid_argument("--stage-layers counts must be positive"); }
+        counts.push_back(static_cast<std::uint32_t>(count));
         if (comma == std::string_view::npos) { break; }
         start = comma + 1;
     }

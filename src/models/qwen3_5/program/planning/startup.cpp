@@ -197,18 +197,27 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     out.state_images =
         qwen3_5::plan_state_image_device_pool(builder_pointers, state_shards, state_image_spec);
     if (plan.speculative_backend != SpeculativeBackend::None) {
-        out.replay_records = plan_gdn_replay_records(
-            builder,
-            GdnReplayRecordSpec{
-                .layers          = dimension(config.linear_attention_layers),
-                .record_capacity = static_cast<std::int32_t>(plan.max_concurrency),
-                .width           = static_cast<std::int32_t>(plan.draft_window + 1U),
-                .conv_channels   = (config.gdn ? dimension(config.gdn->conv_channels()) : 0),
-                .qk_heads        = (config.gdn ? dimension(config.gdn->linear_num_key_heads) : 0),
-                .value_heads     = (config.gdn ? dimension(config.gdn->linear_num_value_heads) : 0),
-                .key_dim         = (config.gdn ? dimension(config.gdn->linear_key_head_dim) : 0),
-                .value_dim       = (config.gdn ? dimension(config.gdn->linear_value_head_dim) : 0),
-            });
+        // A stage records only the GDN layers it holds, in its own device's memory.
+        for (std::size_t shard = 0; shard < state_shards.size(); ++shard) {
+            GdnReplayRecordLayout records = plan_gdn_replay_records(
+                *builder_pointers[state_shards[shard].rank],
+                GdnReplayRecordSpec{
+                    .layers          = static_cast<std::int32_t>(state_shards[shard].layers),
+                    .record_capacity = static_cast<std::int32_t>(plan.max_concurrency),
+                    .width           = static_cast<std::int32_t>(plan.draft_window + 1U),
+                    .conv_channels   = (config.gdn ? dimension(config.gdn->conv_channels()) : 0),
+                    .qk_heads = (config.gdn ? dimension(config.gdn->linear_num_key_heads) : 0),
+                    .value_heads =
+                        (config.gdn ? dimension(config.gdn->linear_num_value_heads) : 0),
+                    .key_dim   = (config.gdn ? dimension(config.gdn->linear_key_head_dim) : 0),
+                    .value_dim = (config.gdn ? dimension(config.gdn->linear_value_head_dim) : 0),
+                });
+            if (shard == 0) {
+                out.replay_records = std::move(records);
+            } else {
+                out.extra_replay_records.push_back(std::move(records));
+            }
+        }
     }
     {
         const auto* draft =
@@ -832,13 +841,11 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
                 std::string(feature) +
                 " is not yet supported with a multi-device --devices split");
         };
-        if (options.speculative.backend != SpeculativeBackend::None) {
-            unsupported("speculative decoding");
+        if (options.speculative.backend == SpeculativeBackend::DFlash ||
+            options.speculative.backend == SpeculativeBackend::DFlash2) {
+            unsupported("DFlash speculative decoding");
         }
         if (options.enable_vision) { unsupported("vision"); }
-        if (options.context_cache.enabled) {
-            unsupported("the context cache (pass --no-prefix-reuse)");
-        }
     }
     const std::uint32_t logical_pages = page_count(options.max_context);
     const std::uint32_t minimum_pages = std::max(logical_pages, options.max_concurrency);

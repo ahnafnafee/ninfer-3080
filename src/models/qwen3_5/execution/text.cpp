@@ -972,7 +972,7 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
             if (replay_records_ == nullptr) {
                 throw std::logic_error("Replay-record GDN has no record storage");
             }
-            GdnReplayRecordLayer records = replay_records_->layer(gidx, active_sequence_batch_);
+            GdnReplayRecordLayer records = replay_layer(static_cast<std::uint32_t>(gidx), active_sequence_batch_);
             gdn_projection_record(projection_input, p, *config_.gdn, conv_states, valid,
                                   *active_linear_state_source_slots_, records.conv, query_output,
                                   key_output, value_output, gate_output, work_, s);
@@ -1026,7 +1026,7 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
                     dimension(config_.gdn->linear_num_value_heads), width, active_sequence_batch_});
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
         if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
-            GdnReplayRecordLayer records = replay_records_->layer(gidx, active_sequence_batch_);
+            GdnReplayRecordLayer records = replay_layer(static_cast<std::uint32_t>(gidx), active_sequence_batch_);
             ops::gated_delta_net_replay_record(
                 q_batch, k_batch, v_batch, g_batch, beta_batch,
                 static_cast<float>(
@@ -1076,15 +1076,30 @@ void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase phas
     ffn(h, weights.ffn, x, hints, work_, ctx_.stream, false, phase == Phase::Verify);
 }
 
-TextContext::GdnStateRef TextContext::gdn_state(std::uint32_t layer) const {
-    if (stage_runtime_ == nullptr) { return {&state_, layer}; }
+TextContext::GdnShard TextContext::gdn_shard(std::uint32_t layer) const {
+    if (stage_runtime_ == nullptr) { return {0, layer}; }
     // The shard holding a layer is the last one that starts at or before it.
     for (std::size_t shard = stage_runtime_->state.size(); shard-- > 0;) {
         if (stage_runtime_->state_first_layer[shard] <= layer) {
-            return {stage_runtime_->state[shard], layer - stage_runtime_->state_first_layer[shard]};
+            return {shard, layer - stage_runtime_->state_first_layer[shard]};
         }
     }
     throw std::logic_error("Linear Attention layer has no state shard");
+}
+
+TextContext::GdnStateRef TextContext::gdn_state(std::uint32_t layer) const {
+    if (stage_runtime_ == nullptr) { return {&state_, layer}; }
+    const GdnShard located = gdn_shard(layer);
+    return {stage_runtime_->state[located.shard], located.local};
+}
+
+GdnReplayRecordLayer TextContext::replay_layer(std::uint32_t layer, std::int32_t batch) const {
+    if (stage_runtime_ == nullptr || stage_runtime_->replay.empty()) {
+        return replay_records_->layer(static_cast<std::int32_t>(layer), batch);
+    }
+    const GdnShard located = gdn_shard(layer);
+    return stage_runtime_->replay[located.shard]->layer(static_cast<std::int32_t>(located.local),
+                                                        batch);
 }
 
 // The layers of one stage, in order. On one device this is the whole model.

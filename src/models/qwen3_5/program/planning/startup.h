@@ -36,7 +36,9 @@ struct DFlashPersistentLayout {
 struct PersistentLayout {
     qwen3_5::DecoderStateLayout decoder;
     qwen3_5::StateImageDeviceLayout state_images;
+    // ReplaySSM records, one layout per state shard: the first here, the rest in `extra`.
     std::optional<GdnReplayRecordLayout> replay_records;
+    std::vector<GdnReplayRecordLayout> extra_replay_records;
     std::optional<DFlashPersistentLayout> dflash;
     qwen3_5::RoundStateLayout round;
     TensorLayout prefill_hidden;

@@ -438,8 +438,12 @@ float CudaEventTimer::stop_ms() {
     return elapsed_ms();
 }
 
-CudaCompletionEvent::CudaCompletionEvent(const DeviceContext& ctx) : device_(ctx.device) {
-    ctx.bind_to_current_thread();
+CudaCompletionEvent::CudaCompletionEvent(const DeviceContext& ctx)
+    : CudaCompletionEvent(ctx.rank(ctx.active_rank())) {}
+
+CudaCompletionEvent::CudaCompletionEvent(const RankContext& rank) : device_(rank.device) {
+    // The event belongs to this rank's device, which is the one that will record it.
+    DeviceBinding bind(rank.device);
     const cudaError_t err = cudaEventCreateWithFlags(&event_, cudaEventDisableTiming);
     if (err != cudaSuccess) {
         throw std::runtime_error(cuda_error_message("cudaEventCreateWithFlags failed", err));
@@ -485,6 +489,32 @@ bool CudaCompletionEvent::ready() const {
 void CudaCompletionEvent::synchronize() const {
     if (event_ == nullptr) { throw std::logic_error("CUDA completion event is empty"); }
     CUDA_CHECK(cudaEventSynchronize(event_));
+}
+
+RankFenceSet::RankFenceSet(const DeviceContext& context) {
+    events_.reserve(context.size());
+    for (std::size_t rank = 0; rank < context.size(); ++rank) {
+        events_.emplace_back(context.rank(rank));
+    }
+}
+
+void RankFenceSet::record(RankStreams streams) {
+    for (std::size_t rank = 0; rank < events_.size(); ++rank) { events_[rank].record(streams[rank]); }
+}
+
+void RankFenceSet::wait(RankStreams streams) const {
+    for (std::size_t rank = 0; rank < events_.size(); ++rank) { events_[rank].wait(streams[rank]); }
+}
+
+bool RankFenceSet::ready() const {
+    for (const CudaCompletionEvent& event : events_) {
+        if (!event.ready()) { return false; }
+    }
+    return true;
+}
+
+void RankFenceSet::synchronize() const {
+    for (const CudaCompletionEvent& event : events_) { event.synchronize(); }
 }
 
 } // namespace ninfer

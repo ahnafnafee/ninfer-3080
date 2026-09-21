@@ -770,15 +770,11 @@ ReleaseResult ProgramImpl::release_shared_prefix(SharedPrefixHandle&& handle) no
 void ProgramImpl::fail_all_cleanup() noexcept {
     pending_transaction_.reset();
     if (auto* transaction = std::get_if<ActiveCaptureTransaction>(&context_transaction_)) {
-        if (transaction->transfer_submitted && device.transfer_stream != nullptr) {
-            (void)cudaStreamSynchronize(device.transfer_stream);
-        }
+        if (transaction->transfer_submitted) { synchronize_transfer_streams(); }
         abort_active_capture(*transaction);
     }
     if (auto* transaction = std::get_if<MaterializationTransaction>(&context_transaction_)) {
-        if (transaction->transfer_submitted && device.transfer_stream != nullptr) {
-            (void)cudaStreamSynchronize(device.transfer_stream);
-        }
+        if (transaction->transfer_submitted) { synchronize_transfer_streams(); }
         release_materialization_staging(*transaction);
     }
     context_transaction_.emplace<std::monostate>();

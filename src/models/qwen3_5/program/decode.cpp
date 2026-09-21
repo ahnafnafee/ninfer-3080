@@ -218,7 +218,7 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
         // DFlash2 has only fixed cyclic state; DFlash also grows its Full backend KV here.
         if (sequence.kv->backend) {
             backend_kv_addresses->ensure_mapped_to_tokens(*sequence.kv->backend, end,
-                                                          device.stream);
+                                                          compute_streams);
         }
         minimum_count = std::min(minimum_count, counts[row]);
         maximum_count = std::max(maximum_count, counts[row]);
@@ -836,7 +836,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
     if (request.pending.kind == PendingKind::Begin && terminal && sequence.state.fork_pending) {
         const StateImageSelectors selectors = state_selectors(sequence);
         timing.resume_submit();
-        state_images->copy_slot(selectors.source, selectors.destination, device.stream);
+        state_images->copy_slot(selectors.source, selectors.destination, compute_streams);
         timing.begin_wait();
         device.synchronize();
         timing.end_wait();
