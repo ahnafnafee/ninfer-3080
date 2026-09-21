@@ -50,6 +50,11 @@ struct ToolCallOutputContract {
 
     std::vector<Tool> tools;
     bool enforce_declared_names = false;
+    // Function whose call opener the rendered prompt already carries, empty when the model chooses
+    // freely. It lives here because the prompt that carries the opener is the only thing that knows
+    // it: a second, independently supplied copy could name a different tool and the continuation
+    // would be attributed to that one.
+    std::string forced_tool_name;
 };
 
 struct ParsedToolCallOutput {
@@ -60,7 +65,8 @@ struct ParsedToolCallOutput {
 };
 
 [[nodiscard]] std::shared_ptr<const ToolCallOutputContract>
-build_tool_call_output_contract(std::span<const std::string> tool_jsons, bool enabled);
+build_tool_call_output_contract(std::span<const std::string> tool_jsons, bool enabled,
+                                std::string_view forced_tool_name = {});
 
 [[nodiscard]] ParsedToolCallOutput
 parse_qwen_tool_call_output(const std::string& text, std::size_t max_tool_name_length,
@@ -68,7 +74,8 @@ parse_qwen_tool_call_output(const std::string& text, std::size_t max_tool_name_l
 
 // Incrementally publishes bytes that are provably outside a possible terminal Qwen tool-call
 // suffix. At terminal time, valid calls are retained structurally; malformed output is restored
-// verbatim.
+// verbatim. When the prompt already carries the opener of a forced call, the decoder is seeded
+// with that opener, because the model never emits it.
 class ToolCallOutputDecoder {
 public:
     struct Terminal {
@@ -87,9 +94,13 @@ private:
     std::shared_ptr<const ToolCallOutputContract> contract_;
     std::string trailing_whitespace_;
     std::string tool_region_;
-    std::size_t marker_prefix_bytes_  = 0;
+    std::size_t marker_prefix_bytes_ = 0;
+    // Bytes of tool_region_ that came from the prompt's opener rather than from the model. The
+    // fallback path returns the region as ordinary content, and these must not appear there.
+    std::size_t seeded_prefix_bytes_  = 0;
     std::size_t max_tool_name_length_ = 0;
     bool saw_tool_marker_             = false;
+    bool forced_                      = false;
     bool finished_                    = false;
 };
 

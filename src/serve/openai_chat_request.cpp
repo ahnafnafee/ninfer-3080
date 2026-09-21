@@ -642,6 +642,21 @@ void parse_tools(const Json& body, GenerationRequest& output) {
     }
 }
 
+// A forced choice is executed by writing the call opener into the generation prompt, and that
+// opener carries the function name. One callable tool determines the name; several leave it to the
+// model, which is the part NInfer cannot constrain.
+void force_single_callable_tool(GenerationRequest& output, const std::string& request) {
+    if (output.tools.empty()) {
+        bad_request(request + " requires at least one tool", "tool_choice");
+    }
+    if (output.tools.size() != 1) {
+        bad_request(request + " over several tools leaves the function to the model, which NInfer "
+                              "cannot constrain; name the function instead",
+                    "tool_choice", "tool_choice_not_supported");
+    }
+    output.tool_choice.forced_name = output.tools.front().name;
+}
+
 void apply_allowed_tools(const Json& config, GenerationRequest& output) {
     if (!config.is_object()) {
         bad_request("tool_choice.allowed_tools must be an object", "tool_choice");
@@ -681,18 +696,14 @@ void apply_allowed_tools(const Json& config, GenerationRequest& output) {
         }
     }
 
-    if (mode == "required") {
-        bad_request(
-            "tool_choice.allowed_tools mode='required' requires at least one tool call, which "
-            "NInfer cannot guarantee",
-            "tool_choice", "tool_choice_not_supported");
-    }
-
     std::erase_if(output.tools, [&](const ToolDefinition& tool) {
         return std::find(allowed_names.begin(), allowed_names.end(), tool.name) ==
                allowed_names.end();
     });
     output.tool_choice.mode = ToolChoiceMode::Auto;
+    if (mode == "required") {
+        force_single_callable_tool(output, "tool_choice.allowed_tools mode='required'");
+    }
 }
 
 void parse_tool_choice(const Json& body, GenerationRequest& output) {
@@ -705,10 +716,8 @@ void parse_tool_choice(const Json& body, GenerationRequest& output) {
         } else if (value == "none") {
             output.tool_choice.mode = ToolChoiceMode::None;
         } else if (value == "required") {
-            bad_request(
-                "tool_choice='required' requires at least one tool call, which NInfer cannot "
-                "guarantee",
-                "tool_choice", "tool_choice_not_supported");
+            output.tool_choice.mode = ToolChoiceMode::Auto;
+            force_single_callable_tool(output, "tool_choice='required'");
         } else {
             bad_request("tool_choice must be 'auto', 'none', 'required', or a function choice",
                         "tool_choice");
@@ -726,10 +735,15 @@ void parse_tool_choice(const Json& body, GenerationRequest& output) {
                 bad_request("function tool_choice must contain a function object", "tool_choice");
             }
             const std::string name = require_function_name(choice.at("function"), "tool_choice");
-            bad_request(
-                "tool_choice for function '" + name +
-                    "' requires that exact function to be called, which NInfer cannot guarantee",
-                "tool_choice", "tool_choice_not_supported");
+            const bool declared =
+                std::any_of(output.tools.begin(), output.tools.end(),
+                            [&](const ToolDefinition& tool) { return tool.name == name; });
+            if (!declared) {
+                bad_request("tool_choice names '" + name + "', which is not present in tools",
+                            "tool_choice");
+            }
+            output.tool_choice.mode        = ToolChoiceMode::Auto;
+            output.tool_choice.forced_name = name;
         } else if (type == "custom") {
             bad_request(
                 "custom tool_choice requires custom tool output, which NInfer does not provide",

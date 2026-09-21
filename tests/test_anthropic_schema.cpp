@@ -395,11 +395,21 @@ int test_tools() {
     body                = base_request();
     body["tools"]       = Json::array({ordinary_tool()});
     body["tool_choice"] = Json{{"type", "any"}};
-    failures += check(api_code([&] { (void)parse(body); }) == "tool_choice_not_supported",
-                      "forced any-tool choice was silently downgraded");
+    failures += check(parse(body).generation.tool_choice.forced_name == "weather",
+                      "any over a single callable tool forces that tool");
     body["tool_choice"] = Json{{"type", "tool"}, {"name", "weather"}};
+    failures += check(parse(body).generation.tool_choice.forced_name == "weather",
+                      "named tool choice forces that tool");
+    body["tool_choice"] = Json{{"type", "tool"}, {"name", "missing"}};
+    failures += check(api_param([&] { (void)parse(body); }) == "tool_choice",
+                      "named tool choice accepted a tool absent from tools");
+    Json two_tools      = ordinary_tool();
+    two_tools["name"]   = "search";
+    body["tools"]       = Json::array({ordinary_tool(), two_tools});
+    body["tool_choice"] = Json{{"type", "any"}};
     failures += check(api_code([&] { (void)parse(body); }) == "tool_choice_not_supported",
-                      "named tool choice was silently downgraded");
+                      "any over several tools stays rejected");
+    body["tools"]       = Json::array({ordinary_tool()});
     body["tool_choice"] = Json{{"type", "auto"}, {"disable_parallel_tool_use", true}};
     failures += check(api_code([&] { (void)parse(body); }) == "parallel_tool_use_not_supported",
                       "active single-tool-call guarantee was silently downgraded");

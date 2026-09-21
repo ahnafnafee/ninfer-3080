@@ -249,12 +249,43 @@ int test_tools() {
         check(!none.generation.uses_tools() && prompt(none.generation).options.tool_jsons.empty(),
               "tool_choice none makes parallel_tool_calls neutral and removes executable tools");
 
-    body["tool_choice"] = "required";
-    failures += check(api_error([&] { (void)parse(body); }).code == "tool_choice_not_supported",
-                      "required tool choice rejected");
+    body["parallel_tool_calls"]             = true;
+    body["enable_thinking"]                 = false;
+    body["tool_choice"]                     = "required";
+    const GenerationRequest required_single = parse(body).generation;
+    failures += check(required_single.tool_choice.forced_name == "weather" &&
+                          prompt(required_single).options.forced_tool_name == "weather",
+                      "required over a single callable tool forces that function");
     body["tool_choice"] = Json{{"type", "function"}, {"function", Json{{"name", "weather"}}}};
-    failures += check(api_error([&] { (void)parse(body); }).code == "tool_choice_not_supported",
-                      "named tool choice rejected");
+    failures += check(parse(body).generation.tool_choice.forced_name == "weather",
+                      "named tool choice forces that function");
+    body["tool_choice"] = Json{{"type", "function"}, {"function", Json{{"name", "missing"}}}};
+    failures += check(api_error([&] { (void)parse(body); }).param == "tool_choice",
+                      "named tool choice rejects a function absent from tools");
+    body["enable_thinking"] = true;
+    body["tool_choice"]     = Json{{"type", "function"}, {"function", Json{{"name", "weather"}}}};
+    failures += check(api_error([&] { (void)prompt(parse(body).generation); }).code ==
+                          "tool_choice_not_supported",
+                      "a forced choice with reasoning enabled is rejected");
+    body.erase("enable_thinking");
+    const GenerationRequest default_reasoning = parse(body).generation;
+    failures += check(!semantics(default_reasoning).enable_thinking &&
+                          !prompt(default_reasoning).options.enable_thinking &&
+                          prompt(default_reasoning).options.forced_tool_name == "weather",
+                      "a forced choice turns off reasoning that only the server default enabled");
+    body["reasoning_effort"] = "high";
+    failures += check(api_error([&] { (void)prompt(parse(body).generation); }).code ==
+                          "tool_choice_not_supported",
+                      "a forced choice with a requested reasoning effort is rejected");
+    body.erase("reasoning_effort");
+
+    body                        = base_request();
+    body["tools"]               = Json::array({function_tool(), function_tool("search")});
+    body["tool_choice"]         = "required";
+    const ApiError over_several = api_error([&] { (void)parse(body); });
+    failures += check(over_several.code == "tool_choice_not_supported" &&
+                          over_several.message.find("several tools") != std::string::npos,
+                      "required over several tools stays rejected");
 
     body          = base_request();
     body["tools"] = Json::array({function_tool(), function_tool("search")});
@@ -275,12 +306,9 @@ int test_tools() {
     const GenerationRequest direct_allowed = parse(body).generation;
     failures += check(direct_allowed.tools.size() == 1 && direct_allowed.tools[0].name == "weather",
                       "direct allowed_tools compatibility shape is accepted");
-    body["tool_choice"]["mode"]     = "required";
-    const ApiError required_allowed = api_error([&] { (void)parse(body); });
-    failures +=
-        check(required_allowed.code == "tool_choice_not_supported" &&
-                  required_allowed.message.find("at least one tool call") != std::string::npos,
-              "required allowed_tools reports the unenforceable guarantee");
+    body["tool_choice"]["mode"] = "required";
+    failures += check(parse(body).generation.tool_choice.forced_name == "weather",
+                      "allowed_tools narrowed to one function forces it");
     body["tool_choice"]["mode"]             = "auto";
     body["tool_choice"]["tools"][0]["name"] = "missing";
     failures += check(api_error([&] { (void)parse(body); }).param == "tool_choice",

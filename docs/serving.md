@@ -224,9 +224,9 @@ The endpoint supports:
 - `n:1`, text-only `modalities`, and `response_format: {"type":"text"}`;
 - non-streaming responses and server-sent event streams;
 - `stream_options.include_usage`;
-- non-strict function tools with `tool_choice` `auto`, `none`, or `allowed_tools` in `auto` mode,
-  parallel calls enabled, assistant tool-call history, tool-result messages, and legacy
-  function-call history;
+- non-strict function tools with `tool_choice` `auto`, `none`, a named function, `required` over a
+  single callable tool, or `allowed_tools` in either mode, parallel calls enabled, assistant
+  tool-call history, tool-result messages, and legacy function-call history;
 - the top-level `reasoning_effort` field;
 - `enable_thinking` and `preserve_thinking`, either at top level or in
   `chat_template_kwargs`;
@@ -234,8 +234,8 @@ The endpoint supports:
 
 Options whose observable behavior the Engine cannot provide are rejected when they request that
 behavior. This includes JSON constrained output, nonzero `logit_bias`, requested log probabilities,
-audio/file input or audio output, `strict:true`, required or named tool choice,
-`parallel_tool_calls:false` with enabled tools, explicit low/high image detail, web search,
+audio/file input or audio output, `strict:true`, `required` tool choice over several callable
+tools, `parallel_tool_calls:false` with enabled tools, explicit low/high image detail, web search,
 moderation, low/high verbosity, stored Chat Completions, and non-empty legacy `functions`.
 Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
 Known constrained-decoding aliases (`grammar`, `structured_outputs`, `guided_json`, `guided_regex`,
@@ -434,7 +434,7 @@ wire response contains typed `output` Items.
 | `preserve_thinking` | alias for `chat_template_kwargs.preserve_thinking`; conflicting values are rejected |
 | `text.format` | omitted or `{"type":"text"}` only |
 | `tools` | direct function definitions or namespace groups containing function definitions; see below |
-| `tool_choice` | `auto`, `none`, or function-only `allowed_tools` with mode `auto`; a namespaced selection carries both `namespace` and `name` |
+| `tool_choice` | `auto`, `none`, a named function, `required` over a single callable tool, or function-only `allowed_tools` in either mode; a namespaced selection carries both `namespace` and `name` |
 | `parallel_tool_calls` | `true` by default; `false` is accepted only when no effective tool is callable |
 | `max_tool_calls` | non-negative integer accepted as a hosted-tool no-op; NInfer does not execute hosted tools |
 | `truncation` | omitted or `disabled`; overlong input fails instead of silently dropping Items |
@@ -527,14 +527,22 @@ NInfer renders these definitions in the Qwen prompt and parses model output into
 `function_call` output Items. Each output has a protocol Item `id` (`fc_...`) and a distinct
 `call_id` (`call_...`). The client executes the function and sends a `function_call_output` Item in
 a later request. Only functions in the current effective tool set can become structured calls;
-undeclared model output remains ordinary text. `allowed_tools` with mode `auto` filters that set
-without changing declaration order, while `tool_choice:"none"` disables structured tool output even
-when the history contains earlier calls.
+undeclared model output remains ordinary text. `allowed_tools` filters that set without changing
+declaration order, while `tool_choice:"none"` disables structured tool output even when the history
+contains earlier calls.
+
+A forced selection names one function: `tool_choice` naming it directly, `required`, or
+`allowed_tools` with mode `required` over a single callable tool. NInfer executes it by ending the
+generation prompt with that call's opener, so the answer can only continue inside the call. It
+therefore requires a fresh answer position and is rejected when reasoning is enabled for the
+request; `required` over several callable tools is rejected too, because the function itself would
+still be sampled. The forced call is present and first in the output; a model that keeps writing may
+add further calls, exactly as under `auto` with parallel calls enabled.
 
 NInfer does not execute functions or enforce JSON Schema through constrained decoding, so
-`strict:true`, required or named tool choice, hosted tools, remote MCP tools, and custom free-form
-tools are rejected. Deferred loading, output schemas, and caller restrictions that exclude direct
-invocation are also rejected because their semantics cannot be honored.
+`strict:true`, hosted tools, remote MCP tools, and custom free-form tools are rejected. Deferred
+loading, output schemas, and caller restrictions that exclude direct invocation are also rejected
+because their semantics cannot be honored.
 
 ### Response object and usage
 
@@ -696,10 +704,11 @@ closed-turn reasoning history. `output_config.effort` passes its protocol-valida
 selected template.
 
 User-defined, non-strict tools support `name`, `description`, object `input_schema`, and
-`input_examples`. `tool_choice:auto` and `none` are executable. Forced or named choice,
-`strict:true`, active single-call enforcement, deferred tools, tools that exclude direct model
-calls, Anthropic-provided/server tools, toolsets, MCP, and containers are rejected because their
-required constraint or executor is absent. `tool_result` preserves text/image order and marks
+`input_examples`. `tool_choice` `auto`, `none`, `tool` naming a declared tool, and `any` over a
+single callable tool are executable; the last two require reasoning to be disabled for the request.
+`any` over several tools, `strict:true`, active single-call enforcement, deferred tools, tools that
+exclude direct model calls, Anthropic-provided/server tools, toolsets, MCP, and containers are
+rejected because their required constraint or executor is absent. `tool_result` preserves text/image order and marks
 `is_error:true` explicitly in the model prompt. For a visible Assistant tool-use turn, the next
 User turn must provide exactly one leading result for every declared ID; valid results are matched
 by ID and normalized to call order. A history that begins with results remains valid as a truncated
@@ -845,7 +854,7 @@ is also rejected if it resolves to the model artifact.
 Add `--request-log-jsonl profiles/bench/run/server.requests.jsonl` to the startup command to write
 the log at that path.
 
-Every line is one `ninfer_serve_request_log` schema-v21 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v22 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;

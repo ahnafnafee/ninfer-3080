@@ -2157,6 +2157,98 @@ int test_media_preparation_cancellation() {
 
 } // namespace
 
+constexpr std::string_view kForcedToolDefinition =
+    R"({"type":"function","function":{"name":"TaskUpdate","parameters":{"type":"object","properties":{"taskId":{"type":"string"}},"required":["taskId"]}}})";
+
+// A forced tool choice ends the generation prompt with the call opener, so the answer can only
+// continue inside that call, and the decoder has to own an opener the model never emits.
+int test_forced_tool_call(const Frontend& frontend) {
+    fi::ChatRenderOptions forced;
+    forced.enable_thinking  = false;
+    forced.forced_tool_name = "TaskUpdate";
+    forced.tool_jsons.emplace_back(kForcedToolDefinition);
+    const std::string prompt_text =
+        render_chat_text({chat_message(ninfer::ChatRole::User, "x")}, forced);
+    int failures = check(prompt_text.ends_with("<tool_call>\n<function=TaskUpdate>\n"),
+                         "forced tool choice did not end the generation prompt with its opener");
+    failures += check(prompt_text.find("<think>\n\n</think>") != std::string::npos,
+                      "forced tool choice did not keep the reasoning block closed");
+
+    fi::ChatRenderOptions thinking = forced;
+    thinking.enable_thinking       = true;
+    failures += check(throws_invalid_argument([&] {
+                          (void)render_chat({chat_message(ninfer::ChatRole::User, "x")}, thinking);
+                      }),
+                      "a forced tool call was opened inside a thinking prompt");
+
+    fi::ChatRenderOptions closed_turn = forced;
+    closed_turn.add_generation_prompt = false;
+    failures +=
+        check(throws_invalid_argument([&] {
+                  (void)render_chat({chat_message(ninfer::ChatRole::User, "x")}, closed_turn);
+              }),
+              "a forced tool call was opened without an answer to open");
+
+    fi::ChatRenderOptions no_tools = forced;
+    no_tools.tool_jsons.clear();
+    failures += check(throws_invalid_argument([&] {
+                          (void)render_chat({chat_message(ninfer::ChatRole::User, "x")}, no_tools);
+                      }),
+                      "a forced tool call was opened with no tool declared");
+
+    struct ForcedOutcome {
+        std::vector<ninfer::GeneratedToolCall> calls;
+        ninfer::ToolCallParseDiagnostics diagnostics;
+        std::string content;
+    };
+
+    const auto forced_session = [&](const std::string& continuation) {
+        ninfer::ChatMessage message;
+        message.role = ninfer::ChatRole::User;
+        message.parts.push_back(
+            ninfer::MessagePart{.kind = ninfer::MessagePartKind::Text, .text = "x", .media = {}});
+        ninfer::PromptInput input;
+        input.messages.push_back(std::move(message));
+        input.options.enable_thinking  = false;
+        input.options.forced_tool_name = "TaskUpdate";
+        input.options.tool_jsons.emplace_back(kForcedToolDefinition);
+        auto prompt  = frontend.prepare(std::move(input));
+        auto session = frontend.make_output_session(
+            prompt, {}, ninfer::OutputOptions{.tool_name_max_length = 64});
+        const std::vector<ninfer::TokenId> tokens = fixture_tokenizer().encode(continuation);
+        (void)session.preview_model(tokens, static_cast<std::uint32_t>(tokens.size()),
+                                    ninfer::FinishReason::OutputLimit);
+        const auto output = session.commit_preview();
+        return ForcedOutcome{.calls       = session.take_tool_calls(),
+                             .diagnostics = session.tool_call_parse_diagnostics(),
+                             .content     = channel_text(output, ninfer::OutputChannel::Content)};
+    };
+
+    const ForcedOutcome complete =
+        forced_session("\n<parameter=taskId>\n1\n</parameter>\n</function>\n</tool_call>");
+    failures += check(complete.calls.size() == 1 && complete.calls.front().name == "TaskUpdate" &&
+                          !complete.diagnostics.forced_call_closed && complete.content.empty(),
+                      "the seeded opener did not complete the model's call");
+
+    const ForcedOutcome unclosed =
+        forced_session("\n<parameter=taskId>\n1\n</parameter>\n</function>");
+    failures += check(unclosed.calls.size() == 1 && unclosed.calls.front().name == "TaskUpdate" &&
+                          unclosed.diagnostics.forced_call_closed && unclosed.content.empty(),
+                      "a turn ending on the closed function did not become the forced call");
+
+    const ForcedOutcome truncated = forced_session("\n<parameter=taskId>\n1\n</par");
+    failures += check(truncated.calls.empty() && !truncated.diagnostics.forced_call_closed &&
+                          !truncated.content.empty(),
+                      "an unfinished argument was completed into a call");
+    // The fallback returns the region as ordinary content. The opener at its head came from the
+    // prompt, not from the model, and must not reach the caller.
+    failures += check(truncated.content.find("<tool_call>") == std::string::npos &&
+                          truncated.content.find("<function=TaskUpdate>") == std::string::npos &&
+                          truncated.content.starts_with("\n<parameter=taskId>"),
+                      "fallback content carried the prompt-owned opener");
+    return failures;
+}
+
 int main() {
     const FrontendResources owned = resources();
     const Frontend frontend       = make_frontend(owned);
@@ -2191,6 +2283,7 @@ int main() {
     failures += test_same_token_stop_priority(frontend);
     failures += test_terminal_flush(frontend);
     failures += test_structured_tool_output();
+    failures += test_forced_tool_call(frontend);
     failures += test_reasoning_split(frontend);
     failures += test_thinking_budget_control(frontend);
     failures += test_utf8_and_hidden_eos(frontend);

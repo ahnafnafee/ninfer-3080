@@ -31,6 +31,10 @@ std::string_view role_name(ChatRole role) {
 
 bool instruction(ChatRole role) { return role == ChatRole::System || role == ChatRole::Developer; }
 
+// Opener of Qwen's call syntax, written into the generation prompt when the caller forced a
+// function: everything after it can only be that call.
+constexpr std::string_view kToolCallOpen = "<tool_call>\n<function=";
+
 struct ContentSource {
     std::uint32_t tag = 0;
     std::vector<std::size_t> part_ends;
@@ -249,6 +253,20 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         .checkpoint        = [&] { check_preparation_control(control, "chat template"); },
         .regions           = regions,
         .control_variables = control_variables};
+    if (!options.forced_tool_name.empty()) {
+        // The opener of the forced call is appended to the generation prompt, so the turn has to
+        // open fresh, with the reasoning block already closed (a thinking prompt ends inside it)
+        // and a declared tool to name.
+        if (continuation || !options.add_generation_prompt) {
+            throw std::invalid_argument("a forced tool call requires a new assistant turn to open");
+        }
+        if (options.enable_thinking != false) {
+            throw std::invalid_argument("a forced tool call cannot start in thinking mode");
+        }
+        if (options.tool_jsons.empty()) {
+            throw std::invalid_argument("a forced tool call requires declared tools");
+        }
+    }
     auto output = compiled_.render(context, execution);
     auto layout = inspect_prompt_layout(output, media);
     if (continuation) {
@@ -454,6 +472,16 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
             }
             break;
         }
+    }
+    if (!options.forced_tool_name.empty()) {
+        // Qwen's call syntax opens with the function name; everything the model produces after
+        // this can only be that call. The name is caller text, so it is a literal span like any
+        // other user-sourced bytes.
+        output.text.append(kToolCallOpen);
+        const std::size_t name_begin = output.text.size();
+        output.text.append(options.forced_tool_name);
+        output.literal_spans.push_back(text::ByteSpan{name_begin, output.text.size()});
+        output.text.append(">\n");
     }
     result.text          = std::move(output.text);
     result.literal_spans = std::move(output.literal_spans);

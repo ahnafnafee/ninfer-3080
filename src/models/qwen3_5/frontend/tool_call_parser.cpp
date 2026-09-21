@@ -583,10 +583,12 @@ ParsedToolCallOutput fallback(const std::string& text, ToolCallParseDiagnostics 
 } // namespace
 
 std::shared_ptr<const ToolCallOutputContract>
-build_tool_call_output_contract(std::span<const std::string> tool_jsons, bool enabled) {
+build_tool_call_output_contract(std::span<const std::string> tool_jsons, bool enabled,
+                                std::string_view forced_tool_name) {
     if (!enabled) { return {}; }
     auto contract                    = std::make_shared<ToolCallOutputContract>();
     contract->enforce_declared_names = true;
+    contract->forced_tool_name.assign(forced_tool_name);
     contract->tools.reserve(tool_jsons.size());
     for (const std::string& tool_json : tool_jsons) {
         const Json definition = Json::parse(tool_json, nullptr, false);
@@ -626,7 +628,20 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
 
 ToolCallOutputDecoder::ToolCallOutputDecoder(std::shared_ptr<const ToolCallOutputContract> contract,
                                              std::size_t max_tool_name_length)
-    : contract_(std::move(contract)), max_tool_name_length_(max_tool_name_length) {}
+    : contract_(std::move(contract)), max_tool_name_length_(max_tool_name_length) {
+    if (contract_ == nullptr || contract_->forced_tool_name.empty()) { return; }
+    const std::string& forced_tool_name = contract_->forced_tool_name;
+    // The generation prompt ends with exactly this opener, so generation resumes inside the call
+    // and the region the parser sees has to begin where the prompt left off.
+    tool_region_.append(kToolOpen);
+    tool_region_.push_back('\n');
+    tool_region_.append(kFunctionOpen);
+    tool_region_.append(forced_tool_name);
+    tool_region_.append(">\n");
+    seeded_prefix_bytes_ = tool_region_.size();
+    saw_tool_marker_     = true;
+    forced_              = true;
+}
 
 std::string ToolCallOutputDecoder::feed(std::string_view text) {
     if (finished_) { throw std::logic_error("tool-call output decoder is already finished"); }
@@ -680,6 +695,23 @@ ToolCallOutputDecoder::Terminal ToolCallOutputDecoder::finish() {
 
     ParsedToolCallOutput parsed =
         parse_qwen_tool_call_output(tool_region_, max_tool_name_length_, *contract_);
+    if (forced_ && !parsed.is_tool_call_response) {
+        // A turn that ends after the function closed is a complete call missing only its outer
+        // tag. Supplying that tag invents no argument byte; anything less complete still falls
+        // back to verbatim text below.
+        std::string completed = rtrim_format_whitespace(tool_region_);
+        if (std::string_view(completed).ends_with(kFunctionClose)) {
+            completed.push_back('\n');
+            completed.append(kToolClose);
+            ParsedToolCallOutput closed =
+                parse_qwen_tool_call_output(completed, max_tool_name_length_, *contract_);
+            if (closed.is_tool_call_response) {
+                closed.diagnostics.forced_call_closed = true;
+                parsed                                = std::move(closed);
+                tool_region_                          = std::move(completed);
+            }
+        }
+    }
     if (saw_tool_marker_ && parsed.is_tool_call_response) {
         trailing_whitespace_.clear();
         tool_region_.clear();
@@ -692,7 +724,12 @@ ToolCallOutputDecoder::Terminal ToolCallOutputDecoder::finish() {
     std::string tail = std::move(trailing_whitespace_);
     tail.append(kToolOpen.substr(0, marker_prefix_bytes_));
     marker_prefix_bytes_ = 0;
-    tail += tool_region_;
+    // Only what the model produced. A forced turn that never formed a closing region still
+    // carries the prompt's opener at the head of the region, and returning it would put bytes the
+    // model never generated into the response. saw_tool_marker_ is set in the constructor for a
+    // forced turn, so feed() never rebuilds the region and the prefix stays at its head.
+    tail.append(std::string_view(tool_region_).substr(seeded_prefix_bytes_));
+    seeded_prefix_bytes_ = 0;
     tool_region_.clear();
     return Terminal{
         .content = std::move(tail), .tool_calls = {}, .diagnostics = parsed.diagnostics};

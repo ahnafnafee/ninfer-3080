@@ -98,11 +98,13 @@ Json tool_call_parse_json(const ninfer::ToolCallParseDiagnostics& diagnostics) {
                 {"structured_call_count", diagnostics.structured_call_count},
                 {"empty_arguments_omitted", diagnostics.empty_arguments_omitted},
                 {"schema_mismatch_arguments", diagnostics.schema_mismatch_arguments},
+                {"forced_call_closed", diagnostics.forced_call_closed},
                 {"fallback_reason",
                  ninfer::tool_call_parse_fallback_reason_name(diagnostics.fallback_reason)}};
 }
 
 std::string tool_choice_name(const ToolChoice& choice) {
+    if (!choice.forced_name.empty()) { return "function:" + choice.forced_name; }
     switch (choice.mode) {
     case ToolChoiceMode::Auto:
         return "auto";

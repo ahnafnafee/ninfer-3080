@@ -784,19 +784,12 @@ void lower_tools(const Json& body, GenerationRequest& request) {
         return tool.definition.name == selection.name;
     };
 
-    if (selection.kind == ToolSelectionKind::Named) {
-        if (std::none_of(definitions.begin(), definitions.end(), named)) {
-            bad_request("tool_choice references unknown tool: " + selection.name, "tool_choice");
-        }
-        bad_request("tool_choice.type='tool' requires that exact tool to be called, which NInfer "
-                    "cannot guarantee",
-                    "tool_choice", "tool_choice_not_supported");
+    if (selection.kind == ToolSelectionKind::Named &&
+        std::none_of(definitions.begin(), definitions.end(), named)) {
+        bad_request("tool_choice references unknown tool: " + selection.name, "tool_choice");
     }
-    if (selection.kind == ToolSelectionKind::Any) {
-        if (definitions.empty()) { bad_request("tool_choice requires tools", "tool_choice"); }
-        bad_request("tool_choice.type='any' requires at least one tool call, which NInfer cannot "
-                    "guarantee",
-                    "tool_choice", "tool_choice_not_supported");
+    if (selection.kind == ToolSelectionKind::Any && definitions.empty()) {
+        bad_request("tool_choice requires tools", "tool_choice");
     }
 
     request.tool_choice.mode =
@@ -840,6 +833,21 @@ void lower_tools(const Json& body, GenerationRequest& request) {
         }
         request.tools.push_back(std::move(tool.definition));
     }
+
+    // A forced choice is executed by writing the call opener into the generation prompt, and that
+    // opener carries the tool name. `any` over several tools leaves the name to the model, which
+    // is the part NInfer cannot constrain.
+    if (selection.kind == ToolSelectionKind::Named) {
+        request.tool_choice.forced_name = selection.name;
+    } else if (selection.kind == ToolSelectionKind::Any) {
+        if (request.tools.size() != 1) {
+            bad_request("tool_choice.type='any' over several tools leaves the tool to the model, "
+                        "which NInfer cannot constrain; select the tool by name instead",
+                        "tool_choice", "tool_choice_not_supported");
+        }
+        request.tool_choice.forced_name = request.tools.front().name;
+    }
+
     if (selection.disable_parallel && !request.tools.empty()) {
         bad_request("disable_parallel_tool_use=true requires at most one tool call, which NInfer "
                     "cannot guarantee",

@@ -847,15 +847,29 @@ void parse_tools(const Json& body, ParsedPromptFields& out) {
     }
 }
 
+// A forced choice is executed by writing the call opener into the generation prompt, and that
+// opener carries the function name. One callable tool determines the name; several leave it to the
+// model, which is the part NInfer cannot constrain.
+void force_single_callable_tool(ParsedPromptFields& out, const std::string& request) {
+    std::vector<ToolDefinition>& tools = out.prompt.generation.tools;
+    if (tools.empty()) { bad_request(request + " requires at least one tool", "tool_choice"); }
+    if (tools.size() != 1) {
+        bad_request(request + " over several tools leaves the function to the model, which NInfer "
+                              "cannot constrain; name the function instead",
+                    "tool_choice", "tool_choice_not_supported");
+    }
+    out.prompt.generation.tool_choice.forced_name = tools.front().name;
+}
+
 void filter_allowed_tools(const Json& choice, ParsedPromptFields& out) {
     static const std::unordered_set<std::string> allowed_choice = {"type", "mode", "tools"};
     reject_nonnull_unknown_members(choice, allowed_choice, "tool_choice");
     if (!choice.contains("mode") || !choice.at("mode").is_string()) {
         bad_request("allowed_tools tool_choice must contain a string mode", "tool_choice");
     }
-    if (choice.at("mode").get<std::string>() != "auto") {
-        bad_request("allowed_tools mode 'required' cannot be enforced", "tool_choice",
-                    "tool_choice_not_supported");
+    const std::string allowed_mode = choice.at("mode").get<std::string>();
+    if (allowed_mode != "auto" && allowed_mode != "required") {
+        bad_request("allowed_tools mode must be 'auto' or 'required'", "tool_choice");
     }
     if (!choice.contains("tools") || !choice.at("tools").is_array()) {
         bad_request("allowed_tools tool_choice must contain a tools array", "tool_choice");
@@ -891,6 +905,9 @@ void filter_allowed_tools(const Json& choice, ParsedPromptFields& out) {
         if (selected.contains(tool.name)) { effective.push_back(std::move(tool)); }
     }
     out.prompt.generation.tools = std::move(effective);
+    if (allowed_mode == "required") {
+        force_single_callable_tool(out, "allowed_tools mode 'required'");
+    }
 }
 
 void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
@@ -906,8 +923,8 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
         } else if (value == "none") {
             out.prompt.generation.tool_choice.mode = ToolChoiceMode::None;
         } else if (value == "required") {
-            bad_request("tool_choice 'required' cannot be guaranteed by the Engine", "tool_choice",
-                        "tool_choice_not_supported");
+            out.prompt.generation.tool_choice.mode = ToolChoiceMode::Auto;
+            force_single_callable_tool(out, "tool_choice 'required'");
         } else {
             bad_request("tool_choice must be 'auto', 'none', or a supported object", "tool_choice");
         }
@@ -917,8 +934,30 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
     if (!choice.is_object() || !choice.contains("type") || !choice.at("type").is_string()) {
         bad_request("tool_choice must be a string or typed object", "tool_choice");
     }
-    if (choice.at("type").get<std::string>() != "allowed_tools") {
-        bad_request("named or hosted tool_choice cannot be enforced", "tool_choice",
+    const std::string choice_type = choice.at("type").get<std::string>();
+    if (choice_type == "function") {
+        static const std::unordered_set<std::string> allowed_named = {"type", "name", "namespace"};
+        reject_nonnull_unknown_members(choice, allowed_named, "tool_choice");
+        const OpenAIResponsesFunctionIdentity identity = function_identity(choice, "tool_choice");
+        const std::string name =
+            lower_function_identity(identity, out.tool_identities, "tool_choice");
+        const bool declared =
+            std::any_of(out.prompt.generation.tools.begin(), out.prompt.generation.tools.end(),
+                        [&](const ToolDefinition& tool) { return tool.name == name; });
+        if (!declared) {
+            const std::string wire_name = identity.wire_namespace
+                                              ? *identity.wire_namespace + "." + identity.name
+                                              : identity.name;
+            bad_request("tool_choice names undeclared function '" + wire_name + "'", "tool_choice",
+                        "invalid_tool_choice");
+        }
+        out.prompt.generation.tool_choice.mode        = ToolChoiceMode::Auto;
+        out.prompt.generation.tool_choice.forced_name = name;
+        out.wire_tool_choice                          = choice;
+        return;
+    }
+    if (choice_type != "allowed_tools") {
+        bad_request("hosted tool_choice cannot be enforced", "tool_choice",
                     "tool_choice_not_supported");
     }
     filter_allowed_tools(choice, out);

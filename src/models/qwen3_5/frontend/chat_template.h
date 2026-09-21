@@ -102,6 +102,7 @@ struct ChatRenderOptions {
     std::string chat_template_kwargs_json;
     bool add_vision_id = false;
     std::vector<std::string> tool_jsons;
+    std::string forced_tool_name;
     std::vector<PromptCacheMarker> cache_markers;
 };
 

@@ -735,9 +735,58 @@ int test_incremental_embedded_parameter_markup() {
 
 } // namespace
 
+// A forced tool choice writes the call opener into the generation prompt, so the decoder owns an
+// opener the model never emits: it completes the model's call, closes a turn that ends on the
+// closed function, and never returns the prompt's bytes as content.
+int test_forced_call_decoder() {
+    const std::vector<std::string> definitions = {
+        tool_definition("TaskUpdate", Json{{"taskId", Json{{"type", "string"}}}})};
+    const auto contract = fi::build_tool_call_output_contract(
+        std::span<const std::string>(definitions.data(), definitions.size()), true, "TaskUpdate");
+    int failures = check(contract != nullptr && contract->forced_tool_name == "TaskUpdate",
+                         "forced tool name was not recorded on the contract");
+
+    const auto run = [&](std::string_view continuation) {
+        fi::ToolCallOutputDecoder decoder(contract, 128);
+        std::string visible = decoder.feed(continuation);
+        auto terminal       = decoder.finish();
+        return std::pair<std::string, fi::ToolCallOutputDecoder::Terminal>{std::move(visible),
+                                                                           std::move(terminal)};
+    };
+
+    {
+        const auto [visible, terminal] =
+            run("\n<parameter=taskId>\n1\n</parameter>\n</function>\n</tool_call>");
+        failures += check(visible.empty() && terminal.content.empty() &&
+                              terminal.tool_calls.size() == 1 &&
+                              terminal.tool_calls.front().name == "TaskUpdate" &&
+                              !terminal.diagnostics.forced_call_closed,
+                          "the seeded opener did not complete the model's call");
+    }
+    {
+        const auto [visible, terminal] = run("\n<parameter=taskId>\n1\n</parameter>\n</function>");
+        failures += check(visible.empty() && terminal.content.empty() &&
+                              terminal.tool_calls.size() == 1 &&
+                              terminal.tool_calls.front().name == "TaskUpdate" &&
+                              terminal.diagnostics.forced_call_closed,
+                          "a turn ending on the closed function did not become the forced call");
+    }
+    {
+        const auto [visible, terminal] = run("\n<parameter=taskId>\n1\n</par");
+        const std::string content       = visible + terminal.content;
+        failures += check(terminal.tool_calls.empty() && !terminal.diagnostics.forced_call_closed &&
+                              content.starts_with("\n<parameter=taskId>") &&
+                              content.find("<tool_call>") == std::string::npos &&
+                              content.find("<function=TaskUpdate>") == std::string::npos,
+                          "fallback content carried the prompt-owned opener or lost the model's text");
+    }
+    return failures;
+}
+
 int main() {
     int failures = 0;
     failures += test_basic_legacy_parsing();
+    failures += test_forced_call_decoder();
     failures += test_multiple_calls();
     failures += test_declared_strings_preserve_text();
     failures += test_string_values_preserve_embedded_tool_markup();

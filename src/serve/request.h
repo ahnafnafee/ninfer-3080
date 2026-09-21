@@ -97,6 +97,9 @@ enum class ToolChoiceMode {
 
 struct ToolChoice {
     ToolChoiceMode mode = ToolChoiceMode::Auto;
+    // Set when the caller selected one function: `tool_choice` naming it, or a forced choice over
+    // exactly one callable tool. Empty leaves the choice to the model.
+    std::string forced_name;
 };
 
 struct ChatTurn {

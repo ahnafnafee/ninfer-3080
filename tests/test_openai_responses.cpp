@@ -537,6 +537,39 @@ int test_tools_and_effective_subset() {
                           !disabled.prompt.generation.uses_tools(),
                       "tool_choice none disables generation tools without deleting their echo");
 
+    Json named           = body;
+    named["tool_choice"] = Json{{"type", "function"}, {"name", "clock"}};
+    const OpenAIResponsesCreateRequest forced =
+        parse_openai_responses_create_request(named, limits());
+    failures += check(forced.prompt.generation.tool_choice.forced_name == "clock" &&
+                          forced.prompt.generation.tools.size() == 2,
+                      "named tool_choice did not force the function it names");
+
+    named["tool_choice"] = Json{{"type", "function"}, {"name", "missing"}};
+    failures += check(api_error([&] {
+                          (void)parse_openai_responses_create_request(named, limits());
+                      }).code == "invalid_tool_choice",
+                      "named tool_choice accepted a function absent from tools");
+
+    Json required           = body;
+    required["tool_choice"] = "required";
+    failures += check(api_error([&] {
+                          (void)parse_openai_responses_create_request(required, limits());
+                      }).code == "tool_choice_not_supported",
+                      "required over several tools stays rejected");
+    required["tools"] = Json::array({clock});
+    const OpenAIResponsesCreateRequest required_single =
+        parse_openai_responses_create_request(required, limits());
+    failures += check(required_single.prompt.generation.tool_choice.forced_name == "clock",
+                      "required over a single callable tool did not force it");
+
+    Json allowed_required                   = body;
+    allowed_required["tool_choice"]["mode"] = "required";
+    const OpenAIResponsesCreateRequest one_allowed =
+        parse_openai_responses_create_request(allowed_required, limits());
+    failures += check(one_allowed.prompt.generation.tool_choice.forced_name == "clock",
+                      "allowed_tools narrowed to one function did not force it");
+
     const Json ordered = Json::parse(
         R"({"model":"m","input":"probe","tools":[{"type":"function","name":"probe","parameters":{"type":"object","properties":{"zeta":{"type":"string"},"alpha":{"type":"integer"}}}}]})");
     const OpenAIResponsesCreateRequest ordered_request =

@@ -185,6 +185,21 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
             break;
         }
     }
+    if (!request.tool_choice.forced_name.empty() && result.enable_thinking == true) {
+        // The call opener is written into the generation prompt, and a thinking prompt ends
+        // inside the reasoning block, where the opener has no place. Reasoning that only the
+        // server default turned on yields to the forced call, so clients that never mention
+        // reasoning can force a function; reasoning the request itself asks for is refused
+        // rather than silently dropped.
+        const bool reasoning_requested =
+            thinking.value_or(false) || (effort && *effort != RequestedReasoningEffort::None);
+        if (reasoning_requested) {
+            invalid_prompt_option("a forced tool_choice cannot be combined with reasoning that "
+                                  "the request enables",
+                                  "tool_choice", "tool_choice_not_supported");
+        }
+        result.enable_thinking = false;
+    }
     if (request.continuation == ninfer::PromptContinuationMode::ContinueFinalAssistant &&
         result.enable_thinking == true) {
         invalid_prompt_option("assistant prefill cannot be combined with enabled thinking",
@@ -302,6 +317,7 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
             });
         }
     }
+    if (request.uses_tools()) { input.options.forced_tool_name = request.tool_choice.forced_name; }
     input.context_cache.allow_engine_automatic_shared_prefixes =
         request.allow_engine_automatic_shared_prefixes;
     if (request.private_cache_boundary_at_prompt_end && !input.messages.empty()) {

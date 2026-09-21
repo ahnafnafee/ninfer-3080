@@ -414,7 +414,10 @@ tool_call_parse_fallback_reason_name(ToolCallParseFallbackReason reason) noexcep
 }
 
 struct ToolCallParseDiagnostics {
-    bool marker_seen                            = false;
+    bool marker_seen = false;
+    // A forced call whose closing tag the model never emitted was closed by the decoder. Only the
+    // outer tag is ever supplied, so no argument byte is invented.
+    bool forced_call_closed                     = false;
     std::uint32_t structured_call_count         = 0;
     std::uint32_t empty_arguments_omitted       = 0;
     std::uint32_t schema_mismatch_arguments     = 0;
@@ -497,6 +500,9 @@ struct PromptOptions {
     std::string chat_template_kwargs_json;
     bool add_vision_id = false;
     std::vector<std::string> tool_jsons;
+    // Function the caller selected. Its call opener is appended to the generation prompt, so the
+    // answer can only continue inside that call. Requires a new assistant turn with thinking off.
+    std::string forced_tool_name;
 };
 
 enum class CacheRetentionHint : std::uint8_t {
