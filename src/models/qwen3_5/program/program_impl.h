@@ -596,10 +596,13 @@ public:
     // lent to a Vision window. Null otherwise, where `persistent` owns a plain allocation.
     std::unique_ptr<EvictableKVPool> kv_arena;
     DeviceArena persistent;
+    // Pipeline stages only: the persistent state of each further device -- its layers' KV planes,
+    // block-table copy and recurrent state -- allocated in that device's own memory.
+    std::vector<DeviceArena> persistent_by_rank;
     DeviceArena workspace_storage;
-    // Expert-offload split only: scratch for the ranks past the primary device, each allocated in
-    // its own card's memory. `work` borrows a slice of each and switches between them as the layer
-    // loop walks ranks, so every existing workspace call site keeps using one arena object.
+    // Pipeline stages only: scratch for the ranks past the primary device, each allocated in its
+    // own card's memory. `work` borrows a slice of each and switches between them as the layer
+    // loop walks stages, so every existing workspace call site keeps using one arena object.
     std::vector<DeviceArena> workspace_storage_by_rank;
     WorkspaceArena work;
     std::unique_ptr<qwen3_5::DecoderState> decoder;
@@ -612,6 +615,9 @@ public:
     std::size_t text_host_kv_page_stride    = 0;
     std::size_t backend_host_kv_page_stride = 0;
     std::unique_ptr<qwen3_5::StateImageDevicePool> state_images;
+    // Only when the model is split over several devices: the state shards and the links between
+    // stages that a forward pass crosses.
+    std::unique_ptr<execution::StageRuntime> stage_runtime;
     std::unique_ptr<qwen3_5::HostStatePool> host_state_images;
     std::unique_ptr<StateImageStore> state_store;
     std::optional<GdnReplayRecords> replay_records;

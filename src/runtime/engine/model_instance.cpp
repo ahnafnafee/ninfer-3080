@@ -66,6 +66,22 @@ std::size_t current_free_device_bytes() {
     return free_bytes;
 }
 
+// Free memory on each rank's device, in rank order. Ranks that share a physical device (a test mode
+// that exercises the multi-stage path on one card) split what is free between them, since each one's
+// budget is spent from the same memory.
+std::vector<std::size_t> free_bytes_by_rank(const DeviceContext& device) {
+    std::vector<std::size_t> out;
+    for (std::size_t rank = 0; rank < device.size(); ++rank) {
+        std::size_t sharing = 0;
+        for (std::size_t other = 0; other < device.size(); ++other) {
+            if (device.same_physical_device(rank, other)) { ++sharing; }
+        }
+        DeviceBinding bind(device.rank(rank).device);
+        out.push_back(current_free_device_bytes() / sharing);
+    }
+    return out;
+}
+
 } // namespace
 
 EngineOptions normalize_engine_options(EngineOptions options) {
@@ -181,11 +197,15 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
             .prefill_signature = signature},
         options.context_cost.preset_path);
     auto planner    = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
-    auto resolution = resolve_kv_capacity(options.kv_capacity, planner.capacity_curve(),
-                                          current_free_device_bytes());
+    const std::vector<std::size_t> free_by_rank = free_bytes_by_rank(device);
+    auto resolution = resolve_kv_capacity(
+        options.kv_capacity, planner.capacity_curve(), free_by_rank.front(),
+        std::span<const std::size_t>(free_by_rank).subspan(1));
     auto sequence   = std::move(planner).finalize(resolution.main_page_groups);
     if (sequence.device_reservation_bytes() != resolution.runtime_reservation_bytes ||
-        sequence.kv_capacity() != resolution.resolved_tokens) {
+        sequence.kv_capacity() != resolution.resolved_tokens ||
+        !std::ranges::equal(sequence.extra_rank_reservation_bytes(),
+                            resolution.extra_rank_reservation_bytes)) {
         throw std::logic_error("resolved KV capacity does not match the finalized Program plan");
     }
     instance->kv_capacity_resolution = resolution;

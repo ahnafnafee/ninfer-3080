@@ -61,13 +61,13 @@ private:
                                       bool draft = false);
 [[nodiscard]] BlockWeights bind_block(Bindings& bindings, const TextConfig& config,
                                       const std::string& prefix, MixerKind mixer);
-// `split` decides which device holds each layer's expert/MLP block; its identity form (one rank)
-// binds exactly what a single-GPU load always bound.
+// `stages` decides which device holds each whole layer; its identity form (one stage) binds exactly
+// what a single-GPU load always bound.
 [[nodiscard]] TextWeights bind_text(Bindings& bindings, const TextConfig& config,
-                                    const LoadOptions& options, PipelineSplit split);
-// The pipeline split `options.ranks` devices ask for over `layers` layers, honouring
-// NINFER_KEEP_EXPERTS. Throws when the model cannot be served by that many devices.
-[[nodiscard]] PipelineSplit plan_pipeline_split(std::uint32_t layers, const LoadOptions& options);
+                                    const LoadOptions& options, StagePlan stages);
+// The stage plan `options.ranks` devices ask for over `layers` layers: `options.stage_layers` when
+// given, equal counts otherwise. Throws when the model cannot be served by that many devices.
+[[nodiscard]] StagePlan plan_stage_plan(std::uint32_t layers, const LoadOptions& options);
 // Pinned residency keeps the tower in the page-locked Host block, one contiguous group per stage
 // (patch/position embedding, each layer, merger) in binding order.
 [[nodiscard]] VisionWeights bind_vision(Bindings& bindings, const VisionConfig& config,

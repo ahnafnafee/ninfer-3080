@@ -52,8 +52,8 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
     loading::Bindings bindings(binder);
     const auto& text = out->config.text;
     if (options.ranks > 1 && options.overlay_vision()) {
-        // Overlay borrows weight memory from the primary device's evictable tail; an offloaded rank
-        // holds expert blocks and nothing a Vision window could take. The two residency schemes are
+        // Overlay borrows weight memory from the primary device's evictable tail; a later stage
+        // holds whole layers and nothing a Vision window could take. The two residency schemes are
         // answers to the same question -- where the bytes for something else come from -- and no
         // sound combination of them exists today, so say so rather than half-apply one.
         throw std::invalid_argument(
@@ -61,7 +61,7 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
     }
     out->weights.text =
         loading::bind_text(bindings, text, options,
-                           loading::plan_pipeline_split(text.num_hidden_layers, options));
+                           loading::plan_stage_plan(text.num_hidden_layers, options));
     if (options.overlay_vision() && !out->config.vision) {
         throw std::invalid_argument("--vision-residency overlay requires a Vision artifact");
     }

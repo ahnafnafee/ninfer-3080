@@ -23,6 +23,14 @@ void destroy_event(cudaEvent_t& event) noexcept {
     }
 }
 
+// The capture `stream` is part of, or 0 outside any capture.
+unsigned long long capture_id(cudaStream_t stream) {
+    unsigned long long id           = 0;
+    cudaStreamCaptureStatus status  = cudaStreamCaptureStatusNone;
+    check(cudaStreamGetCaptureInfo(stream, &status, &id), "cudaStreamGetCaptureInfo");
+    return status == cudaStreamCaptureStatusActive ? id : 0;
+}
+
 std::size_t pieces_for(LinkTransport transport, std::size_t bytes) {
     // A device-to-device slot has no second copy to overlap with.
     if (transport == LinkTransport::Local || bytes < kLinkMinimumPipelinedBytes) { return 1; }
@@ -163,8 +171,11 @@ void StageLink::recv_payload(void* destination, std::size_t bytes, std::size_t s
 void StageLink::wait_drained(std::size_t slot, cudaStream_t from_stream) {
     check_slot(slot, 0);
     DeviceBinding bind(from_device_);
-    // An event that was never recorded is already satisfied, so the first use of a slot is free.
+    // An event that was never recorded is already satisfied, so the first use of a slot is free. One
+    // recorded where this stream cannot legally wait on it (see the class comment) is skipped.
+    const unsigned long long capture = capture_id(from_stream);
     for (std::size_t piece = 0; piece < ring_[slot].pieces; ++piece) {
+        if (ring_[slot].drained_capture[piece] != capture) { continue; }
         check(cudaStreamWaitEvent(from_stream, ring_[slot].drained[piece], 0), "wait_drained");
     }
 }
@@ -188,8 +199,10 @@ void StageLink::mark_drained(std::size_t slot, cudaStream_t to_stream) {
     check_slot(slot, 0);
     DeviceBinding bind(to_device_);
     // Every piece the sender used is recorded, so the next `wait_drained` covers all of them.
+    const unsigned long long capture = capture_id(to_stream);
     for (std::size_t piece = 0; piece < ring_[slot].pieces; ++piece) {
         check(cudaEventRecord(ring_[slot].drained[piece], to_stream), "mark_drained");
+        ring_[slot].drained_capture[piece] = capture;
     }
 }
 
@@ -234,6 +247,8 @@ void StageLink::recv(void* destination, std::size_t bytes, std::size_t slot,
         const std::size_t offset = std::min(piece * piece_bytes, bytes);
         const std::size_t length = std::min(piece_bytes, bytes - offset);
         check(cudaStreamWaitEvent(to_stream, source.filled[piece], 0), "recv wait");
+        // Read after the wait: only then is `to_stream` part of the capture the send was in.
+        const unsigned long long capture = capture_id(to_stream);
         if (length != 0) {
             check(cudaMemcpyAsync(static_cast<std::byte*>(destination) + offset,
                                   static_cast<const std::byte*>(source.data) + offset, length,
@@ -243,6 +258,7 @@ void StageLink::recv(void* destination, std::size_t bytes, std::size_t slot,
         // Released piece by piece, so the sender's next use of this slot can start as soon as the
         // last piece has been read rather than when the whole transfer is done.
         check(cudaEventRecord(source.drained[piece], to_stream), "recv fence");
+        source.drained_capture[piece] = capture;
     }
 }
 

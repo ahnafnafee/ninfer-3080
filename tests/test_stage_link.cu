@@ -332,6 +332,59 @@ int run() {
         CUDA_CHECK(cudaEventDestroy(join));
     }
 
+    // 6. One slot used eagerly, then inside a capture, then eagerly again: the capture must not wait
+    //    on an event that was last recorded outside it (cudaErrorStreamCaptureIsolation), and the
+    //    eager use after it must still be ordered.
+    {
+        ninfer::StageLink link(ctx, 0, 1, {.slot_bytes = kSlotBytes, .force_staged = true});
+        const std::size_t bytes = 1U << 20;
+        DeviceBytes source(bytes);
+        DeviceBytes destination(bytes);
+        const cudaStream_t from = ctx.rank(0).stream;
+        const cudaStream_t to   = ctx.rank(1).stream;
+        cudaEvent_t join        = nullptr;
+        CUDA_CHECK(cudaEventCreateWithFlags(&join, cudaEventDisableTiming));
+
+        const auto eager_round = [&](std::uint32_t seed, const char* label) {
+            const auto sent = pattern(bytes, seed);
+            source.upload(sent);
+            destination.clear();
+            link.send(source.get(), bytes, 0, from);
+            link.recv(destination.get(), bytes, 0, to);
+            ctx.synchronize();
+            failures += expect_payload(destination.download(), sent, label);
+        };
+        eager_round(700, "eager use before a capture delivers its bytes");
+
+        cudaGraph_t graph = nullptr;
+        const cudaError_t begin = cudaStreamBeginCapture(from, cudaStreamCaptureModeThreadLocal);
+        failures += expect(begin == cudaSuccess, "capture begins after eager use of the slot");
+        link.send(source.get(), bytes, 0, from);
+        link.recv(destination.get(), bytes, 0, to);
+        CUDA_CHECK(cudaEventRecord(join, to));
+        CUDA_CHECK(cudaStreamWaitEvent(from, join, 0));
+        const cudaError_t end = cudaStreamEndCapture(from, &graph);
+        failures += expect(end == cudaSuccess && graph != nullptr,
+                           "a capture over a slot last used eagerly does not wait on the eager fence");
+        if (end == cudaSuccess && graph != nullptr) {
+            cudaGraphExec_t exec = nullptr;
+            CUDA_CHECK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+            const auto sent = pattern(bytes, 701);
+            source.upload(sent);
+            destination.clear();
+            CUDA_CHECK(cudaGraphLaunch(exec, from));
+            ctx.synchronize();
+            failures += expect_payload(destination.download(), sent,
+                                       "the captured use delivers its bytes on replay");
+            CUDA_CHECK(cudaGraphExecDestroy(exec));
+            CUDA_CHECK(cudaGraphDestroy(graph));
+        } else {
+            (void)cudaGetLastError();
+        }
+        eager_round(702, "eager use after a capture delivers its bytes");
+        CUDA_CHECK(cudaEventDestroy(join));
+    }
+
     // 5. Misuse is refused rather than corrupting a neighbouring slot.
     {
         ninfer::StageLink link(ctx, 0, 1, {.slot_bytes = 4096, .slots = 2, .force_staged = true});

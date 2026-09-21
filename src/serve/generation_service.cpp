@@ -276,6 +276,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.speculative              = options.speculative;
     engine_options.context_cache            = options.context_cache;
     engine_options.devices                  = options.devices;
+    engine_options.stage_layers             = options.stage_layers;
     engine_options.context_cost.preset_path = options.context_cost_presets;
     engine_options.media_cache_bytes        = options.media_cache_bytes;
     engine_options.media_live_bytes         = options.media_live_bytes;

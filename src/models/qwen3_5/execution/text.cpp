@@ -965,7 +965,8 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
             vc.view({dimension(config_.gdn->value_width()), width, active_sequence_batch_});
         Tensor gate_output =
             z.view({dimension(config_.gdn->value_width()), width, active_sequence_batch_});
-        Tensor conv_states = state_.layer_view(static_cast<std::uint32_t>(gidx)).conv;
+        const GdnStateRef gdn_pool = gdn_state(static_cast<std::uint32_t>(gidx));
+        Tensor conv_states         = gdn_pool.pool->layer_view(gdn_pool.local).conv;
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
         if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
             if (replay_records_ == nullptr) {
@@ -985,10 +986,10 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
         Tensor qkv    = workspace::gdn_prefill_conv(work_, config_, T);
         Tensor z_flat = z.view({dimension(config_.gdn->value_width()), T});
         gdn_projection(h, p, qkv, z_flat, work_, s);
-        Tensor conv_state_in =
-            state_.conv_slot(static_cast<std::uint32_t>(gidx), linear_state_source_slot_);
+        const GdnStateRef gdn_pool = gdn_state(static_cast<std::uint32_t>(gidx));
+        Tensor conv_state_in       = gdn_pool.pool->conv_slot(gdn_pool.local, linear_state_source_slot_);
         Tensor conv_state_out =
-            state_.conv_slot(static_cast<std::uint32_t>(gidx), linear_state_destination_slot_);
+            gdn_pool.pool->conv_slot(gdn_pool.local, linear_state_destination_slot_);
         ops::causal_conv1d_silu_split(qkv, p.convolution, conv_state_in, conv_state_out, qc, kc, vc,
                                       s);
     }
@@ -1004,7 +1005,8 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
                    .view({dimension(config_.gdn->linear_value_head_dim),
                           dimension(config_.gdn->linear_num_value_heads), T});
     if (ph == Phase::Verify) {
-        Tensor recurrent_states  = state_.layer_view(static_cast<std::uint32_t>(gidx)).recurrent;
+        const GdnStateRef recurrent_pool = gdn_state(static_cast<std::uint32_t>(gidx));
+        Tensor recurrent_states  = recurrent_pool.pool->layer_view(recurrent_pool.local).recurrent;
         const std::int32_t width = active_sequence_width_;
         Tensor q_batch           = q_recurrent.view({dimension(config_.gdn->linear_key_head_dim),
                                                      dimension(config_.gdn->linear_num_key_heads), width,
@@ -1040,10 +1042,11 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
                 *active_linear_state_destination_slots_, out_batch, s);
         }
     } else {
+        const GdnStateRef recurrent_pool = gdn_state(static_cast<std::uint32_t>(gidx));
         Tensor recurrent_state_in =
-            state_.recurrent_slot(static_cast<std::uint32_t>(gidx), linear_state_source_slot_);
-        Tensor recurrent_state_out =
-            state_.recurrent_slot(static_cast<std::uint32_t>(gidx), linear_state_destination_slot_);
+            recurrent_pool.pool->recurrent_slot(recurrent_pool.local, linear_state_source_slot_);
+        Tensor recurrent_state_out = recurrent_pool.pool->recurrent_slot(
+            recurrent_pool.local, linear_state_destination_slot_);
         ops::gated_delta_net(
             q_recurrent, k_recurrent, vv, g, beta,
             static_cast<float>(1.0 /
@@ -1073,78 +1076,23 @@ void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase phas
     ffn(h, weights.ffn, x, hints, work_, ctx_.stream, false, phase == Phase::Verify);
 }
 
-// Move bytes from one rank's device to another's, through pinned host.
-//
-// Deliberately not cudaMemcpyPeerAsync. On a bridgeless pair that call is about half the speed of
-// this pair of copies (0.69 ms against 0.33 ms for 4 MB, measured on 2x 3090) and -- far more
-// importantly -- it cannot be captured into a CUDA graph, while a memcpy to or from pinned host is
-// an ordinary graph node. Losing capture costs prefill a factor of 3.4, which dwarfs the transfer.
-//
-// Ordering is by fence, never a host sync: the destination stream waits for the source's D2H
-// before its H2D, so the two devices stay sequenced without stalling the CPU.
-void TextContext::cross_rank_copy(const void* source, std::size_t from_rank, void* destination,
-                                  std::size_t to_rank, std::size_t bytes) {
-    const cudaStream_t from_stream = ctx_.stream_for_rank(from_rank);
-    const cudaStream_t to_stream   = ctx_.stream_for_rank(to_rank);
-
-    // Two ranks on one card (the single-GPU test mode) have nothing to stage through: a plain
-    // device-to-device copy is both far faster and equally capturable. Going via host here would
-    // make that mode misrepresent the cost of the real two-card path.
-    if (ctx_.device_ids()[from_rank] == ctx_.device_ids()[to_rank]) {
-        ScopedDeviceRank guard(ctx_, to_rank);
-        CUDA_CHECK(cudaEventRecord(ctx_.fence_for_rank(from_rank), from_stream));
-        CUDA_CHECK(cudaStreamWaitEvent(to_stream, ctx_.fence_for_rank(from_rank), 0));
-        CUDA_CHECK(
-            cudaMemcpyAsync(destination, source, bytes, cudaMemcpyDeviceToDevice, to_stream));
-        return;
+TextContext::GdnStateRef TextContext::gdn_state(std::uint32_t layer) const {
+    if (stage_runtime_ == nullptr) { return {&state_, layer}; }
+    // The shard holding a layer is the last one that starts at or before it.
+    for (std::size_t shard = stage_runtime_->state.size(); shard-- > 0;) {
+        if (stage_runtime_->state_first_layer[shard] <= layer) {
+            return {stage_runtime_->state[shard], layer - stage_runtime_->state_first_layer[shard]};
+        }
     }
-
-    stage_cross_rank_copy(ctx_, source, from_rank, destination, to_rank, bytes);
+    throw std::logic_error("Linear Attention layer has no state shard");
 }
 
-void TextContext::run_mlp_tail(const BlockParameters& weights, Tensor& x, Phase phase,
-                               std::size_t expert_rank, const ops::SparseMoeHints& hints) {
-    if (expert_rank == 0) {
-        mlp_tail(weights, x, phase, hints);
-        return;
-    }
-
-    ScopedDeviceRank guard(ctx_, expert_rank);
-    // RAII, not a manual activate_rank(0) afterwards: an exception from allocation or from the
-    // crossing must not leave work_ pointed at the remote rank's storage, or the next request runs
-    // rank-0 attention with scratch allocated from the wrong device.
-    ScopedArenaRank arena_guard(work_, expert_rank);
-
-    // The scope must be taken on the expert rank, and must cover the inbound copy's buffer as well
-    // as the tail's scratch. The caller's enclosing scope was taken on rank 0 and rolls back rank 0
-    // only, so without this the expert rank's bump pointer would climb for every layer of a forward
-    // pass and overflow -- which it did, as "bad allocation" on any prompt past a few hundred
-    // tokens.
-    auto remote_scope = work_.scope();
-
-    Tensor remote = work_.alloc(x.dtype, {x.ne[0], x.ne[1]});
-    cross_rank_copy(x.data, 0, remote.data, expert_rank, x.bytes());
-
-    // Never the caller's hints here: they name pointers into the next layer's projection weights,
-    // computed without regard to which rank holds them. Warming L2 on this remote device for an
-    // address that may live on another card would prefetch the wrong device's memory.
-    mlp_tail(weights, remote, phase, {});
-
-    // Copy the finished residual back into the caller's rank-0 buffer, so everything downstream --
-    // the next layer's attention, the head, sampling -- finds it where it expects. Issued before
-    // the scope closes, while `remote` is still live; the arena is a bump allocator, so rolling
-    // back only moves the offset and the bytes stay valid until the next allocation, which cannot
-    // happen before this copy is enqueued.
-    cross_rank_copy(remote.data, expert_rank, x.data, 0, x.bytes());
-}
-
+// The layers of one stage, in order. On one device this is the whole model.
 template <class Tap>
-void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
-    const bool prefill = ph == Phase::Prefill;
-    // Single-rank is the overwhelmingly common path and must cost nothing: the split is the
-    // identity mapping, so this stays false and the loop below never touches a rank.
-    const bool split_execution = parameters_.text.split_execution();
-    for (std::size_t layer = 0; layer < parameters_.text.layers.size(); ++layer) {
+void TextContext::run_stage_layers(std::size_t stage, Tensor& x, Phase ph, Tap& tap) {
+    const bool prefill      = ph == Phase::Prefill;
+    const std::uint32_t end = parameters_.text.stage_end(stage);
+    for (std::uint32_t layer = parameters_.text.stage_begin[stage]; layer < end; ++layer) {
         const auto& block  = parameters_.text.layers[layer];
         const bool full    = config_.layer_types[layer] == MixerKind::FullAttention;
         const auto compact = dimension(config_.compact_layer_indices[layer]);
@@ -1170,18 +1118,12 @@ void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
                                                 : nvtx::Name::VerifyPostMixer,
                                         nvtx::Category::PostMixer, layer);
                 auto scope = work_.scope();
-                // The prefetch hint names pointers into the *next* layer's projection weights.
-                // Warming L2 for them only makes sense when this layer's tail and the next layer's
-                // expert block run on the same device -- otherwise the hint targets the wrong
-                // card's memory, so it is dropped exactly like the last-layer case.
-                const std::size_t next_rank =
-                    (split_execution && layer + 1 < parameters_.text.layers.size())
-                        ? parameters_.text.layers[layer + 1].expert_rank
-                        : block.expert_rank;
-                run_mlp_tail(block, x, ph, block.expert_rank,
-                             block.expert_rank == next_rank
-                                 ? next_projection_hints(static_cast<int>(layer))
-                                 : ops::SparseMoeHints{});
+                // The prefetch hint names pointers into the *next* layer's projection weights. It
+                // only helps when that layer runs next on this device, so it is dropped at the last
+                // layer of a stage exactly as it is at the last layer of the model.
+                mlp_tail(block, x, ph,
+                         layer + 1 < end ? next_projection_hints(static_cast<int>(layer))
+                                         : ops::SparseMoeHints{});
             }
             if constexpr (Tap::enabled) {
                 tap.capture_layer(static_cast<int>(layer), x, ctx_.stream);
@@ -1191,6 +1133,145 @@ void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
                                      (prefill ? " prefill" : " verify") +
                                      " columns=" + std::to_string(x.ne[1]) + ": " + error.what());
         }
+    }
+}
+
+namespace {
+
+// The device tensors layer kernels read that live in rank 0's memory.
+constexpr std::size_t kControlTensors = 6;
+
+// Points a TextContext's active control tensors at stage-local copies for one stage, and puts the
+// originals back after it.
+class ScopedControl {
+public:
+    ScopedControl(std::array<const Tensor*, kControlTensors> current,
+                  std::array<const Tensor*, kControlTensors> replacement,
+                  std::array<const Tensor**, kControlTensors> slots)
+        : current_(current), slots_(slots) {
+        for (std::size_t i = 0; i < kControlTensors; ++i) { *slots_[i] = replacement[i]; }
+    }
+    ScopedControl(const ScopedControl&)            = delete;
+    ScopedControl& operator=(const ScopedControl&) = delete;
+    ~ScopedControl() {
+        for (std::size_t i = 0; i < kControlTensors; ++i) { *slots_[i] = current_[i]; }
+    }
+
+private:
+    std::array<const Tensor*, kControlTensors> current_;
+    std::array<const Tensor**, kControlTensors> slots_;
+};
+
+} // namespace
+
+// Runs the layers across pipeline stages. Stage 0 is rank 0, where the caller's residual already
+// lives; each later stage receives the residual and the control tensors its layers read, runs, and
+// passes the residual on; the last stage returns it to rank 0 for the head.
+void TextContext::run_staged(Tensor& x, Phase ph) {
+    StageRuntime& runtime    = *stage_runtime_;
+    const std::size_t stages = parameters_.text.rank_count;
+    if (runtime.forward.size() + 1 != stages || runtime.control.size() + 1 != stages ||
+        !runtime.back.has_value() || ctx_.active_rank() != 0) {
+        throw std::logic_error("stage runtime does not match the model's stages");
+    }
+    const std::uint32_t slot = runtime.next_slot;
+    runtime.next_slot        = (slot + 1U) % static_cast<std::uint32_t>(runtime.forward.front().slots());
+    NullTap tap;
+
+    // Control tensors, packed in this order. Ones that are absent this pass (verify-only columns
+    // and slots, say) are skipped.
+    const std::array<const Tensor**, kControlTensors> slots = {
+        &active_cache_positions_,        &active_rope_positions_,
+        &active_kv_table_rows_,          &active_valid_columns_,
+        &active_linear_state_source_slots_, &active_linear_state_destination_slots_};
+    const std::array<const Tensor*, kControlTensors> fallback = {
+        &io_.pos, &io_.rope_pos, &io_.text_kv_table_row, nullptr, nullptr, nullptr};
+    std::array<const Tensor*, kControlTensors> current{};
+    std::array<std::int64_t, kControlTensors> offset{};
+    std::int64_t total = 0;
+    for (std::size_t i = 0; i < kControlTensors; ++i) {
+        const Tensor* source = *slots[i] != nullptr ? *slots[i] : fallback[i];
+        current[i]           = *slots[i];
+        if (source == nullptr || source->data == nullptr) {
+            offset[i] = -1;
+            continue;
+        }
+        if (source->dtype != DType::I32 || !source->is_contiguous()) {
+            throw std::logic_error("a pipeline stage control tensor is not contiguous int32");
+        }
+        offset[i] = total;
+        total += source->numel();
+    }
+    total                          = std::max<std::int64_t>((total + 3) & ~std::int64_t{3}, 4);
+    const std::size_t control_bytes = static_cast<std::size_t>(total) * sizeof(std::int32_t);
+    if (control_bytes > runtime.control.front().slot_bytes()) {
+        throw std::runtime_error("pipeline stage control block exceeds its link");
+    }
+
+    const cudaStream_t entry_stream = ctx_.stream_for_rank(0);
+    auto entry_scope                = work_.scope();
+    Tensor pack                     = work_.alloc(DType::I32, {static_cast<std::int32_t>(total)});
+    std::array<const Tensor*, kControlTensors> sources{};
+    for (std::size_t i = 0; i < kControlTensors; ++i) {
+        if (offset[i] < 0) { continue; }
+        sources[i] = *slots[i] != nullptr ? *slots[i] : fallback[i];
+        CUDA_CHECK(cudaMemcpyAsync(static_cast<std::int32_t*>(pack.data) + offset[i],
+                                   sources[i]->data, sources[i]->bytes(), cudaMemcpyDeviceToDevice,
+                                   entry_stream));
+    }
+    // Every stage's control block leaves rank 0 up front, so it is on its way while stage 0 computes.
+    for (std::size_t stage = 1; stage < stages; ++stage) {
+        runtime.control[stage - 1].send(pack.data, control_bytes, slot, entry_stream);
+    }
+
+    run_stage_layers(0, x, ph, tap);
+    runtime.forward[0].send(x.data, x.bytes(), slot, entry_stream);
+
+    for (std::size_t stage = 1; stage < stages; ++stage) {
+        // Rebinds the context's device, stream and workspace to this stage, and back afterwards.
+        ScopedDeviceRank rank_guard(ctx_, stage);
+        ScopedArenaRank arena_guard(work_, stage);
+        auto scope = work_.scope();
+        Tensor stage_x = work_.alloc(x.dtype, {x.ne[0], x.ne[1]});
+        runtime.forward[stage - 1].recv(stage_x.data, stage_x.bytes(), slot, ctx_.stream);
+
+        Tensor control = work_.alloc(DType::I32, {static_cast<std::int32_t>(total)});
+        runtime.control[stage - 1].recv(control.data, control_bytes, slot, ctx_.stream);
+        std::array<Tensor, kControlTensors> local{};
+        std::array<const Tensor*, kControlTensors> replacement{};
+        for (std::size_t i = 0; i < kControlTensors; ++i) {
+            if (offset[i] < 0) { continue; }
+            local[i]      = *sources[i];
+            local[i].data = static_cast<std::int32_t*>(control.data) + offset[i];
+            replacement[i] = &local[i];
+        }
+        ScopedControl bound(current, replacement, slots);
+
+        run_stage_layers(stage, stage_x, ph, tap);
+        if (stage + 1 < stages) {
+            runtime.forward[stage].send(stage_x.data, stage_x.bytes(), slot, ctx_.stream);
+        } else {
+            runtime.back->send(stage_x.data, stage_x.bytes(), slot, ctx_.stream);
+        }
+    }
+    runtime.back->recv(x.data, x.bytes(), slot, entry_stream);
+}
+
+template <class Tap>
+void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
+    if (!parameters_.text.split_execution()) {
+        run_stage_layers(0, x, ph, tap);
+        return;
+    }
+    if constexpr (Tap::enabled) {
+        // Feature taps copy a layer's hidden state into rank 0's buffers; from a later stage that is
+        // another device's memory. DFlash under a split is not supported yet.
+        throw std::logic_error("layer feature capture does not cross pipeline stages");
+    } else {
+        if (stage_runtime_ == nullptr) {
+            throw std::logic_error("a split model needs its stage runtime");
+        }
+        run_staged(x, ph);
     }
 }
 

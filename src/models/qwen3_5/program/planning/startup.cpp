@@ -121,21 +121,52 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     const std::uint32_t mtp_physical_pages = static_cast<std::uint32_t>(
         checked_i32(static_cast<std::uint64_t>(physical_pages) + mtp_extra_pages,
                     "MTP Paged KV physical pages exceed int32"));
-    LayoutBuilder builder;
+    // One layout per device. A stage's layers keep their KV planes and recurrent state on the
+    // stage's device; everything else -- round state, prefill buffers, the head's inputs, MTP and
+    // DFlash state -- is rank 0's, so builder 0 carries all of it.
+    const std::size_t ranks = parameters.text.rank_count;
+    std::vector<LayoutBuilder> builders(ranks);
+    std::vector<LayoutBuilder*> builder_pointers;
+    for (LayoutBuilder& each : builders) { builder_pointers.push_back(&each); }
+    LayoutBuilder& builder = builders.front();
+
+    std::vector<std::size_t> attention_layer_rank;
+    std::vector<qwen3_5::StateImageShard> state_shards;
+    if (ranks == 1) {
+        state_shards.push_back({.rank = 0, .first_layer = 0, .layers = config.linear_attention_layers});
+    } else {
+        std::uint32_t gdn_index = 0;
+        for (std::size_t layer = 0; layer < parameters.text.layers.size(); ++layer) {
+            const std::size_t rank = parameters.text.layers[layer].rank;
+            if (config.layer_types[layer] == MixerKind::FullAttention) {
+                attention_layer_rank.push_back(rank);
+                continue;
+            }
+            if (!state_shards.empty() && state_shards.back().rank == rank) {
+                ++state_shards.back().layers;
+            } else {
+                state_shards.push_back({.rank = rank, .first_layer = gdn_index, .layers = 1});
+            }
+            ++gdn_index;
+        }
+    }
+
     PersistentLayout out;
     out.decoder = qwen3_5::plan_decoder_state(
-        builder, qwen3_5::DecoderStateSpec{
-                     .full_attention_layers     = config.full_attention_layers,
-                     .mtp_layers                = 1,
-                     .capacity                  = plan.capacity,
-                     .kv_heads                  = dimension(config.attention->num_key_value_heads),
-                     .attention_head_dim        = dimension(config.attention->head_dim),
-                     .kv_storage                = plan.kv_storage,
-                     .enable_mtp                = plan.features.mtp(),
-                     .kv_table_rows             = static_cast<std::int32_t>(plan.max_concurrency),
-                     .text_physical_page_groups = physical_pages,
-                     .mtp_physical_page_groups  = mtp_physical_pages,
-                 });
+        builder_pointers,
+        qwen3_5::DecoderStateSpec{
+            .full_attention_layers     = config.full_attention_layers,
+            .mtp_layers                = 1,
+            .capacity                  = plan.capacity,
+            .kv_heads                  = dimension(config.attention->num_key_value_heads),
+            .attention_head_dim        = dimension(config.attention->head_dim),
+            .kv_storage                = plan.kv_storage,
+            .enable_mtp                = plan.features.mtp(),
+            .kv_table_rows             = static_cast<std::int32_t>(plan.max_concurrency),
+            .text_physical_page_groups = physical_pages,
+            .mtp_physical_page_groups  = mtp_physical_pages,
+            .text_layer_rank           = std::move(attention_layer_rank),
+        });
     qwen3_5::StateImageSpec state_image_spec{
         .linear =
             {
@@ -163,7 +194,8 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             };
         }
     }
-    out.state_images = qwen3_5::plan_state_image_device_pool(builder, state_image_spec);
+    out.state_images =
+        qwen3_5::plan_state_image_device_pool(builder_pointers, state_shards, state_image_spec);
     if (plan.speculative_backend != SpeculativeBackend::None) {
         out.replay_records = plan_gdn_replay_records(
             builder,
@@ -206,12 +238,12 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                     .pages = plan_device_kv_page_pool(
                         builder, DeviceKVPagePoolSpec{.page_group_count = physical_pages,
                                                       .geometry = std::move(full_geometry)}),
-                    .execution_tables = plan_kv_execution_tables(
+                    .execution_tables = {plan_kv_execution_tables(
                         builder,
                         KVExecutionTableSpec{
                             .logical_page_capacity = logical_pages,
                             .table_rows = static_cast<std::int32_t>(plan.max_concurrency),
-                        }),
+                        })},
                     .layers      = draft->full_layer_count(),
                     .max_context = plan.capacity,
                     .kv_heads    = dimension(draft->attention.num_key_value_heads),
@@ -264,6 +296,10 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             "sampling config");
     }
     out.bytes = builder.finish(kArenaAlign, "persistent layout");
+    for (std::size_t rank = 1; rank < ranks; ++rank) {
+        out.extra_rank_bytes.push_back(builders[rank].finish(
+            kArenaAlign, ("persistent layout, device " + std::to_string(rank)).c_str()));
+    }
     out.kv_payload_bytes =
         out.decoder.kv_payload_bytes() + (out.dflash ? out.dflash->kv_payload_bytes() : 0);
     const auto plane_end = [](const qwen3_5::PagedKVCacheLayout& cache) {
@@ -272,6 +308,8 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             return end;
         }
         for (const DeviceKVPlaneLayout& plane : cache.pages.planes) {
+            // Lending is a single-device mechanism: only rank 0's planes are candidates.
+            if (plane.rank != 0) { continue; }
             end = std::max(end, plane.storage.region.offset + plane.storage.region.bytes);
         }
         return end;
@@ -780,6 +818,28 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("max_concurrency must be in [1,8]");
     }
+    if (parameters.text.rank_count != device.size()) {
+        throw std::invalid_argument("the model is split into " +
+                                    std::to_string(parameters.text.rank_count) +
+                                    " pipeline stages but " + std::to_string(device.size()) +
+                                    " devices are attached");
+    }
+    if (parameters.text.split_execution()) {
+        // The stage loop carries a plain forward pass and decode round. Everything below reads or
+        // writes state on the primary device only, and is refused until it is taught the stages.
+        const auto unsupported = [](const char* feature) {
+            throw std::invalid_argument(
+                std::string(feature) +
+                " is not yet supported with a multi-device --devices split");
+        };
+        if (options.speculative.backend != SpeculativeBackend::None) {
+            unsupported("speculative decoding");
+        }
+        if (options.enable_vision) { unsupported("vision"); }
+        if (options.context_cache.enabled) {
+            unsupported("the context cache (pass --no-prefix-reuse)");
+        }
+    }
     const std::uint32_t logical_pages = page_count(options.max_context);
     const std::uint32_t minimum_pages = std::max(logical_pages, options.max_concurrency);
     const std::uint64_t maximum_pages64 =
@@ -917,6 +977,20 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->device_reservation_bytes = checked_add(
         checked_add(impl->persistent.bytes, impl->workspace.capacity, "sequence memory plan"),
         impl->graph_allowance_bytes, "sequence graph allowance");
+    // A further device runs its stage in a workspace of the same general size and holds its own
+    // persistent state. Its graph allowance is the primary device's scaled by the share of layers
+    // it runs; the primary keeps the whole figure, which only over-reserves it a little.
+    const auto& text = impl->parameters->text;
+    for (std::size_t rank = 1; rank < text.rank_count; ++rank) {
+        const std::uint64_t layers_here = text.stage_end(rank) - text.stage_begin[rank];
+        const std::size_t graph_share   = static_cast<std::size_t>(
+            (static_cast<std::uint64_t>(impl->graph_allowance_bytes) * layers_here) /
+            std::max<std::size_t>(text.layers.size(), 1));
+        impl->extra_rank_reservation_bytes.push_back(checked_add(
+            checked_add(impl->persistent.extra_rank_bytes[rank - 1],
+                        impl->workspace.general_capacity, "further device memory plan"),
+            graph_share, "further device graph allowance"));
+    }
     return impl;
 }
 
@@ -973,6 +1047,9 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
           .minimum_device_reservation_bytes     = planner->minimum->device_reservation_bytes,
           .bytes_per_additional_main_page_group = 0,
     };
+    for (const std::size_t bytes : planner->minimum->extra_rank_reservation_bytes) {
+        planner->curve.extra_ranks.push_back({.minimum_device_reservation_bytes = bytes});
+    }
     if (minimum_pages < maximum_pages) {
         auto adjacent = build_sequence_candidate(inputs, minimum_pages + 1U);
         if (adjacent->device_reservation_bytes <= planner->minimum->device_reservation_bytes) {
@@ -980,6 +1057,13 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         }
         planner->curve.bytes_per_additional_main_page_group =
             adjacent->device_reservation_bytes - planner->minimum->device_reservation_bytes;
+        // A further device's stride may legitimately be zero: a stage with no attention layers holds
+        // no KV.
+        for (std::size_t rank = 0; rank < planner->curve.extra_ranks.size(); ++rank) {
+            planner->curve.extra_ranks[rank].bytes_per_additional_main_page_group =
+                adjacent->extra_rank_reservation_bytes[rank] -
+                planner->minimum->extra_rank_reservation_bytes[rank];
+        }
     }
     return planner;
 }
@@ -1000,6 +1084,14 @@ finalize_sequence_plan_impl(std::unique_ptr<qwen3_5::detail::SequencePlannerImpl
     if (plan->device_reservation_bytes != expected) {
         throw std::logic_error(
             "Qwen3.5 physical sequence layout is not affine in Main KV page capacity");
+    }
+    for (std::size_t rank = 0; rank < plan->extra_rank_reservation_bytes.size(); ++rank) {
+        if (plan->extra_rank_reservation_bytes[rank] !=
+            planner->curve.extra_rank_reservation_bytes(rank, main_page_groups)) {
+            throw std::logic_error(
+                "Qwen3.5 physical sequence layout is not affine in Main KV page capacity on a "
+                "further device");
+        }
     }
     return plan;
 }

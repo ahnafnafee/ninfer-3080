@@ -55,20 +55,6 @@ void configure_cuda_device_once(Configure&& configure) {
     CUDA_CHECK(result);
 }
 
-// How many pieces one cross-rank transfer is split into.
-//
-// A crossing is a serial D2H then H2D, so the two halves never overlap: a 4 MB residual stream
-// costs ~0.765 ms measured, against the ~0.33 ms its bandwidth alone implies. Splitting the byte
-// range lets piece i+1 stream out of the source while piece i streams into the destination. It is
-// a pure byte-level pipeline -- the same bytes in the same order -- so it cannot affect which
-// kernels run or what they compute.
-inline constexpr std::size_t kCrossingPipelineDepth = 4;
-
-// Default pinned staging capacity: covers a 1024-token residual crossing (hidden 5120, BF16)
-// with generous headroom. A caller that configures a larger prefill chunk than this covers
-// should size the crossing staging buffer explicitly at construction instead of relying on this.
-inline constexpr std::size_t kDefaultCrossingStagingBytes = 64ULL << 20;
-
 // The most ranks one context holds. Layer pipelines and tensor groups are both bounded well below
 // this; the limit exists so a mistyped device list fails at construction.
 inline constexpr std::size_t kMaxRanks = 8;
@@ -115,16 +101,6 @@ struct RankContext {
     [[nodiscard]] DeviceExecutionView execution_view() const noexcept {
         return {.stream = stream, .multiprocessor_count = multiprocessor_count()};
     }
-
-    // State of the previous crossing protocol (`stage_cross_rank_copy`). It goes with the expert
-    // offload path; `StageLink` keeps its own fences.
-    std::array<cudaEvent_t, kCrossingPipelineDepth> piece_fences{};
-    std::array<cudaEvent_t, kCrossingPipelineDepth> piece_consumed{};
-    // Where each consumed fence was last recorded: outside any capture, and the capture it
-    // belonged to. Both are kept because a graph's event-record node only takes effect when
-    // the graph is launched, so an earlier eager record remains the event's real state.
-    std::array<bool, kCrossingPipelineDepth> piece_consumed_eager{};
-    std::array<unsigned long long, kCrossingPipelineDepth> piece_consumed_capture{};
 };
 
 struct DeviceContext {
@@ -141,14 +117,8 @@ struct DeviceContext {
     // model-parallel execution, up to kMaxRanks: matching compute capability is required across
     // all of them, before any weight is uploaded. Peer access is only probed and recorded as a
     // capability -- it is not required, since transfers stage through pinned host memory when it is
-    // unavailable.
-    //
-    // `min_crossing_staging_bytes` sizes the pinned cross-rank staging buffer (see
-    // `crossing_staging()`); the default covers only a modest residual crossing. A caller that
-    // configures a larger prefill chunk must size this explicitly, since one crossing has to fit
-    // in a single staged transfer.
-    explicit DeviceContext(std::span<const int> device_ids,
-                           std::size_t min_crossing_staging_bytes = kDefaultCrossingStagingBytes);
+    // unavailable (see StageLink).
+    explicit DeviceContext(std::span<const int> device_ids);
     ~DeviceContext();
 
     DeviceContext(const DeviceContext&)            = delete;
@@ -189,38 +159,6 @@ struct DeviceContext {
     // has to be issued on a stream belonging to the destination device.
     [[nodiscard]] cudaStream_t transfer_stream_for_rank(std::size_t rank) const;
     [[nodiscard]] cudaEvent_t fence_for_rank(std::size_t rank) const;
-    // Pinned host staging for cross-rank copies. Allocated only for a model-parallel context.
-    //
-    // cudaMemcpyPeerAsync is the obvious way to move a tensor between ranks and is the wrong one
-    // here on two counts, both measured on a bridgeless 2x 3090: it runs at roughly half the rate
-    // of an explicit D2H/H2D pair through pinned host (0.69 ms against 0.33 ms for 4 MB), and it
-    // cannot be captured into a CUDA graph at all -- capture fails with
-    // cudaErrorStreamCaptureUnsupported, whereas a memcpy to or from pinned host is an ordinary
-    // graph node. Losing capture costs prefill a factor of 3.4, which dwarfs the transfer itself,
-    // so being capturable matters far more than the copy rate.
-    [[nodiscard]] void* crossing_staging() const noexcept;
-    // Fence for one piece of a pipelined cross-rank transfer.
-    [[nodiscard]] cudaEvent_t piece_fence(std::size_t rank, std::size_t piece) const;
-    // Recorded on the destination stream once a staged piece has been read out of the shared
-    // crossing buffer. The next crossing waits on it before overwriting that piece, which is what
-    // keeps one pinned buffer safe across back-to-back crossings.
-    [[nodiscard]] cudaEvent_t piece_consumed_fence(std::size_t rank, std::size_t piece) const;
-    // Whether that fence may be waited on from work whose capture id is `capture_id` (0 for work
-    // outside any capture). During capture, a wait on an event whose last record was not part of
-    // the same capture fails with cudaErrorStreamCaptureIsolation -- and the crossing path exists
-    // to be captured -- so the first crossing inside a graph has nothing to wait for and says so
-    // here. Its safety comes from the graph instead: the captured crossings join back into the
-    // origin stream, so one launch's H2Ds all complete before the next launch's D2Hs begin.
-    //
-    // The one thing this cannot express is an eager crossing still in flight when a graph holding
-    // crossings is launched, since a launch cannot wait on an eager fence without breaking the
-    // capture. Callers capture while the decoder is idle and launch afterwards, which is the only
-    // order this path is used in.
-    [[nodiscard]] bool piece_consumed_visible(std::size_t rank, std::size_t piece,
-                                              unsigned long long capture_id) const;
-    // Records that the fence for this piece has just been recorded by work with that capture id.
-    void note_piece_consumed(std::size_t rank, std::size_t piece, unsigned long long capture_id);
-    [[nodiscard]] std::size_t crossing_staging_bytes() const noexcept;
     void activate_rank(std::size_t rank);
     void synchronize_rank(std::size_t rank) const;
     void synchronize() const;
@@ -230,8 +168,6 @@ private:
     void refresh_active_aliases() noexcept;
     void release() noexcept;
 
-    void* crossing_staging_             = nullptr;
-    std::size_t crossing_staging_bytes_ = 0;
     std::vector<RankContext> endpoints_;
     std::vector<int> device_ids_;
     // peer_matrix_[from * size + to]: whether `from` can DMA into `to`. A rank always reaches a
@@ -316,16 +252,6 @@ private:
     DeviceContext& context_;
     std::size_t previous_rank_ = 0;
 };
-
-// Moves `bytes` from `source` on `from_rank` to `destination` on `to_rank` through the shared
-// pinned crossing buffer, pipelined over `kCrossingPipelineDepth` pieces and ordered entirely by
-// events, so the whole transfer stays capturable into a CUDA graph.
-//
-// Callers with both ranks on one physical device should copy device-to-device instead; this path
-// exists for a genuine two-card crossing. It lives here rather than in the decoder so a test can
-// drive it with two ranks pinned to one device and check the fence protocol without a second card.
-void stage_cross_rank_copy(DeviceContext& context, const void* source, std::size_t from_rank,
-                           void* destination, std::size_t to_rank, std::size_t bytes);
 
 class CudaEventTimer {
 public:

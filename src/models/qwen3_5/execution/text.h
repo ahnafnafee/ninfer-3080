@@ -14,6 +14,7 @@
 #include "models/qwen3_5/state/decoder_state.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 #include "models/qwen3_5/program/round_buffers.h"
+#include "models/qwen3_5/execution/stage_runtime.h"
 
 #include <array>
 #include <cstddef>
@@ -87,6 +88,9 @@ public:
     }
 
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
+
+    // Present when the model is split over several devices; see StageRuntime.
+    void set_stage_runtime(StageRuntime* runtime) noexcept { stage_runtime_ = runtime; }
 
     void set_prefill_split_frontier(std::int64_t position) noexcept {
         prefill_split_frontier_ = position;
@@ -164,16 +168,21 @@ private:
     void gdn_mix(const BlockParameters& weights, Tensor& x, int index, Phase phase);
     void mlp_tail(const BlockParameters& weights, Tensor& x, Phase phase,
                   const ops::SparseMoeHints& hints);
-    // Move bytes between two ranks' devices, ordered by event rather than a host synchronize.
-    void cross_rank_copy(const void* source, std::size_t from_rank, void* destination,
-                         std::size_t to_rank, std::size_t bytes);
-    // mlp_tail, on another device when this layer's expert block was offloaded there.
-    void run_mlp_tail(const BlockParameters& weights, Tensor& x, Phase phase,
-                      std::size_t expert_rank, const ops::SparseMoeHints& hints);
     [[nodiscard]] ops::SparseMoeHints next_projection_hints(int layer) const;
     void run_layers(Tensor& x, Phase phase);
     template <class Tap>
     void run_layers(Tensor& x, Phase phase, Tap& tap);
+    // The layers one stage owns, on the device that stage's context is currently bound to.
+    template <class Tap>
+    void run_stage_layers(std::size_t stage, Tensor& x, Phase phase, Tap& tap);
+    // The whole layer stack across pipeline stages, ending with the residual back on rank 0.
+    void run_staged(Tensor& x, Phase phase);
+    // The Linear Attention state pool holding GDN layer `layer`, and its index within that pool.
+    struct GdnStateRef {
+        LinearAttentionStatePool* pool;
+        std::uint32_t local;
+    };
+    [[nodiscard]] GdnStateRef gdn_state(std::uint32_t layer) const;
     template <class Tap>
     void target_verify_batch_impl(const Tensor& ids, const Tensor& cache_positions,
                                   const Tensor& rope_positions, const Tensor& valid_columns,
@@ -254,6 +263,7 @@ private:
     int proposal_head_n_                        = 0;
     const ops::SamplingConfig* sampling_config_ = nullptr;
     const MtpParameters* mtp_                   = nullptr;
+    StageRuntime* stage_runtime_                = nullptr;
 };
 
 } // namespace ninfer::models::qwen3_5::execution

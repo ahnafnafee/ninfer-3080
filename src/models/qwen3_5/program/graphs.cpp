@@ -293,12 +293,13 @@ void ProgramImpl::prepare_graphs() {
         return execution::ExecutionCore{device,
                                         parameters,
                                         work,
-                                        state_images->linear(),
+                                        state_images->linear(0),
                                         replay_records ? &*replay_records : nullptr,
                                         io,
                                         prefill_hidden,
                                         prefill_chunk,
-                                        proposal_head};
+                                        proposal_head,
+                                        stage_runtime.get()};
     };
 
     if (speculative_backend == SpeculativeBackend::None) {

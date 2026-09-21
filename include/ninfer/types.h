@@ -183,11 +183,15 @@ struct EngineOptions {
     std::filesystem::path chat_template_path;
     EnginePurpose purpose              = EnginePurpose::Generation;
     int device                         = 0;
-    // Empty or one entry keeps the single-device route and `device` selects it. Two entries open a
-    // second endpoint for model-parallel execution, in the given order: primary first. Matching
-    // compute capability is required at construction; peer access is only probed and recorded as a
-    // capability -- crossings stage through pinned host memory when it is unavailable.
+    // Empty or one entry keeps the single-device route and `device` selects it. Several entries
+    // split the model's layers into that many pipeline stages, one per device, in the given order:
+    // the first holds the embedding, head and round state. Matching compute capability is required
+    // at construction; peer access is only probed and recorded as a capability -- boundary
+    // transfers stage through pinned host memory when it is unavailable.
     std::vector<int> devices;
+    // Layers per stage, one count per entry of `devices`. Empty lets the engine choose from each
+    // device's free memory.
+    std::vector<std::uint32_t> stage_layers;
     std::uint32_t max_context          = 2048; // Logical ceiling of one request or score window.
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(2048);
     std::uint32_t max_concurrency      = 1;

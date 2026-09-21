@@ -17,12 +17,13 @@ namespace ninfer {
 // A transfer has four independent halves, and keeping them apart is the point of the class:
 //
 //   send_payload / recv_payload   plain memcpy nodes. Legal inside stream capture, so each stage's
-//                                 graph carries its own half and no event ever crosses a graph.
-//   mark_* / wait_*               event records and waits. Eager only. A wait on an event whose last
-//                                 record was outside the capture fails with
-//                                 cudaErrorStreamCaptureIsolation, which is the trap the previous
-//                                 crossing protocol had to track capture ids to avoid. Here the
-//                                 fences are simply issued between graph launches.
+//                                 graph can carry its own half and no event ever crosses a graph.
+//   mark_* / wait_*               event records and waits. With per-stage graphs they are issued
+//                                 between graph launches, never inside a capture. A wait on an event
+//                                 whose last record was outside the capture fails with
+//                                 cudaErrorStreamCaptureIsolation, which the previous crossing
+//                                 protocol had to track capture ids to avoid; see below for how a
+//                                 whole-pass capture uses them.
 //
 // Ordering for one slot is: sender `wait_drained`, `send_payload`, `mark_filled`; receiver
 // `wait_filled`, `recv_payload`, `mark_drained`. The eager `send` and `recv` do exactly that (and
@@ -30,6 +31,19 @@ namespace ninfer {
 // launches. A slot must not be reused until the receiver's `mark_drained` for the previous use has
 // been enqueued, which is what `wait_drained` enforces; a ring of two or more slots lets one
 // transfer fill while the previous one drains.
+//
+// Capturing a whole forward pass into one graph is the other way a link is used, and there the rule
+// for a wait is set by where the event's most recent record call happened, not by when it took
+// effect. Inside a capture a wait may only target an event last recorded in that same capture
+// (cudaErrorStreamCaptureIsolation otherwise). Outside one, a wait on an event whose last record
+// call was inside a capture fails with cudaErrorInvalidValue, even after that graph has launched;
+// an eager record makes the event an ordinary one again. `wait_drained` is the one wait that crosses
+// forward passes (the sender reusing a slot), so it tracks the capture of each event's last record
+// (0 for an eager one) and skips a wait it could not legally issue. What makes skipping safe is the
+// engine's own discipline: a captured pass joins every stage back into its origin stream and each
+// round ends in a synchronize, so one pass finishes before the next begins. The waits inside one
+// pass (`wait_filled`, and `recv`'s) pair with the send just issued in that same pass, so they are
+// always legal.
 //
 // Two transports, chosen once from the topology:
 //   StagedHost  D2H into a pinned host slot, then H2D on the receiver. Works between any two cards,
@@ -79,14 +93,16 @@ public:
     void recv_payload(void* destination, std::size_t bytes, std::size_t slot,
                       cudaStream_t to_stream);
 
-    // Fence halves. Eager only: never call these on a stream that is capturing.
+    // Fence halves, for a caller issuing them between graph launches. Inside a capture use `send`
+    // and `recv`, which pair the fences with their copies.
     void wait_drained(std::size_t slot, cudaStream_t from_stream);
     void mark_filled(std::size_t slot, cudaStream_t from_stream);
     void wait_filled(std::size_t slot, cudaStream_t to_stream);
     void mark_drained(std::size_t slot, cudaStream_t to_stream);
 
-    // Eager conveniences composing the halves. A payload of kLinkMinimumPipelinedBytes or more is
-    // split into kLinkPipelineDepth pieces with a fence each, so the two copies overlap.
+    // The halves composed, legal eagerly and inside one capture that spans both ends. A payload of
+    // kLinkMinimumPipelinedBytes or more is split into kLinkPipelineDepth pieces with a fence each,
+    // so the two copies overlap.
     void send(const void* source, std::size_t bytes, std::size_t slot, cudaStream_t from_stream);
     void recv(void* destination, std::size_t bytes, std::size_t slot, cudaStream_t to_stream);
 
@@ -95,6 +111,9 @@ private:
         void* data = nullptr;
         std::array<cudaEvent_t, kLinkPipelineDepth> filled{};
         std::array<cudaEvent_t, kLinkPipelineDepth> drained{};
+        // The capture that made each `drained` event's most recent record call, or 0 for an eager
+        // record (and for an event never recorded, which is legal to wait on: it is satisfied).
+        std::array<unsigned long long, kLinkPipelineDepth> drained_capture{};
         // Pieces the most recent send used. The receiver's `mark_drained` records the same count.
         std::size_t pieces = 1;
     };
