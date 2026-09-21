@@ -51,7 +51,7 @@ apt-get install -y -qq aria2 >/dev/null 2>&1
 
 echo "--- configuring ---"
 cmake -S /root/src -B /root/build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=86 \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="${NINFER_ARCH:-86}" \
   -DCMAKE_CUDA_COMPILER="$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)" \
   2>&1 | tail -3 || { echo "CONFIGURE_FAILED"; exit 1; }
 
