@@ -604,6 +604,7 @@ public:
                     .stable_ordinal   = 0,
                 });
             }
+            bool vacant_publication = false;
             for (std::uint32_t slot = 0;
                  candidate.publishes_shared && slot < shared_catalog_count_; ++slot) {
                 if (shared_catalog_[slot].state != SharedCatalogState::Vacant) { continue; }
@@ -612,9 +613,15 @@ public:
                     .publication_slot = slot,
                     .stable_ordinal   = 0,
                 });
+                vacant_publication = true;
                 break;
             }
-            if (pressure_evidence && candidate.publishes_shared) {
+            // Replacing a resident owner while a slot stands empty trades a frontier other requests
+            // can still match for one this request happens to value more. The portfolio fold prices
+            // the replacement higher because the victim's demand bits move to the newcomer, so the
+            // structural prefix a differing question needs loses to a full-prompt copy of the
+            // prompt in flight. Displacement has to wait until the catalog is actually full.
+            if (pressure_evidence && candidate.publishes_shared && !vacant_publication) {
                 for (std::uint32_t slot = 0; slot < shared_catalog_count_; ++slot) {
                     SharedCatalogEntry& entry = shared_catalog_[slot];
                     if (entry.state != SharedCatalogState::Catalogued || !entry.handle ||

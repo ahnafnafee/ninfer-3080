@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <iostream>
 #include <optional>
 #include <span>
@@ -93,6 +94,9 @@ CheckpointRecoveryAlternativeWork fake_recovery_work(std::uint64_t ns) {
 
 struct FakePreparedPrompt {
     std::uint32_t content_key = 0;
+    // The key of the prompt's stable prefix. A new question over a known system prompt shares this
+    // while its own content_key differs, which is the shape a shared prefix has to serve.
+    std::uint32_t prefix_key = 0;
 };
 
 struct FakeCacheSessionKey {
@@ -662,9 +666,10 @@ public:
         }
         if (shared_source != nullptr) {
             inspected_shared_sources.push_back(shared_source->id);
-            if (shared_source->content_key != prompt.content_key || !checkpoint) {
-                return std::nullopt;
-            }
+            const bool shared_matches = shared_source->content_key == prompt.content_key ||
+                                        (prompt.prefix_key != 0 &&
+                                         shared_source->content_key == prompt.prefix_key);
+            if (!shared_matches || !checkpoint) { return std::nullopt; }
         }
 
         FakeAdmissionCandidate plan;
@@ -1829,13 +1834,14 @@ struct ActiveRequest {
 };
 
 ActiveRequest start_active(FakeManager& manager, FakeProgram& program, std::uint32_t content_key,
-                           const FakeRequestBasePlan& base, std::uint64_t publication_order) {
-    auto inspection =
-        manager.inspect(program, FakePreparedPrompt{content_key}, base, publication_order);
+                           const FakeRequestBasePlan& base, std::uint64_t publication_order,
+                           std::uint32_t prefix_key = 0) {
+    const FakePreparedPrompt prompt{content_key, prefix_key};
+    auto inspection = manager.inspect(program, prompt, base, publication_order);
     require(inspection.choice.has_value(), "request did not produce an admission choice");
     const LaneId lane   = inspection.choice->destination();
-    const auto reserved = manager.reserve_materialization(program, std::move(*inspection.choice),
-                                                          FakePreparedPrompt{content_key}, {});
+    const auto reserved = manager.reserve_materialization(
+        program, std::move(*inspection.choice), FakePreparedPrompt{content_key, prefix_key}, {});
     require(reserved == FakeManager::MaterializationReserveResult::Reserved,
             "request materialization was not reserved");
     auto outcome = [&]() -> FakeManager::MaterializationOutcome {
@@ -2960,6 +2966,54 @@ void test_repeated_private_reuse_selects_zero_prefill_shared_promotion() {
     (void)finish_active(manager, program, second, 16);
 }
 
+void test_shared_prefix_serves_a_new_question_after_an_exact_repeat() {
+    const auto system_base = [] {
+        FakeRequestBasePlan base = make_base(91);
+        base.cache.opportunities.push_back(FakeContextCache::Opportunity{
+            .kind     = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+            .evidence = ninfer::SharedCandidateEvidence::EngineStructural,
+            .frontier = 16,
+        });
+        return base;
+    };
+
+    FakeManager manager = make_manager(1, 2, 4);
+    FakeProgram program;
+
+    // The cold request publishes the system prefix as a shared owner.
+    const ActiveRequest cold = start_active(manager, program, 91, system_base(), 1);
+    program.capture_assessment = FakeCaptureAssessment{
+        .shortlist_key          = FakeShortlistKey{.digest = 91, .frontier = 16},
+        .shared_evidence        = ninfer::SharedCandidateEvidence::EngineStructural,
+        .protected_rebuild_work = PrefillWork{.tokens = 16},
+        .publishes_shared       = true,
+        .physically_feasible    = true,
+    };
+    require(manager.reserve_active_capture(program, cold.lane, FakeCaptureOffer{.id = 91}, 0, {}) ==
+                FakeManager::ActiveCaptureReserveResult::Reserved,
+            "the cold request did not reserve the shared capture");
+    {
+        auto progress      = manager.progress_context_transaction(program, {});
+        const auto outcome = std::get<FakeManager::ActiveCaptureOutcome>(std::move(progress));
+        require(outcome.status == ContextTransactionStatus::Published,
+                "the shared prefix was not published");
+    }
+    program.capture_assessment = FakeCaptureAssessment{};
+    (void)finish_active(manager, program, cold, 16);
+
+    // An exact repeat reuses the private continuation, as production does.
+    const ActiveRequest repeat = start_active(manager, program, 91, system_base(), 2);
+    (void)finish_active(manager, program, repeat, 16);
+
+    // The new question shares only the system prefix; one preserving private action makes room.
+    program.required_pressure_actions     = 1;
+    program.private_pressure_alternatives = 1;
+    auto inspection = manager.inspect(program, FakePreparedPrompt{92, 91}, system_base(), 3);
+    require(inspection.choice.has_value(), "the new question produced no admission choice");
+    require(inspection.choice->summary().prefix_reuse_path == PrefixReusePath::SharedStablePrefix,
+            "the new question recomputed from root while the shared prefix was resident");
+}
+
 void test_shared_fanout_keeps_owner_edges_live_across_summary_refresh() {
     FakeManager manager = make_manager(2, 3, 1);
     FakeProgram program;
@@ -3684,6 +3738,8 @@ int main() {
              test_observed_shared_candidate_requires_independent_domains);
     run_test("zero-prefill private promotion",
              test_repeated_private_reuse_selects_zero_prefill_shared_promotion);
+    run_test("shared prefix after an exact repeat",
+             test_shared_prefix_serves_a_new_question_after_an_exact_repeat);
     run_test("shared fanout owner edges",
              test_shared_fanout_keeps_owner_edges_live_across_summary_refresh);
     run_test("shared capture multi-owner pressure",
