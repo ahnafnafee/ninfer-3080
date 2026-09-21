@@ -164,9 +164,12 @@ template <class K> double run(K kernel, int blocks, int threads, float* sink, do
 int main() {
     cudaDeviceProp p;
     CHECK(cudaGetDeviceProperties(&p, 0));
+    // cudaDeviceProp dropped both clock fields in CUDA 13; the attributes exist in every toolkit.
+    int sm_khz = 0, mem_khz = 0;
+    CHECK(cudaDeviceGetAttribute(&sm_khz, cudaDevAttrClockRate, 0));
+    CHECK(cudaDeviceGetAttribute(&mem_khz, cudaDevAttrMemoryClockRate, 0));
     printf("GPU: %s  sm_%d%d  %d SMs  %.0f MHz  mem %.0f MHz x %d-bit\n\n", p.name, p.major,
-           p.minor, p.multiProcessorCount, p.clockRate / 1000.0, p.memoryClockRate / 1000.0,
-           p.memoryBusWidth);
+           p.minor, p.multiProcessorCount, sm_khz / 1000.0, mem_khz / 1000.0, p.memoryBusWidth);
 
     const int threads = 256;
     const int blocks  = p.multiProcessorCount * 8;
