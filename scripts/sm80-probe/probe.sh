@@ -11,12 +11,13 @@
 # It runs unattended as an instance on-start script, or piped over ssh onto a box you already have:
 #
 #   ssh -p PORT root@HOST 'bash -s' < scripts/sm80-probe/probe.sh
-#   ssh -p PORT root@HOST 'bash -s -- --engine' < scripts/sm80-probe/probe.sh
+#   ssh -p PORT root@HOST 'bash -s -- --engine --tests' < scripts/sm80-probe/probe.sh
 #   bash scripts/sm80-probe/probe.sh --summarize DIR       # re-read a finished run
 #
 # The default run is probes only and takes a couple of minutes, most of it compiling. Add --engine
 # to also build the real engine for this architecture and generate text with a model (MODEL_PATH, or
-# MODEL_URL to download one); that is the check that the kernels produce sensible output here.
+# MODEL_URL to download one); that is the check that the kernels produce sensible output here. Add
+# --tests to build and run the op correctness suites on the card itself.
 #
 # Environment:
 #   NINFER_BRANCH   branch to test (default feat/sm80-cmp170hx-probe)
@@ -25,6 +26,7 @@
 #   PROBE_GPU       which GPU index to test (default 0)
 #   MAX_RUNTIME_SECONDS  dead-man switch that powers the box off (default 3600; 0 disables)
 #   MODEL_PATH / MODEL_URL   the .ninfer artifact for --engine
+#   MODEL_SHA256    if set, the downloaded artifact is checked against it
 set -uo pipefail
 exec 2>&1
 
@@ -117,13 +119,20 @@ if [[ "${1:-}" == "--summarize" ]]; then
 fi
 
 ENGINE=0
-[[ "${1:-}" == "--engine" ]] && ENGINE=1
+TESTS=0
+for arg in "$@"; do
+  case "$arg" in
+    --engine) ENGINE=1 ;;
+    --tests) TESTS=1 ;;
+    *) echo "unknown argument: $arg (expected --engine, --tests or --summarize DIR)" >&2; exit 2 ;;
+  esac
+done
 
 # ---------------------------------------------------------------------------------------------
 # Run.
 # ---------------------------------------------------------------------------------------------
 
-echo "=== sm80 probe $(date -u +%FT%TZ)  branch=$BRANCH engine=$ENGINE ==="
+echo "=== sm80 probe $(date -u +%FT%TZ)  branch=$BRANCH engine=$ENGINE tests=$TESTS ==="
 
 if [[ "$MAX_RUNTIME_SECONDS" -gt 0 ]]; then
   ( sleep "$MAX_RUNTIME_SECONDS"; echo "=== MAX_RUNTIME reached, halting ==="; poweroff || halt -f ) \
@@ -206,13 +215,14 @@ summarize "$OUT" | tee "$OUT/summary.txt"
 # ---------------------------------------------------------------------------------------------
 # Optional: does the real engine run correctly on this architecture?
 # ---------------------------------------------------------------------------------------------
-if (( ENGINE )); then
+if (( ENGINE || TESTS )); then
   echo
-  echo "=== ENGINE: build for sm_$ARCH and generate ==="
+  echo "=== BUILD for sm_$ARCH ==="
+  # libcurl and Python are configure-time requirements of the server target and the tests.
   apt-get update -qq
-  apt-get install -y -qq cmake ninja-build build-essential pkg-config aria2 \
+  apt-get install -y -qq cmake ninja-build build-essential pkg-config aria2 python3 \
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev \
-    libswresample-dev >/dev/null 2>&1
+    libswresample-dev libcurl4-openssl-dev >/dev/null 2>&1
 
   # CMakeLists needs 3.28; Ubuntu 22.04 ships 3.22 and 24.04 ships 3.28.
   cmake_version="$(cmake --version | awk 'NR == 1 {print $3}')"
@@ -220,6 +230,19 @@ if (( ENGINE )); then
     echo "CMAKE_TOO_OLD: have $cmake_version, need 3.28. Use an ubuntu24.04 image."; exit 1
   fi
 
+  testing=OFF; (( TESTS )) && testing=ON
+  cmake -S "$SRC" -B /root/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING="$testing" \
+    -DCMAKE_CUDA_ARCHITECTURES="$ARCH" -DCMAKE_CUDA_COMPILER="$NVCC" 2>&1 | tail -4
+  [[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "CONFIGURE_FAILED"; exit 1; }
+  # Each nvcc job wants on the order of a gigabyte, so cap parallelism by RAM as well as cores.
+  ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+  jobs=$(( ram_gb / 2 )); (( jobs < 4 )) && jobs=4; (( jobs > $(nproc) )) && jobs=$(nproc)
+  echo "building with -j$jobs ($ram_gb GiB RAM)"
+fi
+
+if (( ENGINE )); then
+  echo
+  echo "=== ENGINE: build and generate ==="
   MODEL="${MODEL_PATH:-}"
   if [[ -z "$MODEL" && -n "${MODEL_URL:-}" ]]; then
     mkdir -p /root/models
@@ -229,13 +252,13 @@ if (( ENGINE )); then
       > /root/aria.log 2>&1 || { echo "MODEL_DOWNLOAD_FAILED"; exit 1; }
   fi
   [[ -n "$MODEL" && -f "$MODEL" ]] || { echo "NO_MODEL: set MODEL_PATH or MODEL_URL"; exit 1; }
+  ls -l "$MODEL"
+  if [[ -n "${MODEL_SHA256:-}" ]]; then
+    echo "$MODEL_SHA256  $MODEL" | sha256sum -c - || { echo "MODEL_CHECKSUM_MISMATCH"; exit 1; }
+  fi
 
-  cmake -S "$SRC" -B /root/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CUDA_ARCHITECTURES="$ARCH" -DCMAKE_CUDA_COMPILER="$NVCC" 2>&1 | tail -3
-  ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
-  jobs=$(( ram_gb / 2 )); (( jobs < 4 )) && jobs=4; (( jobs > $(nproc) )) && jobs=$(nproc)
-  echo "building with -j$jobs ($ram_gb GiB RAM)"
-  cmake --build /root/build --target ninfer -j "$jobs" 2>&1 | tail -8 || { echo "ENGINE_BUILD_FAILED"; exit 1; }
+  cmake --build /root/build --target ninfer -j "$jobs" 2>&1 | tail -8
+  [[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "ENGINE_BUILD_FAILED"; exit 1; }
 
   echo "--- greedy generation, single GPU ---"
   /root/build/apps/ninfer "$MODEL" \
@@ -246,6 +269,22 @@ if (( ENGINE )); then
   grep -E "gpu weights used|free after weights|free after startup|decode speed|error" "$OUT/engine-stderr.txt" | head
   echo "--- output (read it: sensible text means the kernels are right here) ---"
   cat "$OUT/engine-output.txt"
+fi
+
+# The op correctness suites that exercise the mma.sync / cp.async kernels, run on the real card. The
+# ctest names equal the target names, so one list drives both the build and the selection.
+if (( TESTS )); then
+  echo
+  echo "=== TESTS: op correctness on this card ==="
+  TEST_TARGETS="ninfer_linear_q4_a16_test ninfer_linear_q8_a16_test ninfer_linear_bf16_a16_test \
+ninfer_linear_topk_test ninfer_gated_delta_net_test ninfer_softmax_attention_test \
+ninfer_sparse_moe_test ninfer_attn_input_proj_test ninfer_gdn_input_proj_test \
+ninfer_rmsnorm_test ninfer_kv_cache_test"
+  # shellcheck disable=SC2086
+  cmake --build /root/build --target $TEST_TARGETS -j "$jobs" 2>&1 | tail -6
+  [[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "TESTS_BUILD_FAILED"; exit 1; }
+  pattern="^($(echo $TEST_TARGETS | tr ' ' '|'))\$"
+  ctest --test-dir /root/build -j1 --output-on-failure -R "$pattern" 2>&1 | tee "$OUT/tests.txt" | tail -30
 fi
 
 echo
