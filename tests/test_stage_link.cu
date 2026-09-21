@@ -414,7 +414,7 @@ int run() {
 
 } // namespace
 
-int main() {
+int run_stage_link_test() {
     try {
         return run();
     } catch (const std::exception& error) {

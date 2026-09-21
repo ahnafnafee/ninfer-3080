@@ -267,7 +267,7 @@ void solver_scenarios() {
 
 } // namespace
 
-int main() {
+int run_stage_plan_test() {
     try {
         plan_basics();
         solver_matches_oracle();

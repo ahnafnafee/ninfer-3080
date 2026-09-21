@@ -587,9 +587,12 @@ ninfer model.ninfer --devices 0,1,2 --stage-layers 20,22,22 --prompt "..."
   and 2x 3090 PCIe boxes, a staged transfer took about 0.03 ms at a decode-sized payload and several
   milliseconds at a prefill-chunk-sized one, depending on the slot's link width.
 
-Performance and capacity numbers for the stage split have not been measured on real two-GPU
-hardware yet. The design and its verification are in
-`docs/maintainer/pipeline-parallel-plan.md`.
+Measured on two rented Linux boxes (Qwen3.6-27B, int8 KV, no peer access on either): on 2x RTX 3090
+(PCIe 3.0 x16) greedy output is byte-identical to one card, decode is 48.5 tok/s against 46.9 on one
+card (105.3 against 100.2 with MTP3), prefill is unchanged, and `--kv-capacity auto` resolves the
+full 262,144-token context that one 24 GB card refuses. On 2x RTX A4000 the 27B runs at 262,144
+tokens with 24.1 tok/s decode (52.6 with MTP3) and 825 tok/s prefill. The tables, the cases checked
+and the design are in `docs/maintainer/pipeline-parallel-plan.md`.
 
 ## Capabilities
 

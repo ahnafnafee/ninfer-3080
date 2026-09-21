@@ -382,13 +382,12 @@ what it says about kernels and measurements still holds except where this sectio
 - [ ] **A load-time transcode changes nothing in the prefill signature** (it is keyed on the stored
       format), but `--mlp-a8-decode`-style execution choices are not in the signature either. If a
       future preset needs to distinguish them, the signature is the place to say so.
-- [ ] **The layer pipeline split has only been run with `--devices 0,0` on this single-GPU box.**
-      `tests/test_stage_link.cu` drives the boundary transfer with several stages on device 0 (byte
-      integrity, ring-slot reuse, capturability, the fence dependency read off the captured graph),
-      and `ninfer_qwen3_5_stages_real_test` compares greedy output with `--device 0`. Neither can
-      see a pointer that is valid only on the wrong device. What needs a real second card
-      (`scripts/multi-gpu-testing/`) is that check, the PCIe cost, the compute-capability rejection
-      and the per-card capacity win.
+- [x] **The layer pipeline split on real GPUs.** Run 2026-09-21 on rented 2x RTX 3090 and 2x RTX
+      A4000 (results in `docs/maintainer/pipeline-parallel-plan.md`): the stage test passes with
+      distinct devices (`NINFER_TEST_DEVICE_IDS=0,1`), the split output equals one card's, and the
+      A4000 pair runs the 27B at its full context. Still open: heterogeneous pairs (SM count and
+      compute-capability rejection), NVLink or peer access, and more than two devices, none of which
+      has been on hardware.
 - [ ] **A runtime race harness for the boundary transfer has no power on Windows.** Holding the
       destination stream, with a spinning kernel or a blocking host function, also stops the driver
       submitting the source stream's copies, so the source stalls whether or not the fence is

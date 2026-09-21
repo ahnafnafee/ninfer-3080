@@ -362,7 +362,7 @@ int run() {
 
 } // namespace
 
-int main() {
+int run_kv_cache_ranks_test() {
     try {
         return run();
     } catch (const std::exception& error) {

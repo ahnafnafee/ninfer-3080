@@ -15,7 +15,6 @@ set(ninfer_op_tests
   argmax
   gdn_gating
   gdn_gating_proj
-  gdn_gating_plan
   rope
   vision_pos_embed
   sampling
