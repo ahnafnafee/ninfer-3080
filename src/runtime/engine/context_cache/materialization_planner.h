@@ -25,7 +25,7 @@ struct MaterializationCheckpointPolicy {
     RetentionClass retention_class     = RetentionClass::RecentPrivate;
     std::uint64_t selected_hit_count   = 0;
     std::uint64_t last_hit_epoch       = 0;
-    std::uint32_t demand_mask          = 0;
+    std::uint64_t demand_mask          = 0;
     std::uint64_t rebuild_ns           = 0;
     std::uint64_t baseline_recovery_ns = 0;
 };

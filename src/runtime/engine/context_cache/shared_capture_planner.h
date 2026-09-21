@@ -40,7 +40,7 @@ public:
     struct CheckpointPolicy {
         PlanningOwnerId owner;
         CheckpointRef checkpoint;
-        std::uint32_t demand_mask          = 0;
+        std::uint64_t demand_mask          = 0;
         std::uint64_t rebuild_ns           = 0;
         std::uint64_t baseline_recovery_ns = 0;
     };
@@ -54,7 +54,7 @@ public:
         std::span<const OwnerPolicy> owner_policies;
         std::span<const CheckpointPolicy> checkpoint_policies;
         std::optional<PlanningOwnerId> direct_shared_victim;
-        std::uint32_t candidate_demand_mask         = 0;
+        std::uint64_t candidate_demand_mask         = 0;
         std::uint64_t candidate_rebuild_ns          = 0;
         std::uint64_t private_baseline_immediate_ns = 0;
         std::uint32_t blocked_runnable_requests     = 0;

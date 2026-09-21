@@ -1387,7 +1387,11 @@ private:
         if (value != std::numeric_limits<std::uint64_t>::max()) { ++value; }
     }
 
-    static constexpr std::size_t kDemandWindowCapacity = 32U;
+    // The window has to outlast the distance between two requests that share a prefix. At 32 it does
+    // not: upstream #236 replays 39 distinct prefixes twice, so the first pass's demand record is
+    // evicted before the second pass asks for the same key, every candidate reads as a single reuse
+    // domain, and a shared publication can never be worth making. 64 covers that replay distance.
+    static constexpr std::size_t kDemandWindowCapacity = 64U;
 
     static void append_unique(std::vector<PrefixShortlistKey>& destination,
                               const PrefixShortlistKey& key) {
@@ -1425,24 +1429,24 @@ private:
         return ReuseDomainId{.low = low, .high = high};
     }
 
-    [[nodiscard]] std::uint32_t
+    [[nodiscard]] std::uint64_t
     demand_mask_for(const PrefixShortlistKey& key,
                     const PrefixDemandRecord& provisional) const noexcept {
-        std::uint32_t mask      = 0;
+        std::uint64_t mask      = 0;
         std::uint32_t bit       = 0;
         const std::size_t begin = demand_window_.size() == kDemandWindowCapacity ? 1U : 0U;
         for (std::size_t index = begin; index < demand_window_.size(); ++index, ++bit) {
-            if (demand_matches(demand_window_[index], key)) { mask |= 1U << bit; }
+            if (demand_matches(demand_window_[index], key)) { mask |= 1ULL << bit; }
         }
-        if (bit < kDemandWindowCapacity && demand_matches(provisional, key)) { mask |= 1U << bit; }
+        if (bit < kDemandWindowCapacity && demand_matches(provisional, key)) { mask |= 1ULL << bit; }
         return mask;
     }
 
-    [[nodiscard]] std::uint32_t
+    [[nodiscard]] std::uint64_t
     committed_demand_mask_for(const PrefixShortlistKey& key) const noexcept {
-        std::uint32_t mask = 0;
+        std::uint64_t mask = 0;
         for (std::uint32_t bit = 0; bit < demand_window_.size(); ++bit) {
-            if (demand_matches(demand_window_[bit], key)) { mask |= 1U << bit; }
+            if (demand_matches(demand_window_[bit], key)) { mask |= 1ULL << bit; }
         }
         return mask;
     }
@@ -1745,7 +1749,7 @@ private:
             PrefixShortlistKey key;
             SharedCandidateEvidence evidence = SharedCandidateEvidence::None;
             std::uint32_t frontier           = 0;
-            std::uint32_t demand_mask        = 0;
+            std::uint64_t demand_mask        = 0;
             std::uint64_t rebuild_ns         = 0;
             bool pressure_capable            = false;
         };

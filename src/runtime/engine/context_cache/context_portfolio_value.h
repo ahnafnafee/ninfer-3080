@@ -20,7 +20,9 @@ struct ContextPortfolioOwnerPolicy {
 
 struct ContextPortfolioCheckpointValue {
     PlanningOwnerId owner;
-    std::uint32_t demand_mask          = 0;
+    // One bit per request in the manager's demand window, which is 64 wide: see
+    // kDemandWindowCapacity, sized to outlast the distance between two requests sharing a prefix.
+    std::uint64_t demand_mask          = 0;
     std::uint64_t rebuild_ns           = 0;
     std::uint64_t baseline_recovery_ns = 0;
     std::uint64_t target_recovery_ns   = 0;
@@ -43,8 +45,8 @@ public:
     [[nodiscard]] ContextPortfolioValueResult
     fold(std::span<const ContextPortfolioOwnerPolicy> owners,
          std::span<const ContextPortfolioCheckpointValue> checkpoints) {
-        std::array<std::uint64_t, 32> baseline_demand{};
-        std::array<std::uint64_t, 32> target_demand{};
+        std::array<std::uint64_t, 64> baseline_demand{};
+        std::array<std::uint64_t, 64> target_demand{};
         owner_scratch_.clear();
         for (const ContextPortfolioOwnerPolicy& policy : owners) {
             if (std::find_if(owner_scratch_.begin(), owner_scratch_.end(), [&](const auto& item) {
@@ -78,8 +80,8 @@ public:
             owner->private_transition_loss =
                 std::max(owner->private_transition_loss,
                          baseline_saving > target_saving ? baseline_saving - target_saving : 0);
-            for (std::uint32_t bit = 0; bit < 32U; ++bit) {
-                if ((checkpoint.demand_mask & (1U << bit)) == 0) { continue; }
+            for (std::uint32_t bit = 0; bit < 64U; ++bit) {
+                if ((checkpoint.demand_mask & (1ULL << bit)) == 0) { continue; }
                 baseline_demand[bit] = std::max(baseline_demand[bit], baseline_saving);
                 target_demand[bit]   = std::max(target_demand[bit], target_saving);
             }
