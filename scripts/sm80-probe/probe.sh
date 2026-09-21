@@ -279,7 +279,7 @@ if (( TESTS )); then
   TEST_TARGETS="ninfer_linear_q4_a16_test ninfer_linear_q8_a16_test ninfer_linear_bf16_a16_test \
 ninfer_linear_topk_test ninfer_gated_delta_net_test ninfer_softmax_attention_test \
 ninfer_sparse_moe_test ninfer_attn_input_proj_test ninfer_gdn_input_proj_test \
-ninfer_rmsnorm_test ninfer_kv_cache_test"
+ninfer_rmsnorm_test ninfer_kv_cache_test ninfer_gdn_gating_proj_test"
   # shellcheck disable=SC2086
   cmake --build /root/build --target $TEST_TARGETS -j "$jobs" 2>&1 | tail -6
   [[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "TESTS_BUILD_FAILED"; exit 1; }
