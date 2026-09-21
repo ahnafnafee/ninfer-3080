@@ -110,7 +110,10 @@ void ProgramImpl::prepare_graphs() {
     std::array<StateImageHandle, kMaximumConcurrency> capture_states{};
     for (std::uint32_t row = 0; row < max_concurrency; ++row) {
         std::optional<StateImageHandle> state = state_store->reserve_reset(compute_streams);
-        if (!state) { throw std::bad_alloc(); }
+        if (!state) {
+            throw ninfer::ContextCacheExhausted(
+                "Device StateImage store cannot provide a CUDA Graph capture state");
+        }
         capture_states[row] = *state;
     }
     const auto capture_state_slot = [&](std::uint32_t row) {
@@ -134,7 +137,10 @@ void ProgramImpl::prepare_graphs() {
         for (std::uint32_t row = 0; row < max_concurrency; ++row) {
             std::optional<KVAddressSpaceHandle> allocation =
                 addresses.create_active(1, static_cast<std::int32_t>(row), compute_streams);
-            if (!allocation) { throw std::bad_alloc(); }
+            if (!allocation) {
+                throw ninfer::ContextCacheExhausted(
+                    "KV address space cannot provide a CUDA Graph capture entry");
+            }
             allocations.push_back(*allocation);
             addresses.ensure_mapped_to_tokens(*allocation, 1, compute_streams);
 

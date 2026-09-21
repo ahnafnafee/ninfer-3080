@@ -1099,7 +1099,9 @@ void ProgramImpl::reserve_state_entitlement(SequenceState& sequence, std::uint32
         throw std::logic_error("sequence StateImage reservation is not a single destination");
     }
     std::optional<StateImageHandle> reserved = state_store->reserve_destination();
-    if (!reserved) { throw std::bad_alloc(); }
+    if (!reserved) {
+        throw ninfer::ContextCacheExhausted("Device StateImage store has no free slot for the sequence reservation");
+    }
     sequence.reserved_state = *reserved;
     if (sequence_exclusive_state_resources(sequence).device.state_slots != slots) {
         throw std::logic_error("sequence StateImage entitlement did not materialize exactly");
