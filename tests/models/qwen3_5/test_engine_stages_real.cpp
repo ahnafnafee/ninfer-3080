@@ -6,11 +6,17 @@
 // forward pass that raced its own staging. Each configuration below is compared byte for byte with
 // the single-device run.
 //
-// Every stage shares device 0 here, so a pointer into "another stage's" memory still works and this
-// cannot see a wrong-device access; that needs a second card. What it does cover is everything else
-// about the stage path, including the pinned-host protocol (forced, since same-device stages would
-// otherwise take a device-to-device shortcut), CUDA graph capture across stages, and prefill that
-// spans several chunks.
+// By default every stage shares device 0, so a pointer into "another stage's" memory still works and
+// that cannot see a wrong-device access. What it does cover is everything else about the stage path,
+// including the pinned-host protocol (forced, since same-device stages would otherwise take a
+// device-to-device shortcut), CUDA graph capture across stages, and prefill that spans several
+// chunks.
+//
+// On a machine with several GPUs, NINFER_TEST_DEVICE_IDS=0,1 puts stage i on the i-th listed device
+// (wrapping around), which is the check the aliased run cannot make. Two settings adapt it to a
+// pair of cards that cannot hold the model alone:
+//   NINFER_TEST_SPLIT_INVARIANCE=1  compare every row with the first row instead of one device
+//   NINFER_TEST_MAX_STAGES=2        skip rows with more stages than that
 
 #include "guarded_main.h"
 #include "ninfer/engine.h"
@@ -19,6 +25,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,6 +44,27 @@ struct Configuration {
     bool mtp = false;
 };
 
+// Stage i of a configuration sits on the i-th id of NINFER_TEST_DEVICE_IDS, wrapping around; without
+// the variable every stage is on device 0.
+std::vector<int> stage_devices(const std::vector<int>& requested) {
+    const char* ids = std::getenv("NINFER_TEST_DEVICE_IDS");
+    if (ids == nullptr || *ids == '\0' || requested.empty()) { return requested; }
+    std::vector<int> available;
+    std::istringstream list{std::string(ids)};
+    for (std::string item; std::getline(list, item, ',');) { available.push_back(std::stoi(item)); }
+    if (available.empty()) { return requested; }
+    std::vector<int> out;
+    for (std::size_t stage = 0; stage < requested.size(); ++stage) {
+        out.push_back(available[stage % available.size()]);
+    }
+    return out;
+}
+
+bool flag(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
 ninfer::EngineOptions engine_options(const char* artifact, const Configuration& configuration) {
     ninfer::EngineOptions options;
     options.artifact_path = artifact;
@@ -49,7 +77,7 @@ ninfer::EngineOptions engine_options(const char* artifact, const Configuration& 
         options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
         options.speculative.draft_tokens = 3;
     }
-    options.devices               = configuration.devices;
+    options.devices               = stage_devices(configuration.devices);
     options.stage_layers          = configuration.stage_layers;
     return options;
 }
@@ -114,7 +142,16 @@ int run() {
         return 77;
     }
 
-    const Outputs reference = generate(artifact, {.label = "single device", .devices = {}});
+    const bool split_invariance = flag("NINFER_TEST_SPLIT_INVARIANCE");
+    const char* max_stages_text = std::getenv("NINFER_TEST_MAX_STAGES");
+    const std::size_t max_stages =
+        max_stages_text != nullptr ? static_cast<std::size_t>(std::atoi(max_stages_text)) : 64;
+    // One card cannot always hold the model. Then the first row is the reference, and what is
+    // checked is that where the layers are cut does not change the output.
+    const Outputs reference =
+        generate(artifact, split_invariance
+                               ? Configuration{.label = "two stages, graphs", .devices = {0, 0}}
+                               : Configuration{.label = "single device", .devices = {}});
     if (reference.short_run.size() != 24 || reference.long_run.size() != 24 ||
         reference.continued_run.size() != 8 || reference.reused_tokens == 0) {
         std::cerr << "the single-device reference did not generate its tokens or reuse its prefix\n";
@@ -124,7 +161,10 @@ int run() {
     std::optional<Outputs> mtp_reference;
     bool mtp_available = true;
     try {
-        mtp_reference = generate(artifact, {.label = "single device, MTP", .devices = {}, .mtp = true});
+        mtp_reference = generate(
+            artifact, split_invariance
+                          ? Configuration{.label = "two stages, MTP", .devices = {0, 0}, .mtp = true}
+                          : Configuration{.label = "single device, MTP", .devices = {}, .mtp = true});
     } catch (const std::exception& error) {
         std::cout << "MTP rows skipped: " << error.what() << '\n';
         mtp_available = false;
@@ -144,6 +184,7 @@ int run() {
     int failures = 0;
     for (const Configuration& configuration : configurations) {
         if (configuration.mtp && !mtp_available) { continue; }
+        if (configuration.devices.size() > max_stages) { continue; }
         const Outputs& expected = configuration.mtp ? *mtp_reference : reference;
         const Outputs outputs   = generate(artifact, configuration);
         const bool short_ok     = outputs.short_run == expected.short_run;
