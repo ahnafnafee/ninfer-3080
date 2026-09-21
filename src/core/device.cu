@@ -44,6 +44,23 @@ void cuda_check(cudaError_t err, const char* expr, const char* file, int line) {
     std::abort();
 }
 
+DeviceBinding::DeviceBinding(int device) {
+    const cudaError_t get = cudaGetDevice(&previous_);
+    if (get != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaGetDevice failed", get));
+    }
+    if (previous_ == device) { return; }
+    const cudaError_t set = cudaSetDevice(device);
+    if (set != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaSetDevice failed", set));
+    }
+    changed_ = true;
+}
+
+DeviceBinding::~DeviceBinding() noexcept {
+    if (changed_) { log_cuda_error("cudaSetDevice", cudaSetDevice(previous_)); }
+}
+
 DeviceContext::DeviceContext(int device_id)
     : DeviceContext(std::span<const int>(&device_id, 1)) {}
 
@@ -55,8 +72,9 @@ DeviceContext::DeviceContext(std::span<const int> device_ids,
         throw std::runtime_error(cuda_error_message("cudaGetDeviceCount failed", err));
     }
     if (count <= 0) { throw std::runtime_error("no CUDA devices available"); }
-    if (device_ids.empty() || device_ids.size() > 2) {
-        throw std::invalid_argument("DeviceContext requires one or two CUDA devices");
+    if (device_ids.empty() || device_ids.size() > kMaxRanks) {
+        throw std::invalid_argument("DeviceContext requires between one and " +
+                                    std::to_string(kMaxRanks) + " CUDA devices");
     }
     device_ids_.assign(device_ids.begin(), device_ids.end());
     for (std::size_t i = 0; i < device_ids_.size(); ++i) {
@@ -66,17 +84,19 @@ DeviceContext::DeviceContext(std::span<const int> device_ids,
                                      std::to_string(count) +
                                      (count == 1 ? " device is visible" : " devices are visible"));
         }
-        // A repeated id is allowed on purpose. Two ranks on one card is not a useful deployment --
-        // it frees no memory -- but it exercises the entire split path (per-rank binding and
-        // materialization, per-rank workspaces, and the cross-rank copies) on a single-GPU
-        // machine. Every bug caught that way is one not caught by renting two cards.
+        // A repeated id is allowed on purpose. Several ranks on one card is not a useful
+        // deployment -- it frees no memory -- but it exercises the entire multi-rank path
+        // (per-rank binding and materialization, per-rank workspaces, and the cross-rank copies)
+        // on a single-GPU machine. Every bug caught that way is one not caught by renting a
+        // second card.
     }
 
     endpoints_.resize(device_ids_.size());
     try {
         for (std::size_t rank = 0; rank < device_ids_.size(); ++rank) {
-            Endpoint& endpoint = endpoints_[rank];
-            endpoint.device    = device_ids_[rank];
+            RankContext& endpoint = endpoints_[rank];
+            endpoint.index        = rank;
+            endpoint.device       = device_ids_[rank];
             err                = cudaSetDevice(endpoint.device);
             if (err != cudaSuccess) {
                 throw std::runtime_error(cuda_error_message("cudaSetDevice failed", err));
@@ -122,55 +142,59 @@ DeviceContext::DeviceContext(std::span<const int> device_ids,
             }
         }
 
-        // Two ranks on the same card need no peer setup: copies between them are ordinary
-        // device-to-device, and enabling peer access to self is an error.
-        if (endpoints_.size() == 2 && endpoints_[0].device == endpoints_[1].device) {
-            peer_access_ = true;
-        } else if (endpoints_.size() == 2) {
-            const Endpoint& first  = endpoints_[0];
-            const Endpoint& second = endpoints_[1];
-            if (first.props.major != second.props.major ||
-                first.props.minor != second.props.minor) {
+        // Every rank must share one compute capability, so kernels built for it run on all of them.
+        for (std::size_t rank = 1; rank < endpoints_.size(); ++rank) {
+            if (endpoints_[rank].props.major != endpoints_[0].props.major ||
+                endpoints_[rank].props.minor != endpoints_[0].props.minor) {
                 throw std::invalid_argument(
                     "model-parallel CUDA devices must have the same compute capability");
             }
-            // Peer access is a performance capability, not a requirement. NVIDIA disables P2P over
-            // PCIe on GeForce, so a pair of 3090s without an NVLink bridge reports can_access == 0
-            // -- but cudaMemcpyPeer still works there, staging through host memory. Refusing to
-            // start would rule out the most common consumer dual-GPU box for no reason, so record
-            // the capability and let callers choose a schedule that suits it.
-            //
-            // Measured on this fork's reference 3090 (PCIe 4.0 x16), a staged hop costs ~13us and
-            // is latency-bound: flat from 4KiB to 40KiB, which spans both models' per-token
-            // activation (35B-A3B hidden 2048 -> 4KiB, 27B hidden 5120 -> 10KiB). That is
-            // negligible for a schedule crossing once per token, and a few percent of a decode
-            // step for one crossing twice per layer.
-            peer_access_ = true;
-            for (std::size_t source = 0; source < 2; ++source) {
-                const std::size_t destination = 1 - source;
-                int can_access                = 0;
+        }
+
+        // peer_matrix_[from][to]: can `from` DMA into `to`. Ranks on one card need no peer setup:
+        // copies between them are ordinary device-to-device, and enabling peer access to self is an
+        // error, so they are recorded as reachable.
+        //
+        // Peer access is a performance capability, not a requirement. NVIDIA disables P2P over PCIe
+        // on GeForce, so a pair of 3090s without an NVLink bridge reports can_access == 0 -- but
+        // transfers still work there, staged through host memory. Refusing to start would rule out
+        // the most common consumer multi-GPU box for no reason, so record the capability and let
+        // callers choose a transport that suits it. (Neither a 2x 3090 nor a 2x A4000 PCIe box
+        // measured so far reported any.)
+        const std::size_t ranks = endpoints_.size();
+        peer_matrix_.assign(ranks * ranks, 0);
+        peer_access_ = true;
+        for (std::size_t source = 0; source < ranks; ++source) {
+            for (std::size_t destination = 0; destination < ranks; ++destination) {
+                char& reachable = peer_matrix_[source * ranks + destination];
+                if (endpoints_[source].device == endpoints_[destination].device) {
+                    reachable = 1;
+                    continue;
+                }
+                int can_access = 0;
                 err = cudaDeviceCanAccessPeer(&can_access, endpoints_[source].device,
                                               endpoints_[destination].device);
                 if (err != cudaSuccess) {
                     throw std::runtime_error(
                         cuda_error_message("cudaDeviceCanAccessPeer failed", err));
                 }
-                if (can_access == 0) {
-                    peer_access_ = false;
-                    continue;
+                if (can_access != 0) {
+                    err = cudaSetDevice(endpoints_[source].device);
+                    if (err != cudaSuccess) {
+                        throw std::runtime_error(cuda_error_message("cudaSetDevice failed", err));
+                    }
+                    err = cudaDeviceEnablePeerAccess(endpoints_[destination].device, 0);
+                    if (err == cudaErrorPeerAccessAlreadyEnabled) {
+                        (void)cudaGetLastError();
+                        reachable = 1;
+                    } else if (err != cudaSuccess) {
+                        // Capability without a usable mapping: fall back rather than fail outright.
+                        (void)cudaGetLastError();
+                    } else {
+                        reachable = 1;
+                    }
                 }
-                err = cudaSetDevice(endpoints_[source].device);
-                if (err != cudaSuccess) {
-                    throw std::runtime_error(cuda_error_message("cudaSetDevice failed", err));
-                }
-                err = cudaDeviceEnablePeerAccess(endpoints_[destination].device, 0);
-                if (err == cudaErrorPeerAccessAlreadyEnabled) {
-                    (void)cudaGetLastError();
-                } else if (err != cudaSuccess) {
-                    // Capability without a usable mapping: fall back rather than fail outright.
-                    (void)cudaGetLastError();
-                    peer_access_ = false;
-                }
+                if (reachable == 0) { peer_access_ = false; }
             }
         }
     } catch (...) {
@@ -212,7 +236,7 @@ void DeviceContext::release() noexcept {
         crossing_staging_       = nullptr;
         crossing_staging_bytes_ = 0;
     }
-    for (Endpoint& endpoint : endpoints_) {
+    for (RankContext& endpoint : endpoints_) {
         if (endpoint.stream != nullptr || endpoint.transfer_stream != nullptr ||
             endpoint.vision_stream != nullptr || endpoint.fence != nullptr) {
             log_cuda_error("cudaSetDevice", cudaSetDevice(endpoint.device));
@@ -226,6 +250,7 @@ void DeviceContext::release() noexcept {
     }
     endpoints_.clear();
     device_ids_.clear();
+    peer_matrix_.clear();
     device          = 0;
     stream          = nullptr;
     transfer_stream = nullptr;
@@ -238,7 +263,8 @@ DeviceContext::DeviceContext(DeviceContext&& other) noexcept
     : crossing_staging_(other.crossing_staging_),
       crossing_staging_bytes_(other.crossing_staging_bytes_),
       endpoints_(std::move(other.endpoints_)), device_ids_(std::move(other.device_ids_)),
-      active_rank_(other.active_rank_), peer_access_(other.peer_access_) {
+      peer_matrix_(std::move(other.peer_matrix_)), active_rank_(other.active_rank_),
+      peer_access_(other.peer_access_) {
     refresh_active_aliases();
     other.device                  = 0;
     other.stream                  = nullptr;
@@ -257,6 +283,7 @@ DeviceContext& DeviceContext::operator=(DeviceContext&& other) noexcept {
     release();
     endpoints_              = std::move(other.endpoints_);
     device_ids_             = std::move(other.device_ids_);
+    peer_matrix_            = std::move(other.peer_matrix_);
     active_rank_            = other.active_rank_;
     peer_access_            = other.peer_access_;
     crossing_staging_       = other.crossing_staging_;
@@ -283,7 +310,7 @@ void DeviceContext::refresh_active_aliases() noexcept {
         props           = {};
         return;
     }
-    const Endpoint& endpoint = endpoints_[active_rank_];
+    const RankContext& endpoint = endpoints_[active_rank_];
     device                   = endpoint.device;
     stream                   = endpoint.stream;
     transfer_stream          = endpoint.transfer_stream;
@@ -318,9 +345,25 @@ std::size_t DeviceContext::total_vram() const noexcept { return props.totalGloba
 
 std::size_t DeviceContext::size() const noexcept { return endpoints_.size(); }
 
-bool DeviceContext::model_parallel() const noexcept { return endpoints_.size() == 2; }
+bool DeviceContext::model_parallel() const noexcept { return endpoints_.size() > 1; }
+
+const RankContext& DeviceContext::rank(std::size_t index) const {
+    if (index >= endpoints_.size()) { throw std::out_of_range("CUDA device rank is out of range"); }
+    return endpoints_[index];
+}
+
+bool DeviceContext::same_physical_device(std::size_t a, std::size_t b) const {
+    return rank(a).device == rank(b).device;
+}
 
 bool DeviceContext::peer_access() const noexcept { return peer_access_; }
+
+bool DeviceContext::peer_access(std::size_t from, std::size_t to) const {
+    if (from >= endpoints_.size() || to >= endpoints_.size()) {
+        throw std::out_of_range("CUDA device rank is out of range");
+    }
+    return peer_matrix_[from * endpoints_.size() + to] != 0;
+}
 
 void* DeviceContext::crossing_staging() const noexcept { return crossing_staging_; }
 
@@ -336,7 +379,7 @@ bool DeviceContext::piece_consumed_visible(std::size_t rank, std::size_t piece,
     if (rank >= endpoints_.size() || piece >= kCrossingPipelineDepth) {
         throw std::out_of_range("cross-rank piece fence is out of range");
     }
-    const Endpoint& endpoint = endpoints_[rank];
+    const RankContext& endpoint = endpoints_[rank];
     return capture_id == 0 ? endpoint.piece_consumed_eager[piece]
                            : endpoint.piece_consumed_capture[piece] == capture_id;
 }
@@ -346,7 +389,7 @@ void DeviceContext::note_piece_consumed(std::size_t rank, std::size_t piece,
     if (rank >= endpoints_.size() || piece >= kCrossingPipelineDepth) {
         throw std::out_of_range("cross-rank piece fence is out of range");
     }
-    Endpoint& endpoint = endpoints_[rank];
+    RankContext& endpoint = endpoints_[rank];
     if (capture_id == 0) {
         endpoint.piece_consumed_eager[piece] = true;
     } else {
@@ -399,7 +442,7 @@ void DeviceContext::synchronize_rank(std::size_t rank) const {
 }
 
 void DeviceContext::synchronize() const {
-    for (const Endpoint& endpoint : endpoints_) {
+    for (const RankContext& endpoint : endpoints_) {
         CUDA_CHECK(cudaSetDevice(endpoint.device));
         CUDA_CHECK(cudaStreamSynchronize(endpoint.stream));
     }
