@@ -66,10 +66,16 @@ second GPU. Distinct ids are refused on Windows.
 
 ## What is not covered yet
 
-Refused with a clear message when the model spans more than one device: speculative decoding (MTP,
-DFlash), vision, and the context cache (`--no-prefix-reuse`). The context cache's transactions copy
-state on rank 0's streams; speculative decoding's replay records and draft state live on rank 0
-and are read by kernels that would run on later stages.
+- **Vision** and **DFlash/DFlash2** are refused when the model spans more than one device. DFlash reads
+  layer outputs from several depths (its feature taps) into rank 0 buffers, which from a later stage
+  are another device's memory; they need to cross the stage boundaries first.
+- **Prefill does not overlap stages.** A prefill chunk runs through the stages in turn and the
+  engine synchronizes after each chunk, so at any moment one stage is busy. Overlapping stages needs
+  micro-chunks inside a chunk (later stages start on micro-chunk 0 while stage 0 runs micro-chunk 1);
+  that changes the chunk shapes the kernels see, and its benefit can only be measured on real cards.
+- **MTP works** across stages: the replay records and their fold are per state shard, on the shard's
+  own device, and the draft layer and head stay on rank 0. **The context cache works**: its
+  transactions copy each rank's planes and state shards on that rank's streams.
 
 ## Verification
 
@@ -81,8 +87,42 @@ and are read by kernels that would run on later stages.
 - `ninfer_stage_plan_test`: the solver against a brute-force partition enumeration.
 - `ninfer_kv_capacity_test`: the per-device curve, including a device without KV and errors that
   name the device.
-- End to end, greedy output with `--devices 0,0` must equal `--device 0` byte for byte, since the
-  layers run the same kernels on the same data.
+- `ninfer_qwen3_5_stages_real_test` (set `NINFER_TEST_ARTIFACT`): greedy output with `--devices 0,0`
+  and `0,0,0` equals `--device 0` byte for byte, since the layers run the same kernels on the same
+  data. Rows: graphs and eager, forced pinned-host transport, an uneven split, MTP, and a
+  continuation that reuses the context cache. The 27B on the RTX 3090 passes every row.
+- `ninfer_qwen3_5_loading_real_test`: the default split covers the model, gives the head stage
+  fewer layers, and gives a device with twice the memory more.
 
 Ranks sharing a device cannot show a wrong-device pointer: a stale pointer into "another rank's"
 memory still works there. That class of bug needs a real second card.
+
+## Tensor parallelism: status
+
+Not built. What was established, so the next attempt starts from evidence rather than from the plan:
+
+- **Transport** (`tools/tp_probe.cu`, rented boxes, 2026-09-21): neither a 2x RTX 3090 box (one slot
+  PCIe 3.0 x4) nor a 2x RTX A4000 box had peer access or NVLink. An all-reduce of one decode column
+  (20 KB, FP32) costs 17-33 us whether done by a host-mapped kernel, a staged pinned-host copy or
+  NCCL; at 640 KB it is 190-440 us and at 20 MB 5-13 ms. The transports are within about 20% of each
+  other at every size, so a first TP should reuse `StageLink`-style staged copies (they already
+  capture into graphs) and a local reduce, not write spin-wait kernels.
+- **Where it pays.** Projected against this pipeline on two A4000s: 1.6-1.7x at one decode column,
+  about 1.5x at four, roughly break-even at sixteen, a loss at thirty-two (MTP3 with eight lanes).
+  TP prefill is bound by the link (~840 ms of all-reduce per 1,024-token chunk), so prefill speed
+  belongs to the micro-chunk overlap above, not TP. Link width is per machine and decides
+  everything; run the probe on the target box first.
+- **Smallest useful first step: MLP-only TP on the dense 27B** (about 64% of the weight bytes;
+  projected ~1.35x decode). Each rank keeps attention and GDN whole and replicated (weights and KV),
+  and takes half the MLP: `gate_up` split by rows (gate rows then up rows, so the SwiGLU pairing
+  holds) and `down` split along K. A rank's down projection can reuse `linear_add`: rank 0 adds its
+  partial into the real residual, the other rank into zeros, and one BF16 exchange plus an add gives
+  every rank the same new residual (one extra rounding against the single-device path, so the oracle
+  is a tolerance on logits and perplexity, not byte equality).
+- **What it needs before any speed can be claimed:** loader-time slicing of row-split quantized
+  parents (contiguous row ranges for `gate_up`, per-plane column ranges for `down`, group-aligned);
+  the `linear_swiglu` Q4 kernel at 17,408 rows and `linear_add` Q5 at K=8,704, each registered for
+  those exact shapes and qualified against the FP64 oracle and tuned on the target card (routes
+  inherited from the full-width shapes are hypotheses); per-rank replicas of the KV pool and state
+  pool with fan-out in the transactions; and the exchange itself. Expect weeks, and the decisive
+  measurement is the probe on the machine that will run it.

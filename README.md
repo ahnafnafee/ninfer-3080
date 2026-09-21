@@ -566,7 +566,7 @@ and the scratch it runs in. The point is memory. A model that does not fit one c
 that does not, spreads across several, and every card's memory is usable for KV.
 
 ```
-ninfer-serve model.ninfer --devices 0,1 --no-prefix-reuse
+ninfer-serve model.ninfer --devices 0,1
 ninfer model.ninfer --devices 0,1,2 --stage-layers 20,22,22 --prompt "..."
 ```
 
@@ -580,8 +580,8 @@ ninfer model.ninfer --devices 0,1,2 --stage-layers 20,22,22 --prompt "..."
 - **Linux only for real multi-GPU.** Repeating one id (`--devices 0,0`) puts several stages on one
   card, saves no memory, and exercises the whole stage path; it is how the path is tested without a
   second GPU, and it works on Windows too.
-- **Not yet supported with a split:** speculative decoding (MTP, DFlash) and vision. They are
-  refused at startup with a message saying so.
+- **Works with a split:** the context cache and prefix reuse, CUDA graphs, and MTP. **Not yet:**
+  DFlash/DFlash2 and vision, which are refused at startup with a message saying so.
 - **Boundary transfers stage through pinned host memory.** Peer access is not needed, and no
   consumer PCIe pair measured so far offers it. Measured with `tools/tp_probe.cu` on rented 2x A4000
   and 2x 3090 PCIe boxes, a staged transfer took about 0.03 ms at a decode-sized payload and several
