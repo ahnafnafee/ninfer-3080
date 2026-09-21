@@ -172,12 +172,21 @@ ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
 
 ModelInstance::~ModelInstance() = default;
 
-ConstructedModel construct_model(const EngineOptions& options, DeviceContext& device) {
-    validate_options(options);
+ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& device) {
+    validate_options(requested);
     const auto start = Clock::now();
+    // Every later stage of startup checks its options against the ones the model was loaded with, so
+    // the stage split is decided once, here, and carried in the options from then on.
+    EngineOptions options = requested;
     StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
     artifact::Reader reader(options.artifact_path);
     inspect.complete();
+    if (options.devices.size() > 1 && options.stage_layers.empty()) {
+        const std::vector<std::size_t> free_now = free_bytes_by_rank(device);
+        const std::vector<std::uint64_t> free_bytes(free_now.begin(), free_now.end());
+        options.stage_layers =
+            models::qwen3_5::default_stage_layers(reader, models::load_options(options), free_bytes);
+    }
     StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
     auto plan = models::qwen3_5::plan_load(reader, models::load_options(options));
     binding.complete();

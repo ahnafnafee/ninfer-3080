@@ -570,7 +570,9 @@ ninfer-serve model.ninfer --devices 0,1 --no-prefix-reuse
 ninfer model.ninfer --devices 0,1,2 --stage-layers 20,22,22 --prompt "..."
 ```
 
-- **`--stage-layers A,B,...`** sets the layers per stage. Without it the layers are split evenly.
+- **`--stage-layers A,B,...`** sets the layers per stage. Without it the split follows each
+  device's free memory, so the first GPU, which also carries the embedding and head, takes fewer
+  layers and the most KV cache fits on every card at once.
 - **The first GPU also holds the embedding, the output head and the round state.** The last stage
   sends the residual back to it, one extra hop per forward pass.
 - **It is a memory feature, not a speed feature.** The stages run in sequence and each reads only

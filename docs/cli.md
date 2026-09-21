@@ -234,7 +234,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
 | `--devices A,B,...` | one pipeline stage per listed CUDA device (2 to 8, Linux; see the [README](../README.md#several-gpus-pipeline-stages---devices-ab)); overrides `--device` | none |
-| `--stage-layers A,B,...` | layers per stage, in `--devices` order; omitted means an even split | even |
+| `--stage-layers A,B,...` | layers per stage, in `--devices` order; omitted means a split chosen from each device's free memory | memory-balanced |
 | `--kv-dtype bf16\|int8\|fp8\|rk8v4\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant; all six are accepted on this fork's sm_86/sm_89 targets | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |

@@ -40,6 +40,13 @@ private:
 };
 
 [[nodiscard]] LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options = {});
+// How many layers each of `free_bytes.size()` pipeline stages should own so that the most KV cache
+// fits on every device at once, given the bytes free on each. Sized from the artifact's stored
+// layers; the head stage (rank 0) also carries the embedding, head and round buffers. The default
+// when `--stage-layers` is not given.
+[[nodiscard]] std::vector<std::uint32_t> default_stage_layers(const artifact::Reader& reader,
+                                                              LoadOptions options,
+                                                              std::span<const std::uint64_t> free_bytes);
 [[nodiscard]] std::unique_ptr<Model> materialize_model(LoadPlan&& plan, DeviceContext& device,
                                                        const StartupObserver* observer = nullptr);
 [[nodiscard]] std::unique_ptr<Model> load_model(const std::filesystem::path& path,

@@ -68,6 +68,8 @@ private:
 // The stage plan `options.ranks` devices ask for over `layers` layers: `options.stage_layers` when
 // given, equal counts otherwise. Throws when the model cannot be served by that many devices.
 [[nodiscard]] StagePlan plan_stage_plan(std::uint32_t layers, const LoadOptions& options);
+// Every parameter a whole layer owns: what moves with it when the layer is placed on a stage.
+[[nodiscard]] std::vector<WeightId> layer_weights(const BlockWeights& block);
 // Pinned residency keeps the tower in the page-locked Host block, one contiguous group per stage
 // (patch/position embedding, each layer, merger) in binding order.
 [[nodiscard]] VisionWeights bind_vision(Bindings& bindings, const VisionConfig& config,

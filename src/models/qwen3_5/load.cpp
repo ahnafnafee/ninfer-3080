@@ -2,8 +2,10 @@
 
 #include "artifact/reader.h"
 #include "core/evictable_weight_pool.h"
+#include "core/stage_plan.h"
 #include "models/qwen3_5/load/bindings.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -123,6 +125,91 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
     out->info.provenance_json = reader.directory().provenance.dump();
     out->info.artifact_id     = reader.artifact_id();
     return LoadPlan(std::move(out));
+}
+
+namespace {
+
+// What one stage's device needs whatever layers it owns, beyond weights: the CUDA context, the
+// workspace and graph memory of a forward pass over a full chunk. An estimate, since the Program
+// plans these later; it only decides how the layers are dealt out, and `--stage-layers` overrides it.
+constexpr std::uint64_t kStageFixedBytes = 1536ULL << 20;
+// What rank 0 needs on top: the round buffers, logits and sampling state that stay with the head.
+constexpr std::uint64_t kHeadStageFixedBytes = 1024ULL << 20;
+
+std::uint64_t parameter_bytes(const artifact::Reader& reader, const loading::Bindings& bindings,
+                              WeightId id) {
+    std::uint64_t total = 0;
+    for (const auto& part : bindings.at(id).reference.binding.parts) {
+        total += reader.geometry(part.object).bytes;
+    }
+    return total;
+}
+
+} // namespace
+
+std::vector<std::uint32_t> default_stage_layers(const artifact::Reader& reader,
+                                                LoadOptions options,
+                                                std::span<const std::uint64_t> free_bytes) {
+    if (free_bytes.size() < 2) {
+        throw std::invalid_argument("default stage layers need at least two devices");
+    }
+    // Bind the text model on one stage purely to size its layers.
+    options.ranks = 1;
+    options.stage_layers.clear();
+    const Config config = parse_config(reader.directory(), options);
+    const auto& text    = config.text;
+    artifact::Binder binder(reader);
+    loading::Bindings bindings(binder);
+    const TextWeights weights =
+        loading::bind_text(bindings, text, options, StagePlan(text.num_hidden_layers));
+
+    std::vector<LayerCost> layers;
+    layers.reserve(weights.layers.size());
+    std::uint64_t layer_bytes_total = 0;
+    for (std::size_t layer = 0; layer < weights.layers.size(); ++layer) {
+        LayerCost cost;
+        for (const WeightId id : loading::layer_weights(weights.layers[layer])) {
+            cost.weight_bytes += parameter_bytes(reader, bindings, id);
+        }
+        if (text.layer_types[layer] == MixerKind::FullAttention && text.attention) {
+            // K and V for one token, at two bytes an element: the unit that KV capacity is counted
+            // in. Stored narrower the ratio between layers is the same.
+            cost.kv_bytes_per_page_group = 2 * text.attention->key_width() * 2;
+        }
+        layer_bytes_total += cost.weight_bytes;
+        layers.push_back(cost);
+    }
+
+    // The head stage keeps the embedding, the head and the final norm; MTP's layer sits with them.
+    std::uint64_t head_bytes = parameter_bytes(reader, bindings, weights.token_embedding) +
+                               parameter_bytes(reader, bindings, weights.output_head) +
+                               parameter_bytes(reader, bindings, weights.final_norm);
+    if (config.mtp && options.speculative == SpeculativeBackend::Mtp) {
+        head_bytes += layer_bytes_total / std::max<std::size_t>(layers.size(), 1);
+    }
+
+    std::vector<StageBudget> budgets;
+    budgets.reserve(free_bytes.size());
+    for (std::size_t stage = 0; stage < free_bytes.size(); ++stage) {
+        budgets.push_back({.available_bytes = free_bytes[stage],
+                           .fixed_bytes     = kStageFixedBytes +
+                                          (stage == 0 ? kHeadStageFixedBytes + head_bytes : 0)});
+    }
+    // The estimates above are rough. When they say nothing fits, deal the layers out evenly and let
+    // the Program's exact planning accept the split or report which device runs out.
+    const StagePlan plan = [&] {
+        try {
+            return solve_stage_plan(layers, budgets).plan;
+        } catch (const std::runtime_error&) {
+            return StagePlan::even(text.num_hidden_layers, free_bytes.size());
+        }
+    }();
+    std::vector<std::uint32_t> counts;
+    counts.reserve(plan.stages());
+    for (std::size_t stage = 0; stage < plan.stages(); ++stage) {
+        counts.push_back(plan.stage_layers(stage));
+    }
+    return counts;
 }
 
 std::unique_ptr<Model> materialize_model(LoadPlan&& plan, DeviceContext& device,

@@ -83,39 +83,36 @@ MoeWeights bind_moe(Bindings& b, const TextConfig& config, const std::string& pr
 // live on the stage's device, next to the KV cache and recurrent state that layer reads and writes.
 // That is what lets the stage run its layers with the same kernels as a single GPU.
 void place_layer(Bindings& b, const BlockWeights& block, std::size_t rank) {
-    b.place(block.input_norm, rank);
-    b.place(block.post_attention_norm, rank);
-    if (const auto* attention = std::get_if<AttentionWeights>(&block.mixer)) {
-        for (const WeightId id : {attention->query, attention->key, attention->gate,
-                                  attention->value, attention->query_norm, attention->key_norm,
-                                  attention->output}) {
-            b.place(id, rank);
-        }
-    } else {
-        const auto& gdn = std::get<GdnWeights>(block.mixer);
-        for (const WeightId id : {gdn.query, gdn.key, gdn.value, gdn.z, gdn.a_projection,
-                                  gdn.b_projection, gdn.a_log, gdn.dt_bias, gdn.convolution,
-                                  gdn.norm, gdn.output}) {
-            b.place(id, rank);
-        }
-    }
-    const auto place_dense = [&](const DenseWeights& dense) {
-        b.place(dense.gate, rank);
-        b.place(dense.up, rank);
-        b.place(dense.down, rank);
-    };
-    if (const auto* dense = std::get_if<DenseWeights>(&block.ffn)) {
-        place_dense(*dense);
-        return;
-    }
-    const auto& moe = std::get<MoeWeights>(block.ffn);
-    b.place(moe.router, rank);
-    b.place(moe.shared_score, rank);
-    for (const auto& expert : moe.experts) { place_dense(expert); }
-    place_dense(moe.shared);
+    for (const WeightId id : layer_weights(block)) { b.place(id, rank); }
 }
 
 } // namespace
+
+std::vector<WeightId> layer_weights(const BlockWeights& block) {
+    std::vector<WeightId> out{block.input_norm, block.post_attention_norm};
+    if (const auto* attention = std::get_if<AttentionWeights>(&block.mixer)) {
+        out.insert(out.end(), {attention->query, attention->key, attention->gate, attention->value,
+                               attention->query_norm, attention->key_norm, attention->output});
+    } else {
+        const auto& gdn = std::get<GdnWeights>(block.mixer);
+        out.insert(out.end(), {gdn.query, gdn.key, gdn.value, gdn.z, gdn.a_projection,
+                               gdn.b_projection, gdn.a_log, gdn.dt_bias, gdn.convolution, gdn.norm,
+                               gdn.output});
+    }
+    const auto add_dense = [&](const DenseWeights& dense) {
+        out.insert(out.end(), {dense.gate, dense.up, dense.down});
+    };
+    if (const auto* dense = std::get_if<DenseWeights>(&block.ffn)) {
+        add_dense(*dense);
+        return out;
+    }
+    const auto& moe = std::get<MoeWeights>(block.ffn);
+    out.push_back(moe.router);
+    out.push_back(moe.shared_score);
+    for (const auto& expert : moe.experts) { add_dense(expert); }
+    add_dense(moe.shared);
+    return out;
+}
 
 BlockWeights bind_block(Bindings& b, const TextConfig& config, const std::string& p,
                         MixerKind mixer) {
