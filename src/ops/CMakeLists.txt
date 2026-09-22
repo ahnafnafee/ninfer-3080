@@ -12,7 +12,7 @@ target_link_libraries(ninfer_ops PRIVATE CUDA::cublas)
 # self-contained kernels therefore use a non-RDC archive and host launchers.
 # The SM120 tensor-core qualifiers do not exist on sm_86/sm_89, so this fork does not create
 # the archive there; family manifests add to it only when the target exists.
-if(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a" AND NOT NINFER_COMPAT_PATH)
   add_library(ninfer_nvfp4_non_rdc STATIC)
   ninfer_internal_includes(ninfer_nvfp4_non_rdc)
   ninfer_cuda_non_rdc_archive(ninfer_nvfp4_non_rdc)
@@ -38,7 +38,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/rmsnorm_rope/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/softmax_attention/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/sparse_moe/sources.cmake")
 
-if(CMAKE_CUDA_ARCHITECTURES MATCHES "^(80|86|89)$")
+if(NINFER_COMPAT_PATH)
   get_target_property(ninfer_ops_sources ninfer_ops SOURCES)
   # NVFP4 W4A4 uses mma.sync...kind::mxf4nvf4.block_scale; FP8 A8 uses
   # mma.sync...kind::f8f6f4. Both qualifiers are Blackwell-only, and sm_80/86/89 have no FP8 or FP4
