@@ -269,10 +269,15 @@ int test_tools() {
                       "a forced choice with reasoning enabled is rejected");
     body.erase("enable_thinking");
     const GenerationRequest default_reasoning = parse(body).generation;
-    failures += check(!semantics(default_reasoning).enable_thinking &&
-                          !prompt(default_reasoning).options.enable_thinking &&
+    failures += check(semantics(default_reasoning).enable_thinking == false &&
+                          prompt(default_reasoning).options.enable_thinking == false &&
                           prompt(default_reasoning).options.forced_tool_name == "weather",
-                      "a forced choice turns off reasoning that only the server default enabled");
+                      "a forced choice turns off reasoning that only a default enabled");
+    ServeOptions thinking_server;
+    thinking_server.enable_thinking = true;
+    failures +=
+        check(resolve_prompt_semantics(default_reasoning, thinking_server).enable_thinking == false,
+              "a forced choice turns off reasoning that the server default enables");
     body["reasoning_effort"] = "high";
     failures += check(api_error([&] { (void)prompt(parse(body).generation); }).code ==
                           "tool_choice_not_supported",

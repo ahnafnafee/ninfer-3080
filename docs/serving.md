@@ -534,9 +534,10 @@ contains earlier calls.
 A forced selection names one function: `tool_choice` naming it directly, `required`, or
 `allowed_tools` with mode `required` over a single callable tool. NInfer executes it by ending the
 generation prompt with that call's opener, so the answer can only continue inside the call. It
-therefore requires a fresh answer position and is rejected when reasoning is enabled for the
-request; `required` over several callable tools is rejected too, because the function itself would
-still be sampled. The forced call is present and first in the output; a model that keeps writing may
+therefore requires a fresh answer position and a prompt without a thinking block: reasoning that
+the request itself enables is rejected with `tool_choice_not_supported`, while reasoning that only a
+default turns on, the server's or the chat template's, is switched off for that request. `required`
+over several callable tools is rejected too, because the function itself would still be sampled. The forced call is present and first in the output; a model that keeps writing may
 add further calls, exactly as under `auto` with parallel calls enabled.
 
 NInfer does not execute functions or enforce JSON Schema through constrained decoding, so

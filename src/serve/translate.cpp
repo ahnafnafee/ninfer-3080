@@ -185,12 +185,12 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
             break;
         }
     }
-    if (!request.tool_choice.forced_name.empty() && result.enable_thinking == true) {
+    if (!request.tool_choice.forced_name.empty() && result.enable_thinking != false) {
         // The call opener is written into the generation prompt, and a thinking prompt ends
-        // inside the reasoning block, where the opener has no place. Reasoning that only the
-        // server default turned on yields to the forced call, so clients that never mention
-        // reasoning can force a function; reasoning the request itself asks for is refused
-        // rather than silently dropped.
+        // inside the reasoning block, where the opener has no place. Reasoning that only a
+        // default turned on (the server's, or the chat template's when nothing is set) yields to
+        // the forced call, so clients that never mention reasoning can force a function;
+        // reasoning the request itself asks for is refused rather than silently dropped.
         const bool reasoning_requested =
             thinking.value_or(false) || (effort && *effort != RequestedReasoningEffort::None);
         if (reasoning_requested) {
