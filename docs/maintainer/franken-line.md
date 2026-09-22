@@ -17,6 +17,16 @@ is the map.
 | engine | a Paged KV exhaustion names its page numbers; three consecutive exhaustions without a successful admission mark the Engine unavailable for the healthcheck | `core/paged_kv_cache.cpp`, `engine_core.h` |
 | serve | a named or single-tool forced `tool_choice` is executed by opening the call in the generation prompt (v0.11 rejects it with `tool_choice_not_supported`) | `models/qwen3_5/frontend/chat_template.cpp` (opener after the generation prompt), `tool_call_parser.{h,cpp}` (seeded decoder), `serve/translate.cpp` (reasoning rule), the three request parsers, `serve/request_log.*` (schema v22) |
 
+The line also carries ternary checkpoints, ported from the earlier v0.10-based ternary work:
+
+| area | behaviour | where it lives in the v0.11 tree |
+|---|---|---|
+| format | `t2_g128_fp16`: ternary codes as 2-bit two's complement with one binary16 scale per 128 columns, row-split only | `core/weight.h`, `core/weight_view.cpp`, `artifact/formats.cpp`, `tools/artifact/` |
+| ops | T2 linear routes (small-T tensor-core kernel, narrow MMA tiles for prefill), composed T2 attention/GDN input projections, `linear_add`/`linear_swiglu`, the T2 full head in `linear_topk` | `ops/linear/t2/`, `ops/wrapper/`, `ops/linear_topk/t2.cu` |
+| ops | `hadamard_transform` and `silu_mul_hadamard` | `ops/kernel/hadamard_transform.cuh`, `ops/wrapper/hadamard_transform.cpp` |
+| model | Hadamard-rotated Uses (`hadamard_signs` auxiliary): the execution layer rotates the inputs of rotated projections and heads; the residual stream stays primal | `models/qwen3_5/execution/rotation.h`, `load/prepare.cpp`, `model.cpp`, the attention/GDN/FFN/head sites |
+| convert | `bonsai2_27b_ternary` builds a Qwen3.8-27B artifact whose text tower comes from PrismML's PQ2_0 GGUF | `tools/convert/ternary.py`, `tools/convert/sources/gguf.py` |
+
 Deliberately not carried: the LRU catalog policy (`--context-cache-policy`), the host-state byte
 budget, the context-trace diagnostics and the prefix-cache scenario battery of the previous line.
 Measured in production, the branching policy did not help and sometimes hurt; the fixes above are
@@ -28,6 +38,9 @@ what actually keeps prefills from being triggered.
   CUDA: Homebrew clang, `-include exception`, the Xcode SDK sysroot).
 - `ninfer_tool_call_parser_test`, `ninfer_qwen3_5_frontend_test` (fixture tokenizer), the OpenAI,
   Responses and Anthropic schema tests cover the forced tool call.
+- `ninfer_hadamard_transform_test`, `ninfer_linear_t2_a16_test` and the T2 case of
+  `ninfer_linear_topk_test` check the ternary ops against FP64 oracles; `tests/convert/test_ternary.py`
+  covers the GGUF mapping.
 - The full build and `ctest` on an RTX 3090 (sm_86) before the branch is published.
 
 ## Deployment
