@@ -16,6 +16,9 @@ enum class QType : std::uint16_t {
     INT32               = 6,
     NVFP4               = 7,
     FP8_E4M3FN_ROW_BF16 = 8,
+    // Ternary codes {-1, 0, +1} as two-bit two's complement (0b10 unused), four per byte in
+    // column order, one binary16 multiplier per 128 columns. Row-split only.
+    T2_G128_FP16 = 9,
 };
 
 enum class QuantLayout : std::uint16_t {
