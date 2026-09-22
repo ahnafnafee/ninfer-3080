@@ -113,14 +113,17 @@ python3 -m tools.convert \
   --source dflash2=/path/to/Ternary-Bonsai-2-27B-DFlash2 \
   --components text,vision,mtp,dflash2 \
   --resource chat_template.jinja=tools/chat_templates/qwen3_8.jinja \
+  --proposal \
   --name bonsai2-27b \
   --out models/bonsai2_27b.ninfer
 ```
 
 Without `--source mtp` the MTP head comes from the checkpoint, and `--source
-dflash2=/path/to/Qwen3.8-27B-DFlash2` selects z-lab's adapter. A `--proposal` head gathered from
-the rotated output head inherits its rotation; it helps the vanilla MTP head through
-`--lm-head-draft`, but lowers the Bonsai-trained head's acceptance.
+dflash2=/path/to/Qwen3.8-27B-DFlash2` selects z-lab's adapter. `--proposal` takes the proposal
+head's rows from the ternary output head itself: PrismML's T2 rows of the 131,072 most frequent
+tokens, in their own encoding and with the head's rotation, so a draft through `--lm-head-draft`
+scores those tokens exactly as the full head does. It adds 170 MiB to the file and is loaded only
+with `--lm-head-draft`.
 
 A named source whose path ends in `.gguf` opens as a GGUF file; the recipe validates its header,
 tensor set and Hadamard metadata before reading anything.
