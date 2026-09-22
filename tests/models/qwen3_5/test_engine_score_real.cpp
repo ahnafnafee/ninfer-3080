@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+namespace {
+
 int run() {
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (artifact == nullptr || *artifact == '\0') {
@@ -69,5 +71,7 @@ int run() {
     std::cout << "OK causal_score_real\n";
     return 0;
 }
+
+} // namespace
 
 NINFER_GUARDED_TEST_MAIN(run)

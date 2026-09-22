@@ -85,7 +85,8 @@ ninfer_add_test(ninfer_host_timing_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_host_timing.cpp"
   LIBRARIES ninfer_core)
 
-ninfer_add_test(ninfer_jinja_test
+# Standalone: the chat-template test runs it as an executable path.
+ninfer_add_test(ninfer_jinja_test STANDALONE
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../text/test_jinja.cpp"
   LIBRARIES ninfer_jinja ninfer::json)
 

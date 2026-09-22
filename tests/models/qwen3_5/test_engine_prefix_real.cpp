@@ -2122,6 +2122,8 @@ int exercise_artifact(const char* artifact) {
     return 0;
 }
 
+namespace {
+
 int run() {
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (!artifact || !*artifact) {
@@ -2173,5 +2175,7 @@ int run() {
     if (result == 0) { std::cout << "ok\n"; }
     return result;
 }
+
+} // namespace
 
 NINFER_GUARDED_TEST_MAIN(run)

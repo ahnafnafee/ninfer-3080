@@ -47,17 +47,17 @@ ninfer_add_op_test(ninfer_softmax_attention_test
   LIBRARIES ninfer_ops)
 
 add_test(NAME ninfer_softmax_attention_nvfp4_test
-  COMMAND ninfer_softmax_attention_test --nvfp4-only)
+  COMMAND ninfer_tests ninfer_softmax_attention_test --nvfp4-only)
 
 add_test(NAME ninfer_softmax_attention_k8v4_test
-  COMMAND ninfer_softmax_attention_test --k8v4-only)
+  COMMAND ninfer_tests ninfer_softmax_attention_test --k8v4-only)
 
 # Upstream's DFlash2 verification sweep. ~460 s: six storage families (five upstream, plus this
 # fork's rk8v4) over every narrow width, batch and base offset, so it gets a timeout well clear of
 # the default 1500 s only if the machine is slow -- left at the default here because it finishes in
 # under a third of it.
 add_test(NAME ninfer_softmax_attention_dflash2_test
-  COMMAND ninfer_softmax_attention_test --dflash2-only)
+  COMMAND ninfer_tests ninfer_softmax_attention_test --dflash2-only)
 
 set_tests_properties(
   ninfer_softmax_attention_nvfp4_test
@@ -86,10 +86,10 @@ ninfer_add_op_test(ninfer_context_kv_materialize_test
   LIBRARIES ninfer_ops)
 
 add_test(NAME ninfer_kv_cache_append_nvfp4_test
-  COMMAND ninfer_kv_cache_append_test --nvfp4-only)
+  COMMAND ninfer_tests ninfer_kv_cache_append_test --nvfp4-only)
 
 add_test(NAME ninfer_kv_cache_append_k8v4_test
-  COMMAND ninfer_kv_cache_append_test --k8v4-only)
+  COMMAND ninfer_tests ninfer_kv_cache_append_test --k8v4-only)
 
 set_tests_properties(
   ninfer_kv_cache_append_nvfp4_test

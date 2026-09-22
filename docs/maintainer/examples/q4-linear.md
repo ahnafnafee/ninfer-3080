@@ -102,14 +102,14 @@ T=1 的带宽效率和 T=512 的 TC 效率仍留有研究空间；当前数据�
 ## 复现
 
 ```bash
-cmake --build build -j --target ninfer_linear_bench ninfer_linear_q4_a16_test
-./build/tests/ninfer_linear_q4_a16_test
+cmake --build build -j --target ninfer_benches ninfer_tests
+./build/tests/ninfer_tests ninfer_linear_q4_a16_test
 
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype q4 --policy a16 --n 6144 --k 5120 \
   --sweep 1:128 --execution graph --warmup 5 --repeat 50 --flush-mib 256 \
   --csv-out profiles/bench/q4_n6144_k5120/final_graph.csv
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype q4 --policy a16 --n 6144 --k 5120 \
   --sweep 512:1024:512 --execution graph --warmup 5 --repeat 50 --flush-mib 256 \
   --csv-out profiles/bench/q4_n6144_k5120/final_bulk.csv

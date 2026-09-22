@@ -29,8 +29,8 @@ function pointer 反查回 candidate 名字输出为 `routed_to`。它有意包�
 另一个上。
 
 ```bash
-./build/bench/ninfer_linear_schedule_bench q4:131072x5120 --repeat 11 --spread
-./build/bench/ninfer_linear_schedule_bench q8:2048x16384 --tokens 24,32,40,48 --only k32,mma
+./build/bench/ninfer_benches ninfer_linear_schedule_bench q4:131072x5120 --repeat 11 --spread
+./build/bench/ninfer_benches ninfer_linear_schedule_bench q8:2048x16384 --tokens 24,32,40,48 --only k32,mma
 ```
 
 2026-09-17 用它在 sm_86 上重扫了 catch-up 带进来的 Q4/Q5/Q8 全部十八个 shape table，
@@ -62,7 +62,7 @@ Q4/Q5/Q6/Q8 和 BF16 使用现有 A16 route。以下 NVFP4 exact problem 同时�
 显式指定 weight type、`N`、`K` 和 `T`，测量一个 production Linear point：
 
 ```bash
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype q4 --policy a16 \
   --n 4096 --k 5120 --t 8
 ```
@@ -73,7 +73,7 @@ Q4/Q5/Q6/Q8 和 BF16 使用现有 A16 route。以下 NVFP4 exact problem 同时�
 一个 BF16 decode exact point 的命令是：
 
 ```bash
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype bf16 --policy a16 \
   --n 14336 --k 5120 --t 1
 ```
@@ -81,7 +81,7 @@ Q4/Q5/Q6/Q8 和 BF16 使用现有 A16 route。以下 NVFP4 exact problem 同时�
 NVFP4 的永久 A16 decode point 是：
 
 ```bash
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype nvfp4 --policy a16 \
   --n 14336 --k 5120 --t 1
 ```
@@ -89,7 +89,7 @@ NVFP4 的永久 A16 decode point 是：
 其主要 W4A4 MMA point 是：
 
 ```bash
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype nvfp4 --policy a4 \
   --n 14336 --k 5120 --t 1024
 ```
@@ -97,19 +97,19 @@ NVFP4 的永久 A16 decode point 是：
 其余四个永久 NVFP4 problem 使用同一数字入口，例如：
 
 ```bash
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype nvfp4 --policy a4 \
   --n 16384 --k 5120 --t 1024
 
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype nvfp4 --policy a4 \
   --n 34816 --k 5120 --t 1024
 
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype nvfp4 --policy a4 \
   --n 5120 --k 6144 --t 1024
 
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype nvfp4 --policy a4 \
   --n 5120 --k 17408 --t 1024
 ```
@@ -121,7 +121,7 @@ GEMM 的全部 launch 与流量都在一次 timed `linear()` 内。预量化后�
 FP8 使用相同入口，例如：
 
 ```bash
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype fp8 --policy a8 \
   --n 14336 --k 5120 --t 1024
 ```
@@ -135,7 +135,7 @@ profile mode 必须只接受一个 exact point：
 
 ```bash
 ncu --profile-from-start off ... \
-  ./build/bench/ninfer_linear_bench \
+  ./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype q4 --policy a16 \
   --n 4096 --k 5120 --t 8 --profile
 ```
@@ -165,7 +165,7 @@ cudaProfilerStop()
 固定 `(qtype,N,K,policy)`，连续扫描一个 T 区间：
 
 ```bash
-./build/bench/ninfer_linear_bench \
+./build/bench/ninfer_benches ninfer_linear_bench \
   --qtype q4 --policy a16 \
   --n 4096 --k 5120 \
   --sweep 1:32:1 \
@@ -189,9 +189,9 @@ crossover 或 candidate-legality 表。
 suite 调用顺序运行全部 point：
 
 ```bash
-./build/bench/ninfer_linear_bench --suite qwen3_6_27b
-./build/bench/ninfer_linear_bench --suite qwen3_6_35b_a3b
-./build/bench/ninfer_linear_bench --suite all
+./build/bench/ninfer_benches ninfer_linear_bench --suite qwen3_6_27b
+./build/bench/ninfer_benches ninfer_linear_bench --suite qwen3_6_35b_a3b
+./build/bench/ninfer_benches ninfer_linear_bench --suite all
 ```
 
 无参数运行仍打印 usage，不隐式启动重型 suite。suite 是显式 convenience，不是

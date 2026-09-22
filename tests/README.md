@@ -24,6 +24,15 @@ Tests are grouped by observable risk, not by mirroring every source file or clas
 `CMakeLists.txt` includes explicit registrations from `cmake/`, `artifact/`, `models/qwen3_5/`
 and `ops/`. Registration helpers live in `cmake/NinferTests.cmake`; included manifests keep
 executables and CTest working directories under `build/tests/`.
+
+Tests link into one executable, `ninfer_tests`, rather than one each: every test that links the
+Op library would otherwise carry its own copy of the whole kernel image (~450 MB on sm_86), which
+added up to tens of GB. Each test keeps its name as a program in the bundle and still runs in its
+own process under CTest. Run one by hand with `build/tests/ninfer_tests <name> [args...]`;
+`ninfer_tests --list` prints the names. `ninfer_jinja_test` and
+`ninfer_artifact_materialization_test` stay standalone because Python tests invoke them by path.
+A test's helpers and entry function must be internal (anonymous namespace) so that programs do not
+collide at link time. The mechanism is `cmake/NinferBundles.cmake`.
 `ops/op_tester.h` and `ops/op_check.h` own only reusable device/guard and comparison mechanics.
 Concrete numerical criteria remain named by the semantic Op suite; there are no cross-Op tolerance
 presets.
@@ -54,7 +63,7 @@ The chat-template reference test uses Python Jinja2.
 Run a focused target for a localized change:
 
 ```bash
-cmake --build build --parallel --target ninfer_sampling_test
+cmake --build build --parallel --target ninfer_tests
 ctest --test-dir build -R ninfer_sampling_test --output-on-failure
 ```
 
@@ -76,7 +85,7 @@ Invoke it unqualified so `PATH` resolves it:
 
 ```bash
 compute-sanitizer --tool initcheck --error-exitcode 9 \
-  build/tests/ninfer_softmax_attention_test
+  build/tests/ninfer_tests ninfer_softmax_attention_test
 ```
 
 **Do not call the copy under `CUDA/v12.4/compute-sanitizer/` by absolute path.** Two copies are
@@ -99,16 +108,14 @@ permission per-run, with nothing persistent and no reboot.
 `scripts/sweeps/admin-profile.ps1` does this for the profiles the maintainer notes reference.
 
 The variable-width DFlash2 target-attention subset can be run with
-`./build/tests/ninfer_softmax_attention_test --dflash2-only`. It covers D256/Q24/KV4 across all five
+`./build/tests/ninfer_tests ninfer_softmax_attention_test --dflash2-only`. It covers D256/Q24/KV4 across all five
 cache codecs, W=2..16, B=1..8, request-local prefixes, cache effects, and Graph metadata/input
 updates. The default executable also runs the existing attention geometries and prefill tests.
 
 Linear tests are independently runnable by weight and activation-compute profile:
 
 ```bash
-cmake --build build --parallel --target \
-  ninfer_linear_q4_a16_test ninfer_linear_q5_a16_test \
-  ninfer_linear_q6_a16_test ninfer_linear_q8_a16_test
+cmake --build build --parallel --target ninfer_tests
 ctest --test-dir build -R '^ninfer_linear_(q4|q5|q6|q8)_a16_test$' --output-on-failure
 ```
 
@@ -141,7 +148,7 @@ cover consumption of their resulting representation.
 The real loading test accepts an explicit artifact path and optional component selection:
 
 ```bash
-./build/tests/ninfer_qwen3_5_loading_real_test \
+./build/tests/ninfer_tests ninfer_qwen3_5_loading_real_test \
   --artifact out/qwen3_6_27b.ninfer --vision --speculative mtp --proposal optimized
 ```
 
@@ -242,13 +249,13 @@ local ring wrap, and the logical context-capacity tail. Optional Vision runs ima
 and prefix restore. Zero extra Device StateImage slots exercise Host snapshot/restore.
 
 ```bash
-cmake --build build -j --target ninfer_qwen3_5_dflash2_real_test
+cmake --build build -j --target ninfer_tests
 NINFER_TEST_ARTIFACT=out/qwen3_8_27b.ninfer \
-  build/tests/ninfer_qwen3_5_dflash2_real_test 15 1 1 8
+  build/tests/ninfer_tests ninfer_qwen3_5_dflash2_real_test 15 1 1 8
 NINFER_TEST_ARTIFACT=out/qwen3_8_27b.ninfer \
-  build/tests/ninfer_qwen3_5_dflash2_real_test 7 1 0 2 bf16 1 0
+  build/tests/ninfer_tests ninfer_qwen3_5_dflash2_real_test 7 1 0 2 bf16 1 0
 NINFER_TEST_ARTIFACT=out/qwen3_8_27b_nvfp4.ninfer \
-  build/tests/ninfer_qwen3_5_dflash2_real_test 2 0 0 2 int8
+  build/tests/ninfer_tests ninfer_qwen3_5_dflash2_real_test 2 0 0 2 int8
 ```
 
 Arguments are K, Graph enabled, optimized head enabled, maximum B, target KV (`bf16` or `int8`),
