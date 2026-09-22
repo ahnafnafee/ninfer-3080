@@ -95,22 +95,31 @@ matrices are Hadamard-rotated in the checkpoint, so each projection's Uses carry
 rotates the matching activations. The token table has no Use of its own: the runtime restores each
 gathered row to the primal basis with the hidden-width signs that the output head carries. The
 recipe also undoes llama.cpp's exporter conventions: GDN value heads return from the tiled to the
-grouped order, norms from `1 + w` to `w`, and `ssm_a` to `A_log`. MTP, Vision, the frontend
-resources and DFlash2 come from the vanilla Qwen3.8-27B checkpoint and adapter, which share the
-geometry. A `--proposal` head gathered from the rotated output head inherits its rotation.
+grouped order, norms from `1 + w` to `w`, and `ssm_a` to `A_log`. Vision and the frontend
+resources come from the Qwen3.8-27B checkpoint, which shares the geometry. The published artifact
+takes its MTP head and DFlash2 adapter from ProCreations' heads trained on Bonsai 2 itself
+([MTP](https://huggingface.co/ProCreations/Ternary-Bonsai-2-27B-MTP),
+[DFlash2](https://huggingface.co/ProCreations/Ternary-Bonsai-2-27B-DFlash2)), which accept more drafts
+than the vanilla ones; the recipe stores the adapter's gate/up in Q4, since against a 2.125-bit
+target the drafter's MLP is a large share of every draft step's bytes.
 
 ```bash
 python3 -m tools.convert \
   --model /path/to/Qwen3.8-27B \
   --recipe bonsai2_27b_ternary \
   --source ternary=/path/to/Ternary-Bonsai-2-27B-PQ2_0.gguf \
-  --source dflash2=/path/to/Qwen3.8-27B-DFlash2 \
+  --source mtp=/path/to/Ternary-Bonsai-2-27B-MTP/model_mtp.safetensors \
+  --source dflash2=/path/to/Ternary-Bonsai-2-27B-DFlash2 \
   --components text,vision,mtp,dflash2 \
   --resource chat_template.jinja=tools/chat_templates/qwen3_8.jinja \
-  --proposal \
   --name bonsai2-27b \
   --out models/bonsai2_27b.ninfer
 ```
+
+Without `--source mtp` the MTP head comes from the checkpoint, and `--source
+dflash2=/path/to/Qwen3.8-27B-DFlash2` selects z-lab's adapter. A `--proposal` head gathered from
+the rotated output head inherits its rotation; it helps the vanilla MTP head through
+`--lm-head-draft`, but lowers the Bonsai-trained head's acceptance.
 
 A named source whose path ends in `.gguf` opens as a GGUF file; the recipe validates its header,
 tensor set and Hadamard metadata before reading anything.
