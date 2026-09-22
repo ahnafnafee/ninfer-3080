@@ -596,9 +596,20 @@ public:
                                               SharedCandidateEvidence::RequestedAutomatic) ||
                 matching_reuse_domains(candidate.shortlist_key) >= 2U;
 
+            // A private-only candidate with no committed demand and no shared credit adds no public
+            // value, while every pressure target can only lower a resident's, so its search would
+            // spend the whole target budget on the engine thread and return no plan. Leave it to
+            // the stale-resident reclamation below, which is where that search ends anyway.
+            const bool private_candidate_valued =
+                committed_demand_mask_for(private_baseline.shortlist_key) != 0 ||
+                has_shared_candidate_evidence(private_baseline.shared_evidence,
+                                              SharedCandidateEvidence::ExplicitBoundary) ||
+                has_shared_candidate_evidence(private_baseline.shared_evidence,
+                                              SharedCandidateEvidence::RequestedAutomatic);
+
             std::vector<CaptureScenario> scenarios;
             scenarios.reserve(static_cast<std::size_t>(shared_catalog_count_) + 1U);
-            if (private_only_pressure) {
+            if (private_only_pressure && private_candidate_valued) {
                 scenarios.push_back(CaptureScenario{
                     .assessment       = private_baseline,
                     .publication_slot = kInvalidCatalogSlot,

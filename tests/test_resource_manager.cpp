@@ -3261,6 +3261,61 @@ void test_stale_reclamation_prefers_the_oldest_publication_order() {
 
 }
 
+// A private-only candidate with no committed demand and no shared credit cannot outvalue a
+// resident, so the pressure search can only return no plan after spending its whole budget on the
+// engine thread. Reclamation settles it without that search.
+void test_zero_value_private_capture_skips_the_pressure_search() {
+    FakeManager manager = make_manager(1, 4, 1);
+    FakeProgram program;
+    const ActiveRequest resident = start_active(manager, program, 361, make_base(361), 7);
+    (void)finish_active(manager, program, resident);
+
+    const ActiveRequest active             = start_active(manager, program, 362, make_base(362), 9);
+    program.capture_feasible_after_release = true;
+    program.capture_assessment             = FakeCaptureAssessment{
+                    .shortlist_key          = FakeShortlistKey{.digest = 362, .frontier = 64},
+                    .protected_rebuild_work = PrefillWork{.tokens = 64},
+                    .publishes_private      = true,
+                    .publishes_shared       = false,
+                    .physically_feasible    = false,
+    };
+    const std::uint64_t sessions_before = program.pressure_planning_sessions;
+
+    const auto reserved =
+        manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 73}, 0, {});
+    require(reserved == FakeManager::ActiveCaptureReserveResult::Reserved,
+            "zero-value private capture did not reclaim a stale resident");
+    require(program.pressure_planning_sessions == sessions_before,
+            "zero-value private capture still ran the pressure search");
+    require(program.released_continuations.size() == 1,
+            "zero-value private capture released the wrong number of continuations");
+}
+
+// Shared credit gives the same private-only candidate a value of its own, so arbitration must
+// still weigh it against the residents.
+void test_credited_private_capture_keeps_the_pressure_search() {
+    FakeManager manager = make_manager(1, 4, 1);
+    FakeProgram program;
+    const ActiveRequest resident = start_active(manager, program, 371, make_base(371), 7);
+    (void)finish_active(manager, program, resident);
+
+    const ActiveRequest active             = start_active(manager, program, 372, make_base(372), 9);
+    program.capture_feasible_after_release = true;
+    program.capture_assessment             = FakeCaptureAssessment{
+                    .shortlist_key          = FakeShortlistKey{.digest = 372, .frontier = 64},
+                    .shared_evidence        = ninfer::SharedCandidateEvidence::ExplicitBoundary,
+                    .protected_rebuild_work = PrefillWork{.tokens = 64},
+                    .publishes_private      = true,
+                    .publishes_shared       = false,
+                    .physically_feasible    = false,
+    };
+    const std::uint64_t sessions_before = program.pressure_planning_sessions;
+
+    (void)manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 74}, 0, {});
+    require(program.pressure_planning_sessions > sessions_before,
+            "credited private capture skipped the pressure search");
+}
+
 void test_stale_reclamation_never_takes_a_retained_active_source() {
     FakeManager manager = make_manager(2, 3, 1);
     FakeProgram program;
@@ -3753,6 +3808,10 @@ int main() {
              test_private_only_capture_reclaims_stale_resident_by_publication_order);
     run_test("stale reclamation prefers oldest publication order",
              test_stale_reclamation_prefers_the_oldest_publication_order);
+    run_test("zero-value private capture skips the pressure search",
+             test_zero_value_private_capture_skips_the_pressure_search);
+    run_test("credited private capture keeps the pressure search",
+             test_credited_private_capture_keeps_the_pressure_search);
     run_test("stale reclamation never takes a retained active source",
              test_stale_reclamation_never_takes_a_retained_active_source);
     run_test("stale reclamation is not run for a feasible capture",
