@@ -24,11 +24,13 @@ The line also carries ternary checkpoints, ported from the earlier v0.10-based t
 |---|---|---|
 | format | `t2_g128_fp16`: ternary codes as 2-bit two's complement with one binary16 scale per 128 columns, row-split only | `core/weight.h`, `core/weight_view.cpp`, `artifact/formats.cpp`, `tools/artifact/` |
 | ops | T2 linear routes (small-T tensor-core kernel, narrow MMA tiles for prefill), composed T2 attention/GDN input projections, `linear_add`/`linear_swiglu`, the T2 full head in `linear_topk` | `ops/linear/t2/`, `ops/wrapper/`, `ops/linear_topk/t2.cu` |
-| ops | T2 prefill through the int8-activation GEMM of the dense formats (`--prefill-a8`): the ternary codes decode straight to s8 in the shared mainloop | `ops/common/rowsplit_a8_mma.cuh` (`T2Codec`), `ops/linear/t2/t2_a8.{h,cu}`, `ops/linear/linear.cpp`, the T2 paths of `ops/wrapper/{linear_add,attn_input_proj,gdn_input_proj}.cpp` |
+| ops | T2 int8 activations at every width (`--prefill-a8`): a small-T s8 kernel for decode, speculative verify and prompts up to 192 tokens (one launch over both parents of an attention or GDN pair), and above it the int8-activation GEMM of the dense formats, padding T to its cheapest tile width, whose ternary codes decode straight to s8 in the shared mainloop | `ops/linear/t2/t2_small_t_i8.cuh`, `ops/common/rowsplit_a8_mma.cuh` (`T2Codec`), `ops/linear/t2/t2_a8.{h,cu}`, `ops/linear/linear.cpp`, the T2 paths of `ops/wrapper/{linear_add,attn_input_proj,gdn_input_proj}.cpp` |
+| ops | the T2 pair's GDN record and snapshot projections take the pair's policy (their two-parent forms were A16 only); the record kernel stages its window in shared memory before the recurrence | `ops/wrapper/gdn_input_proj.cpp`, `models/qwen3_5/execution/gdn.cpp`, `ops/linear_attention/gated_delta_net/recurrent.cuh` |
+| ops | `linear_dynamic_grouped_conv_add` takes any row-split projection Linear registers at `[5120, 4096\|17408]`: Linear writes the BF16 plane the materialised Q8 route fills and the shared finish kernel adds the convolution (Q8 keeps its fused routes); Q4 shapes `n5120_k4096`, `n5120_k17408` and `n5120_k25600` for a Q4 DFlash2 adapter | `ops/wrapper/dynamic_grouped_conv.cpp`, `ops/dynamic_grouped_conv/q8/q8_dynamic_grouped_conv_add_{plan.cpp,materialized.cu}`, `ops/linear/q4/shapes/` |
 | ops | `hadamard_transform` and `silu_mul_hadamard`; producers that write their output rotated (`rmsnorm_hadamard`, `gated_rmsnorm_hadamard`, `sigmoid_mul_hadamard`, `gdn_norm_gating_proj_rotated`), bit-identical to the op followed by the transform; `embedding_rotated` gathers a T2 token row and applies the inverse transform | `ops/kernel/hadamard_transform.cuh`, `ops/kernel/hadamard_producers.cuh`, `ops/wrapper/hadamard_transform.cpp`, `ops/gdn_gating_proj/bf16/` |
 | model | Hadamard-rotated Uses (`hadamard_signs` auxiliary): the norms and gates hand rotated inputs to rotated projections (`InputBasis`), other shapes rotate in place; a T2 token table is restored at the gather with the output head's hidden-width signs; the residual stream stays primal | `models/qwen3_5/execution/rotation.h`, `parameters.cpp`, `load/prepare.cpp`, `model.cpp`, the attention/GDN/FFN/head sites |
 | vision | an overlay encode window may also borrow the DFlash adapter (ranked below MTP), which a ternary table and head alone cannot cover | `models/qwen3_5/load/vision_overlay.cpp`, `load.cpp` |
-| convert | `bonsai2_27b_ternary` builds a Qwen3.8-27B artifact whose text tower, head and token table come from PrismML's PQ2_0 GGUF, with the DFlash2 adapter's gate/up in Q4; `--source mtp` takes the MTP head from a separately trained file | `tools/convert/ternary.py`, `tools/convert/sources/gguf.py`, `tools/convert/qwen3_5.py` |
+| convert | `bonsai2_27b_ternary` builds a Qwen3.8-27B artifact whose text tower, head and token table come from PrismML's PQ2_0 GGUF, with the DFlash2 adapter's feature, output and MLP projections in Q4 (its fused query/key/value projection stays Q8); `--source mtp` takes the MTP head from a separately trained file | `tools/convert/ternary.py`, `tools/convert/sources/gguf.py`, `tools/convert/qwen3_5.py` |
 
 Deliberately not carried: the LRU catalog policy (`--context-cache-policy`), the host-state byte
 budget, the context-trace diagnostics and the prefix-cache scenario battery of the previous line.
@@ -41,9 +43,13 @@ what actually keeps prefills from being triggered.
   CUDA: Homebrew clang, `-include exception`, the Xcode SDK sysroot).
 - `ninfer_tool_call_parser_test`, `ninfer_qwen3_5_frontend_test` (fixture tokenizer), the OpenAI,
   Responses and Anthropic schema tests cover the forced tool call.
-- `ninfer_hadamard_transform_test`, `ninfer_linear_t2_a16_test` and the T2 case of
-  `ninfer_linear_topk_test` check the ternary ops against FP64 oracles; `tests/convert/test_ternary.py`
-  covers the GGUF mapping.
+- `ninfer_hadamard_transform_test`, `ninfer_linear_t2_a16_test`, `ninfer_linear_t2_a8_test` and the
+  T2 case of `ninfer_linear_topk_test` check the ternary ops against FP64 oracles; the T2 cases of
+  `ninfer_attn_input_proj_test`, `ninfer_gdn_input_proj_test` and
+  `ninfer_gdn_input_proj_conv_record_test` cover the pairs under both policies;
+  `ninfer_linear_dynamic_grouped_conv_add_test` runs Q8, Q4 and Q5 projections and
+  `ninfer_linear_q4_a16_test` the adapter's Q4 shapes; `tests/convert/test_ternary.py` covers the
+  GGUF mapping.
 - The full build and `ctest` on an RTX 3090 (sm_86) before the branch is published.
 
 ## Deployment

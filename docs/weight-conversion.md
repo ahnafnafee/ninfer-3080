@@ -100,8 +100,9 @@ resources come from the Qwen3.8-27B checkpoint, which shares the geometry. The p
 takes its MTP head and DFlash2 adapter from ProCreations' heads trained on Bonsai 2 itself
 ([MTP](https://huggingface.co/ProCreations/Ternary-Bonsai-2-27B-MTP),
 [DFlash2](https://huggingface.co/ProCreations/Ternary-Bonsai-2-27B-DFlash2)), which accept more drafts
-than the vanilla ones; the recipe stores the adapter's gate/up in Q4, since against a 2.125-bit
-target the drafter's MLP is a large share of every draft step's bytes.
+than the vanilla ones. The recipe stores the adapter's feature, output and MLP projections in Q4,
+since against a 2.125-bit target the drafter is a large share of every draft step's bytes; the
+fused query/key/value projection stays Q8, which its three-output op requires.
 
 ```bash
 python3 -m tools.convert \
