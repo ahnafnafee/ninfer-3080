@@ -21,6 +21,10 @@ namespace ninfer::ops {
 
 inline constexpr int kCausalHeadDim = 256;
 
+// The most keys one split may cover: a split stages at most 64 physical-page IDs, and two 64-key
+// pages go to key-tile rounding and page alignment.
+inline constexpr int kCausalSmallTSplitKeyLimit = 3968;
+
 struct CausalAppendInput {
     static constexpr bool writes_cache = true;
     const __nv_bfloat16* k;
@@ -93,9 +97,11 @@ __device__ __forceinline__ int causal_small_t_default_splits(int window) {
     return splits < Geometry::SmallTMaximumSplits ? splits : Geometry::SmallTMaximumSplits;
 }
 
+// wave_splits, when positive, is the launch's split count per full wave of CTAs: a count above it
+// drops to the fewest whole waves that still keep every split within kCausalSmallTSplitKeyLimit.
 template <typename Geometry, bool Int8>
 __device__ __forceinline__ int causal_small_t_active_splits(int window, int launch_capacity,
-                                                            int tokens) {
+                                                            int tokens, int wave_splits = 0) {
     if (window <= 0) { return launch_capacity; }
     int splits = 0;
     if constexpr (Int8) {
@@ -115,6 +121,11 @@ __device__ __forceinline__ int causal_small_t_active_splits(int window, int laun
         }
     } else {
         splits = causal_small_t_default_splits<Geometry>(window);
+    }
+    if (wave_splits > 0 && splits > wave_splits) {
+        const int whole_waves =
+            wave_splits * div_up(div_up(window, kCausalSmallTSplitKeyLimit), wave_splits);
+        splits = splits < whole_waves ? splits : whole_waves;
     }
     return splits < launch_capacity ? splits : launch_capacity;
 }
@@ -202,7 +213,7 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
     const float* partial_acc, const float* partial_m, const float* partial_l,
     const std::int32_t* positions, const std::int32_t* valid_columns, std::int32_t tokens,
     std::int32_t full_width, std::int32_t column_begin, std::int32_t batch_size,
-    std::int32_t split_count, __nv_bfloat16* out) {
+    std::int32_t split_count, std::int32_t wave_splits, __nv_bfloat16* out) {
     static_assert(DChunk > 0 && DChunk <= kCausalHeadDim);
 
     const int q_head      = static_cast<int>(blockIdx.x);
@@ -249,7 +260,7 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
 
     const int window = last_pos + 1;
     const int active_split_count =
-        causal_small_t_active_splits<Geometry, Int8>(window, split_count, tokens);
+        causal_small_t_active_splits<Geometry, Int8>(window, split_count, tokens, wave_splits);
 
     __shared__ float weights[256], warp_sums[8], scalars[2];
     const float head_l =

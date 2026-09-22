@@ -57,8 +57,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         std::int8_t* cache_v_i8, __half* cache_k_scale, __half* cache_v_scale,
         const std::int32_t* block_tables, const std::int32_t* valid_columns,
         const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t full_width,
-        std::int32_t column_begin, std::int32_t logical_capacity, float scale, float* partial_acc,
-        float* partial_m, float* partial_l) {
+        std::int32_t column_begin, std::int32_t logical_capacity, std::int32_t wave_splits,
+        float scale, float* partial_acc, float* partial_m, float* partial_l) {
     constexpr int Wc                   = WarpsPerCta;
     constexpr int RowCount             = TokenTile * Geometry::GroupSize;
     constexpr int RowTiles             = (RowCount + 15) / 16;
@@ -194,7 +194,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 
     const int window = last_pos + 1;
     const int active_split_count =
-        causal_small_t_active_splits<Geometry, true>(window, split_count, TokenTile);
+        causal_small_t_active_splits<Geometry, true>(window, split_count, TokenTile, wave_splits);
     if (split >= active_split_count) { return; }
 
     const int logical_tiles = div_up(window, Bc);
