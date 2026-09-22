@@ -14,7 +14,9 @@ from .pipeline import convert
 from .proposal import DEFAULT_RANKING, add_official_proposal
 from .qwen3_5 import build_model
 from .recipe import Recipe
+from .sources.gguf import GGUFFile
 from .sources.safetensors import SafetensorsSource
+from .ternary import RECIPES as TERNARY_RECIPES
 
 
 class SourceInputs(Mapping):
@@ -31,9 +33,12 @@ class SourceInputs(Mapping):
                 raise ValueError(
                     f"selected recipe requires source {name!r}; provide --source {name}=PATH"
                 )
-            self._sources[name] = self._stack.enter_context(
-                SafetensorsSource(self._paths[name])
+            opener = (
+                GGUFFile
+                if Path(self._paths[name]).suffix == ".gguf"
+                else SafetensorsSource
             )
+            self._sources[name] = self._stack.enter_context(opener(self._paths[name]))
         return self._sources[name]
 
     def __iter__(self):
@@ -59,8 +64,9 @@ def _pairs(values, label):
 
 
 def _function(value: str):
-    if value in RECIPES:
-        return RECIPES[value]
+    recipes = {**RECIPES, **TERNARY_RECIPES}
+    if value in recipes:
+        return recipes[value]
     filename, separator, function = value.rpartition(":")
     if not separator:
         filename, function = value, "configure"
