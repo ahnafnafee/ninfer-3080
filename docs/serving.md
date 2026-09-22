@@ -592,7 +592,10 @@ wire response contains typed `output` Items.
 | cache and client hints | valid `prompt_cache_key`, `prompt_cache_options`, `prompt_cache_retention`, `safety_identifier`, and `user` values are accepted without being mapped to Engine session identity |
 
 Unknown top-level fields fail with `unknown_parameter`. Recognized but unsupported features fail
-with a field-specific 400 error instead of being silently ignored.
+with a field-specific 400 error instead of being silently ignored. When a rejection is caused by a
+specific value, the error names that value (ASCII-escaped and truncated), its size where relevant,
+and its location in the request, both in the error `param` (for example `tools[0].function.name`
+or `messages[2].tool_calls[0].function.name`) and in the message text.
 
 ### Input Item contract
 
