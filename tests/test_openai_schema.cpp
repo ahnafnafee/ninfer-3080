@@ -400,16 +400,30 @@ int test_tools() {
                       "allowed_tools narrowed to one function forces it");
     body["tool_choice"]["mode"]             = "auto";
     body["tool_choice"]["tools"][0]["name"] = "missing";
-    failures += check(api_error([&] { (void)parse(body); }).param == "tool_choice",
-                      "allowed_tools rejects names absent from the declared tool set");
+    failures += check(
+        api_error([&] { (void)parse(body); }).param == "tool_choice.allowed_tools.tools[0].name",
+        "allowed_tools rejects names absent from the declared tool set");
 
     body          = base_request();
     body["tools"] = Json::array({function_tool("weather", true)});
-    failures += check(api_error([&] { (void)parse(body); }).code == "strict_tools_not_supported",
-                      "strict tools rejected");
-    body["tools"] = Json::array({Json{{"type", "custom"}, {"name", "shell"}}});
-    failures += check(api_error([&] { (void)parse(body); }).code == "tool_type_not_supported",
-                      "custom tools rejected");
+    const OpenAIChatRequest strict_tools = parse(body);
+    failures += check(strict_tools.generation.tools.size() == 1 &&
+                          prompt(strict_tools.generation).options.tool_jsons[0].find(
+                              "\"strict\":false") != std::string::npos,
+                      "strict tools are accepted as advisory without reaching the prompt");
+    body["tools"] = Json::array({Json{{"type", "custom"},
+                                      {"custom",
+                                       Json{{"name", "shell"},
+                                            {"description", "Run a shell command"},
+                                            {"format", Json{{"type", "grammar"},
+                                                             {"grammar", "start: /.+/"}}}}}}});
+    const GenerationRequest custom_tools = parse(body).generation;
+    failures += check(custom_tools.tools.size() == 1 && custom_tools.tools[0].name == "shell" &&
+                          custom_tools.tools[0].input_schema_json.find("\"input\"") !=
+                              std::string::npos &&
+                          custom_tools.tools[0].input_schema_json.find("start: /.+/") !=
+                              std::string::npos,
+                      "custom tools are served as a single-string-input function");
 
     // A hosted tool is the server's to run. NInfer has no executor, and the caller is not waiting
     // on one either, so the declaration is dropped instead of failing a request the client cannot
@@ -643,6 +657,16 @@ int test_messages_and_media() {
 int test_reasoning_and_extensions() {
     int failures = 0;
     Json body    = base_request();
+    body["reasoning_effort"] = "default";
+    failures += check(!parse(body).generation.reasoning_effort.has_value(),
+                      "reasoning_effort default alias resolves to the server-configured level");
+    body["reasoning_effort"] = "auto";
+    failures += check(!parse(body).generation.reasoning_effort.has_value(),
+                      "reasoning_effort auto alias resolves to the server-configured level");
+    body["reasoning_effort"] = "xhigh";
+    failures += check(parse(body).generation.reasoning_effort == RequestedReasoningEffort::XHigh,
+                      "explicit reasoning_effort still reaches the Engine");
+    body = base_request();
     body["messages"].push_back(Json{{"role", "assistant"},
                                     {"content", "answer"},
                                     {"reasoning_content", "thought"},
@@ -851,6 +875,19 @@ int test_stream_response() {
                           usage["timings"]["predicted_n"] == 7,
                       "dedicated stream usage carries token accounting and terminal timings");
     failures += check(events.back() == "data: [DONE]\n\n", "stream ends with DONE sentinel");
+
+    OpenAIChatStream choiced_stream(identity(), true, false, false, true);
+    (void)choiced_stream.start();
+    (void)choiced_stream.reasoning_delta("thought");
+    (void)choiced_stream.content_delta("ans");
+    const std::vector<std::string> choiced_events = choiced_stream.finish(outcome);
+    const Json choiced_usage                      = parse_sse(choiced_events[2]);
+    failures += check(choiced_usage["choices"].size() == 1 &&
+                          choiced_usage["choices"][0]["delta"].empty() &&
+                          choiced_usage["choices"][0]["finish_reason"].is_null() &&
+                          choiced_usage["usage"]["completion_tokens"] ==
+                              usage["usage"]["completion_tokens"],
+                      "usage-chunk-choice keeps usage accounting with a zero-delta choice");
 
     OpenAIChatStream mismatch(identity(), false);
     (void)mismatch.start();

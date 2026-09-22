@@ -97,7 +97,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--gdn-state-fp16] [--rope-yarn] [--wddm-evictable-budget] "
            "[--mlp-a8-decode] [--no-prefill-a8] "
            "[--prefill-cublas [--no-prefill-cublas-projections]] [--lookup-ngram N] "
-           "[--no-thinking] [--preserve-thinking] [--cors] [--no-webui] "
+           "[--no-thinking] [--preserve-thinking] [--cors] [--no-webui] [--usage-chunk-choice] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
@@ -142,6 +142,8 @@ std::string serve_usage_text(const char* argv0) {
            "       --default-reasoning-effort applies to requests that set no effort and do not "
            "disable thinking; a request effort overrides it\n"
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
+           "       --usage-chunk-choice gives the streamed usage chunk a zero-delta choice so\n"
+           "       strict parsers that reject choices:[] accept the terminal usage record\n"
            "       sampler defaults come from the loaded model and resolved thinking mode; "
            "server flags and request fields override individual values.\n"
            "       --greedy forces temperature 0 (exact argmax).\n"
@@ -444,6 +446,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.enable_cors = true;
         } else if (arg == "--no-webui") {
             options.enable_webui = false;
+        } else if (arg == "--usage-chunk-choice") {
+            options.usage_chunk_choice = true;
         } else if (arg == "--temperature") {
             options.sampling_overrides.temperature =
                 parse_float_in(require_value("--temperature"), "temperature", 0.0f, 2.0f);
