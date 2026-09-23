@@ -307,6 +307,11 @@ type controls conversion of Qwen's untyped parameter text. String-admitting valu
 other explicitly typed values are decoded as JSON without coercion. NInfer does not validate
 generated arguments against the full JSON Schema.
 
+Generated prose can quote `<tool_call>` markup before the real call. Unless the first marker's region
+opens with a complete call, each marker is tried in order, and the first complete region that
+consumes the rest of the response becomes the structured turn; quoted markup before it stays
+ordinary content.
+
 Messages enter the selected template in their input order. The maintained Qwen templates keep
 system/developer messages at their original positions.
 
