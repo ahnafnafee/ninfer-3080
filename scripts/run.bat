@@ -132,7 +132,7 @@ if not "%NINFER_MODEL%"=="" set "MODEL=%NINFER_MODEL%"
 if not "%NINFER_HOST%"=="" set "HOST=%NINFER_HOST%"
 if not "%NINFER_PORT%"=="" set "PORT=%NINFER_PORT%"
 
-set "SERVER=%ROOT%\build-ninja-OLD\apps\ninfer-serve.exe"
+set "SERVER=%ROOT%\build-ninja\apps\ninfer-serve.exe"
 if not exist "%SERVER%" set "SERVER=%~dp0ninfer-serve.exe"
 if not "%NINFER_SERVER%"=="" set "SERVER=%NINFER_SERVER%"
 
