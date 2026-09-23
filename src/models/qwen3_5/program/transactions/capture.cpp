@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -596,7 +597,24 @@ ProgramImpl::install_private_capture(SequenceState& sequence, const CaptureGroup
     return removed;
 }
 
-void ProgramImpl::prepare_active_capture(ActiveCaptureTransaction& transaction) {
+namespace {
+
+void report_capture_release_drift(const detail::PhysicalResources& planned,
+                                  const detail::PhysicalResources& released) noexcept {
+    std::fprintf(stderr,
+                 "shared capture replacement release drifted: planned device state %u main %u "
+                 "backend %u host state %u kv %zu, released device state %u main %u backend %u "
+                 "host state %u kv %zu\n",
+                 planned.device.state_slots, planned.device.main_kv_pages,
+                 planned.device.backend_kv_pages, planned.host.state_slots, planned.host.kv_bytes,
+                 released.device.state_slots, released.device.main_kv_pages,
+                 released.device.backend_kv_pages, released.host.state_slots,
+                 released.host.kv_bytes);
+}
+
+} // namespace
+
+bool ProgramImpl::prepare_active_capture(ActiveCaptureTransaction& transaction) {
     if (transaction.prepared || transaction.lane >= max_concurrency ||
         transaction.lane_epoch != lane_epochs[transaction.lane]) {
         throw std::logic_error("active capture capacity preparation is stale");
@@ -619,12 +637,27 @@ void ProgramImpl::prepare_active_capture(ActiveCaptureTransaction& transaction) 
             }
             const detail::PhysicalResources removed = release_shared_prefix_state_strict(
                 *transaction.shared_index, SharedPrefixSlotRole::ReservedReplacement);
-            if (removed != transaction.capacity_preparation_removed) {
-                throw std::logic_error("shared capture preparation release changed");
-            }
             transaction.replacement_removed    = true;
             transaction.replacement_generation = slot.generation;
             slot.role                          = SharedPrefixSlotRole::ReservedCapture;
+            if (removed != transaction.capacity_preparation_removed) {
+                // Pressure committed after reservation may release another owner that shared KV
+                // pages or a checkpoint reference with the replacement, so its exclusive share at
+                // release differs from the assessment. Occupancy is measured physically; only the
+                // transaction ledger has to follow. A larger release keeps every planned
+                // destination available. A smaller one does not, and the capture is abandoned
+                // rather than failing the engine: the replacement is already gone either way.
+                report_capture_release_drift(transaction.capacity_preparation_removed, removed);
+                if (positive_resource_difference(transaction.capacity_preparation_removed,
+                                                 removed) != detail::PhysicalResources{}) {
+                    return false;
+                }
+                const detail::PhysicalResources surplus =
+                    checked_resource_difference(removed, transaction.capacity_preparation_removed);
+                transaction.capacity_preparation_removed = removed;
+                transaction.resource_delta.removed =
+                    checked_resource_sum(transaction.resource_delta.removed, surplus);
+            }
         } else if (slot.role != SharedPrefixSlotRole::ReservedCapture ||
                    transaction.capacity_preparation_removed != detail::PhysicalResources{}) {
             throw std::logic_error("shared capture vacant descriptor changed before preparation");
@@ -691,6 +724,7 @@ void ProgramImpl::prepare_active_capture(ActiveCaptureTransaction& transaction) 
         refresh_state_views(sequence);
     }
     transaction.prepared = true;
+    return true;
 }
 
 void ProgramImpl::enqueue_active_capture_transfers(ActiveCaptureTransaction& transaction) {
@@ -1254,13 +1288,15 @@ ProgramImpl::progress_active_capture_transaction(runtime::CancellationFlagView c
     if (cancellation.requested()) { return abort(); }
     if (!transaction.prepared) {
         if (cancellation.requested()) { return abort(); }
+        bool prepared = false;
         try {
-            prepare_active_capture(transaction);
+            prepared = prepare_active_capture(transaction);
         } catch (...) {
             abort_active_capture(transaction);
             transaction.published = true;
             throw;
         }
+        if (!prepared) { return abort(); }
     }
     if (transaction.transfer_enqueue_pending) {
         if (cancellation.requested()) { return abort(); }

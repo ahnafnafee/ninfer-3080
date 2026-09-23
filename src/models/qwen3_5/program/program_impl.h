@@ -1161,7 +1161,9 @@ private:
     install_private_capture(SequenceState& sequence, const CaptureGroup& group,
                             StateImageHandle checkpoint,
                             std::optional<runtime::CheckpointRef> replacement);
-    void prepare_active_capture(ActiveCaptureTransaction& transaction);
+    // False when the shared replacement released less than its assessment; the replacement is
+    // gone and the capture must be aborted.
+    [[nodiscard]] bool prepare_active_capture(ActiveCaptureTransaction& transaction);
     void enqueue_active_capture_transfers(ActiveCaptureTransaction& transaction);
     void abort_active_capture(ActiveCaptureTransaction& transaction) noexcept;
     [[nodiscard]] ActiveCaptureResult publish_active_capture(ActiveCaptureTransaction& transaction);
