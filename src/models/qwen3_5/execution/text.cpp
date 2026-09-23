@@ -847,9 +847,15 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
     Tensor h                     = projection.hidden;
     const Tensor& input_signs    = projection_signs(p.projection);
     const InputBasis input_basis = rotated(input_signs) ? InputBasis::Rotated : InputBasis::Primal;
+    // The NVFP4 W4A4 route can normalize while it quantizes, which skips the BF16 round trip of
+    // the normalized hidden state.
+    const auto* single     = std::get_if<LinearParameters>(&p.projection);
+    const bool fused_nvfp4 = input_basis == InputBasis::Primal && single != nullptr &&
+                             ops::attn_input_proj_fused_rmsnorm_nvfp4_eligible(single->weight,
+                                                                               single->policy, T);
     if (input_basis == InputBasis::Rotated) {
         ops::rmsnorm_hadamard(x, w.input_norm, config_.rms_norm_eps, true, input_signs, h, s);
-    } else {
+    } else if (!fused_nvfp4) {
         ops::rmsnorm(x, w.input_norm, config_.rms_norm_eps, true, h, s);
     }
 
@@ -865,7 +871,13 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
     Tensor gate_flat = gate.view({dimension(config_.attention->query_width()), T});
     Tensor k_flat    = k.view({dimension(config_.attention->key_width()), T});
     Tensor v_flat    = v.view({dimension(config_.attention->key_width()), T});
-    attention_projection(h, p, q_flat, gate_flat, k_flat, v_flat, work_, s, input_basis);
+    if (fused_nvfp4) {
+        ops::attn_input_proj_fused_rmsnorm_nvfp4(x, w.input_norm, config_.rms_norm_eps,
+                                                 single->weight, q_flat, gate_flat, k_flat, v_flat,
+                                                 single->policy, work_, s);
+    } else {
+        attention_projection(h, p, q_flat, gate_flat, k_flat, v_flat, work_, s, input_basis);
+    }
 
     const auto results = workspace::text_attention_results(work_, config_, T);
     Tensor qn =
