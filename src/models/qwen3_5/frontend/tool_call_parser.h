@@ -73,7 +73,9 @@ parse_qwen_tool_call_output(const std::string& text, std::size_t max_tool_name_l
                             const ToolCallOutputContract& contract);
 
 // Incrementally publishes bytes that are provably outside a possible terminal Qwen tool-call
-// suffix. At terminal time, valid calls are retained structurally; malformed output is restored
+// suffix. At terminal time, valid calls are retained structurally. A region that opens a function
+// but fails the strict reader goes through recovery: readable calls are kept and an unreadable one
+// becomes a call to the reserved error tool. Only markup that never opens a function is restored
 // verbatim. When the prompt already carries the opener of a forced call, the decoder is seeded
 // with that opener, because the model never emits it.
 class ToolCallOutputDecoder {

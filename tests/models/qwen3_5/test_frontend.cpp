@@ -2237,15 +2237,17 @@ int test_forced_tool_call(const Frontend& frontend) {
                       "a turn ending on the closed function did not become the forced call");
 
     const ForcedOutcome truncated = forced_session("\n<parameter=taskId>\n1\n</par");
-    failures += check(truncated.calls.empty() && !truncated.diagnostics.forced_call_closed &&
-                          !truncated.content.empty(),
-                      "an unfinished argument was completed into a call");
-    // The fallback returns the region as ordinary content. The opener at its head came from the
-    // prompt, not from the model, and must not reach the caller.
-    failures += check(truncated.content.find("<tool_call>") == std::string::npos &&
-                          truncated.content.find("<function=TaskUpdate>") == std::string::npos &&
-                          truncated.content.starts_with("\n<parameter=taskId>"),
-                      "fallback content carried the prompt-owned opener");
+    // An unfinished argument is not completed into the forced call: it is reported back to the
+    // model as a malformed call naming the intended tool, and no markup leaks into content.
+    failures += check(truncated.calls.size() == 1 &&
+                          truncated.calls.front().name == "malformed_tool_call" &&
+                          truncated.calls.front().arguments_json.find("TaskUpdate") !=
+                              std::string::npos &&
+                          !truncated.diagnostics.forced_call_closed &&
+                          truncated.diagnostics.malformed_call_reported,
+                      "an unfinished argument was not reported as a malformed call");
+    failures += check(truncated.content.empty(),
+                      "a reported malformed call left markup in content");
     return failures;
 }
 

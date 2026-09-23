@@ -421,7 +421,18 @@ struct ToolCallParseDiagnostics {
     std::uint32_t structured_call_count         = 0;
     std::uint32_t empty_arguments_omitted       = 0;
     std::uint32_t schema_mismatch_arguments     = 0;
+    // Why the strict pass rejected the region. With recovered set, the region still produced
+    // calls and nothing went out as text.
     ToolCallParseFallbackReason fallback_reason = ToolCallParseFallbackReason::None;
+    bool recovered                              = false;
+    // Calls the recovery pass kept although the strict pass would not: an undeclared name, a
+    // parameter closed by its function, a call missing only its outer tag.
+    std::uint32_t recovered_call_count = 0;
+    // A call the recovery pass could not read either was replaced by a call to the reserved error
+    // tool, so the client answers with an error and the model gets a turn to retry.
+    bool malformed_call_reported = false;
+    // Text after the last call; the model is predicting a tool result there, so it is dropped.
+    bool trailing_content_dropped = false;
 
     [[nodiscard]] friend constexpr bool
     operator==(const ToolCallParseDiagnostics&, const ToolCallParseDiagnostics&) noexcept = default;

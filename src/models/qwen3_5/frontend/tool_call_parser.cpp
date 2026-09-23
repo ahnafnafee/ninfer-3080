@@ -24,6 +24,10 @@ constexpr std::string_view kFunctionClose = "</function>";
 constexpr std::string_view kParamOpen     = "<parameter=";
 constexpr std::string_view kParamClose    = "</parameter>";
 
+// Reserved name for a call the recovery pass could not read. No client declares it, so the client
+// answers with an unknown-tool error and nothing runs; the arguments tell the model what went wrong.
+constexpr std::string_view kMalformedCallTool = "malformed_tool_call";
+
 struct RawParameter {
     std::string_view name;
     std::string_view value;
@@ -407,11 +411,20 @@ NormalizedParameter normalize_parameter(std::string_view encoded_value,
     return {.json_value = encode_json_string(value)};
 }
 
+// The strict reader accepts only complete, declared calls. The lenient one, used by the recovery
+// pass on a call the strict reader rejected, also takes an undeclared name (the client answers
+// with its own unknown-tool error), a parameter whose close tag is missing right before its
+// function closes, and a call missing only its outer close tag.
 class QwenToolRegionParser {
 public:
     QwenToolRegionParser(std::string_view text, std::size_t max_name_length,
-                         const Contract& contract)
-        : text_(text), max_name_length_(max_name_length), contract_(contract) {}
+                         const Contract& contract, bool lenient = false)
+        : text_(text), max_name_length_(max_name_length), contract_(contract), lenient_(lenient) {}
+
+    // One call starting at pos. On failure pos is left inside the call.
+    FallbackReason parse_one(std::size_t& pos, RawToolCall& call) const {
+        return parse_tool_call(pos, call);
+    }
 
     FallbackReason parse(std::vector<RawToolCall>& calls) const {
         std::size_t pos = 0;
@@ -445,7 +458,11 @@ private:
         const FallbackReason failure = parse_function(pos, call);
         if (failure != FallbackReason::None) { return failure; }
         skip_format_whitespace(text_, pos);
-        return consume(pos, kToolClose) ? FallbackReason::None : FallbackReason::MalformedStructure;
+        if (consume(pos, kToolClose)) { return FallbackReason::None; }
+        if (lenient_ && (pos == text_.size() || starts_with_at(text_, pos, kToolOpen))) {
+            return FallbackReason::None;
+        }
+        return FallbackReason::MalformedStructure;
     }
 
     FallbackReason parse_function(std::size_t& pos, RawToolCall& call) const {
@@ -459,7 +476,7 @@ private:
         if (!valid_function_name(call.name, max_name_length_)) {
             return FallbackReason::InvalidToolName;
         }
-        if (contract_.enforce_declared_names &&
+        if (!lenient_ && contract_.enforce_declared_names &&
             find_tool_contract(contract_, call.name) == nullptr) {
             return FallbackReason::UndeclaredTool;
         }
@@ -488,6 +505,12 @@ private:
 
         const std::size_t value_begin = name_end + 1;
         std::size_t value_end         = 0;
+        if (lenient_ && find_unclosed_parameter_end(value_begin, value_end)) {
+            call.parameters.push_back(RawParameter{
+                .name = name, .value = text_.substr(value_begin, value_end - value_begin)});
+            pos = value_end;
+            return FallbackReason::None;
+        }
         if (!find_parameter_close(value_begin, value_end)) {
             return FallbackReason::MalformedStructure;
         }
@@ -495,6 +518,21 @@ private:
             .name = name, .value = text_.substr(value_begin, value_end - value_begin)});
         pos = value_end + kParamClose.size();
         return FallbackReason::None;
+    }
+
+    // A value that runs straight into its function's close tag, with no parameter tag of either
+    // kind on the way. Any parameter markup in between makes the boundary a guess, and a guessed
+    // boundary could cut a command short, so that stays unreadable.
+    bool find_unclosed_parameter_end(std::size_t value_begin, std::size_t& value_end) const {
+        const std::size_t close = text_.find(kFunctionClose, value_begin);
+        if (close == std::string_view::npos) { return false; }
+        const std::string_view value = text_.substr(value_begin, close - value_begin);
+        if (value.find(kParamClose) != std::string_view::npos ||
+            value.find(kParamOpen) != std::string_view::npos) {
+            return false;
+        }
+        value_end = close;
+        return true;
     }
 
     bool find_parameter_open_before(std::size_t scan, std::size_t limit,
@@ -538,6 +576,7 @@ private:
     std::string_view text_;
     std::size_t max_name_length_;
     const Contract& contract_;
+    bool lenient_;
 };
 
 GeneratedToolCall normalize_raw_tool_call(const RawToolCall& raw, const Contract& contract,
@@ -580,6 +619,75 @@ ParsedToolCallOutput fallback(const std::string& text, ToolCallParseDiagnostics 
     return out;
 }
 
+// Markup that never opens a function is prose about tool calls, not an attempt at one.
+bool region_opens_function(std::string_view region) {
+    std::size_t pos = kToolOpen.size();
+    skip_format_whitespace(region, pos);
+    return starts_with_at(region, pos, kFunctionOpen);
+}
+
+std::string malformed_call_arguments(std::string_view call_text, std::size_t max_name_length) {
+    Json arguments  = Json::object();
+    std::size_t pos = kToolOpen.size();
+    skip_format_whitespace(call_text, pos);
+    if (starts_with_at(call_text, pos, kFunctionOpen)) {
+        pos += kFunctionOpen.size();
+        const std::size_t name_end = call_text.find('>', pos);
+        if (name_end != std::string_view::npos) {
+            const std::string_view name = call_text.substr(pos, name_end - pos);
+            if (valid_function_name(name, max_name_length)) {
+                arguments["intended_function"] = std::string(name);
+            }
+        }
+    }
+    arguments["error"] =
+        call_text.find(kFunctionClose) == std::string_view::npos
+            ? "The output ended before the tool call was closed, so nothing was executed. Issue "
+              "the call again; if it was long, split the work into smaller calls."
+            : "The tool call markup was malformed, so nothing was executed. Issue the call again "
+              "with every parameter opened and closed by its own tag.";
+    return arguments.dump();
+}
+
+// The strict pass rejected the region. Calls it can read still stand; a call it cannot read gets
+// the lenient reader, and a call neither can read is reported as a call to the reserved error
+// tool, so the model sees an error and retries instead of its turn ending on raw markup. Nothing
+// after that point is trusted. Text after the last call is a tool result the model went on to
+// imagine, and it is dropped.
+void recover_tool_calls(std::string_view region, std::size_t max_name_length,
+                        const Contract& contract, ParsedToolCallOutput& out) {
+    const QwenToolRegionParser strict(region, max_name_length, contract);
+    const QwenToolRegionParser lenient(region, max_name_length, contract, true);
+    std::size_t pos = 0;
+    for (;;) {
+        skip_format_whitespace(region, pos);
+        if (pos == region.size()) { break; }
+        if (!starts_with_at(region, pos, kToolOpen)) {
+            out.diagnostics.trailing_content_dropped = true;
+            break;
+        }
+        const std::size_t start = pos;
+        RawToolCall call;
+        if (strict.parse_one(pos, call) == FallbackReason::None) {
+            out.tool_calls.push_back(normalize_raw_tool_call(call, contract, out.diagnostics));
+            continue;
+        }
+        pos  = start;
+        call = {};
+        if (lenient.parse_one(pos, call) == FallbackReason::None) {
+            ++out.diagnostics.recovered_call_count;
+            out.tool_calls.push_back(normalize_raw_tool_call(call, contract, out.diagnostics));
+            continue;
+        }
+        out.tool_calls.push_back(GeneratedToolCall{
+            .name           = std::string(kMalformedCallTool),
+            .arguments_json = malformed_call_arguments(region.substr(start), max_name_length)});
+        out.diagnostics.malformed_call_reported = true;
+        break;
+    }
+    out.diagnostics.recovered = true;
+}
+
 } // namespace
 
 std::shared_ptr<const ToolCallOutputContract>
@@ -613,12 +721,13 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
     const FallbackReason failure = parser.parse(raw_calls);
     if (failure != FallbackReason::None) {
         out.diagnostics.fallback_reason = failure;
-        return fallback(text, out.diagnostics);
-    }
-
-    out.tool_calls.reserve(raw_calls.size());
-    for (const RawToolCall& raw : raw_calls) {
-        out.tool_calls.push_back(normalize_raw_tool_call(raw, contract, out.diagnostics));
+        if (!region_opens_function(tool_region)) { return fallback(text, out.diagnostics); }
+        recover_tool_calls(tool_region, max_tool_name_length, contract, out);
+    } else {
+        out.tool_calls.reserve(raw_calls.size());
+        for (const RawToolCall& raw : raw_calls) {
+            out.tool_calls.push_back(normalize_raw_tool_call(raw, contract, out.diagnostics));
+        }
     }
 
     out.diagnostics.structured_call_count = static_cast<std::uint32_t>(out.tool_calls.size());
@@ -695,17 +804,17 @@ ToolCallOutputDecoder::Terminal ToolCallOutputDecoder::finish() {
 
     ParsedToolCallOutput parsed =
         parse_qwen_tool_call_output(tool_region_, max_tool_name_length_, *contract_);
-    if (forced_ && !parsed.is_tool_call_response) {
+    if (forced_ && parsed.diagnostics.fallback_reason != FallbackReason::None) {
         // A turn that ends after the function closed is a complete call missing only its outer
-        // tag. Supplying that tag invents no argument byte; anything less complete still falls
-        // back to verbatim text below.
+        // tag. Supplying that tag invents no argument byte; anything less complete keeps what
+        // the recovery pass made of it.
         std::string completed = rtrim_format_whitespace(tool_region_);
         if (std::string_view(completed).ends_with(kFunctionClose)) {
             completed.push_back('\n');
             completed.append(kToolClose);
             ParsedToolCallOutput closed =
                 parse_qwen_tool_call_output(completed, max_tool_name_length_, *contract_);
-            if (closed.is_tool_call_response) {
+            if (closed.diagnostics.fallback_reason == FallbackReason::None) {
                 closed.diagnostics.forced_call_closed = true;
                 parsed                                = std::move(closed);
                 tool_region_                          = std::move(completed);

@@ -77,6 +77,34 @@ int check_rejected(const std::string& text, const fi::ToolCallOutputContract& co
                  std::string(message));
 }
 
+// The region failed the strict reader and nothing lenient could keep either, so the last call is
+// the reserved error tool; intended_function is what the model tried to call, empty when it gave
+// no usable name.
+int check_reported(const fi::ParsedToolCallOutput& parsed, ninfer::ToolCallParseFallbackReason reason,
+                   std::string_view intended_function, std::string_view message) {
+    if (!parsed.is_tool_call_response || parsed.tool_calls.empty()) {
+        return fail(std::string(message) + " (no calls)");
+    }
+    const auto& reported = parsed.tool_calls.back();
+    const Json args      = Json::parse(reported.arguments_json);
+    const bool intended_matches =
+        intended_function.empty() ? !args.contains("intended_function")
+                                  : args.value("intended_function", "") == intended_function;
+    return check(reported.name == "malformed_tool_call" && args.at("error").is_string() &&
+                     intended_matches && parsed.diagnostics.marker_seen &&
+                     parsed.diagnostics.recovered && parsed.diagnostics.malformed_call_reported &&
+                     parsed.diagnostics.structured_call_count == parsed.tool_calls.size() &&
+                     parsed.diagnostics.fallback_reason == reason,
+                 std::string(message));
+}
+
+int check_reported(const std::string& text, const fi::ToolCallOutputContract& contract,
+                   ninfer::ToolCallParseFallbackReason reason, std::string_view intended_function,
+                   std::string_view message) {
+    return check_reported(fi::parse_qwen_tool_call_output(text, 64, contract), reason,
+                          intended_function, message);
+}
+
 int check_parameter_schema_mismatch(const fi::ToolCallOutputContract& contract,
                                     std::string_view parameter_name, std::string_view value,
                                     std::string_view expected_json_value,
@@ -214,18 +242,18 @@ int test_string_values_preserve_embedded_tool_markup() {
     return failures;
 }
 
-int test_unrepresentable_parameter_delimiters_fall_back() {
+int test_unrepresentable_parameter_delimiters_are_reported() {
     const auto contract = contract_for("bash", Json{{"command", Json{{"type", "string"}}}});
     const std::string unmatched_open =
         tool_call("bash", {{"command", "echo '<parameter=unterminated>'"}});
     const std::string standalone_close = tool_call("bash", {{"command", "echo '</parameter>'"}});
 
     int failures = 0;
-    failures += check_rejected(unmatched_open, contract,
-                               ninfer::ToolCallParseFallbackReason::MalformedStructure,
+    failures += check_reported(unmatched_open, contract,
+                               ninfer::ToolCallParseFallbackReason::MalformedStructure, "bash",
                                "unbalanced nested parameter open was silently repaired");
-    failures += check_rejected(standalone_close, contract,
-                               ninfer::ToolCallParseFallbackReason::MalformedStructure,
+    failures += check_reported(standalone_close, contract,
+                               ninfer::ToolCallParseFallbackReason::MalformedStructure, "bash",
                                "standalone parameter close was guessed to be string content");
     return failures;
 }
@@ -542,41 +570,124 @@ int test_unsupported_schema_uses_legacy_policy() {
     return failures;
 }
 
-int test_strict_structure_and_active_tool_set() {
+int test_recovery_of_strict_failures() {
     const auto contract = contract_for("configure", Json{{"value", Json{{"type", "string"}}}});
     int failures        = 0;
 
     const std::string malformed = "<tool_call>\n<function=configure>\n";
-    failures +=
-        check_rejected(malformed, contract, ninfer::ToolCallParseFallbackReason::MalformedStructure,
-                       "missing structural tags were accepted");
+    const auto truncated        = fi::parse_qwen_tool_call_output(malformed, 64, contract);
+    failures += check_reported(truncated, ninfer::ToolCallParseFallbackReason::MalformedStructure,
+                               "configure", "missing structural tags were accepted");
+    if (!truncated.tool_calls.empty()) {
+        const Json args = Json::parse(truncated.tool_calls.back().arguments_json);
+        failures += check(args.at("error").get<std::string>().find("ended before") !=
+                              std::string::npos,
+                          "a cut-off call was not reported as cut off");
+    }
 
     const std::string suffix = tool_call("configure", {{"value", "x"}}) + "\nextra answer";
-    failures +=
-        check_rejected(suffix, contract, ninfer::ToolCallParseFallbackReason::TrailingContent,
-                       "non-whitespace suffix was accepted");
+    const auto suffixed      = fi::parse_qwen_tool_call_output(suffix, 64, contract);
+    failures += check(suffixed.is_tool_call_response && suffixed.content.empty() &&
+                          suffixed.tool_calls.size() == 1 &&
+                          suffixed.tool_calls.front().name == "configure" &&
+                          suffixed.diagnostics.recovered &&
+                          suffixed.diagnostics.trailing_content_dropped &&
+                          !suffixed.diagnostics.malformed_call_reported &&
+                          suffixed.diagnostics.fallback_reason ==
+                              ninfer::ToolCallParseFallbackReason::TrailingContent,
+                      "a complete call followed by text did not keep the call and drop the text");
 
     const std::string missing_parameter_close =
         "<tool_call>\n<function=configure>\n<parameter=value>\nx\n"
         "</function>\n</tool_call>";
-    failures += check_rejected(missing_parameter_close, contract,
-                               ninfer::ToolCallParseFallbackReason::MalformedStructure,
-                               "missing parameter close was repaired");
+    const auto unclosed = fi::parse_qwen_tool_call_output(missing_parameter_close, 64, contract);
+    failures += check(unclosed.is_tool_call_response && unclosed.tool_calls.size() == 1 &&
+                          unclosed.tool_calls.front().arguments_json == "{\"value\":\"x\"}" &&
+                          unclosed.diagnostics.recovered_call_count == 1 &&
+                          !unclosed.diagnostics.malformed_call_reported,
+                      "a parameter closed by its function was not recovered");
 
     const std::string duplicate = tool_call("configure", {{"value", "first"}, {"value", "second"}});
-    failures +=
-        check_rejected(duplicate, contract, ninfer::ToolCallParseFallbackReason::DuplicateParameter,
-                       "duplicate parameter was silently overwritten");
+    failures += check_reported(duplicate, contract,
+                               ninfer::ToolCallParseFallbackReason::DuplicateParameter, "configure",
+                               "duplicate parameter was silently overwritten");
 
     const std::string unknown_tool = tool_call("other", {{"value", "x"}});
-    failures +=
-        check_rejected(unknown_tool, contract, ninfer::ToolCallParseFallbackReason::UndeclaredTool,
-                       "undeclared tool name was accepted");
+    const auto unknown             = fi::parse_qwen_tool_call_output(unknown_tool, 64, contract);
+    failures += check(unknown.is_tool_call_response && unknown.tool_calls.size() == 1 &&
+                          unknown.tool_calls.front().name == "other" &&
+                          unknown.diagnostics.recovered_call_count == 1 &&
+                          unknown.diagnostics.fallback_reason ==
+                              ninfer::ToolCallParseFallbackReason::UndeclaredTool,
+                      "an undeclared tool name was not handed to the client");
 
     const std::string invalid_name = tool_call("bad.name", {{"value", "x"}});
-    failures += check_rejected(invalid_name, kLegacyContract,
-                               ninfer::ToolCallParseFallbackReason::InvalidToolName,
+    failures += check_reported(invalid_name, kLegacyContract,
+                               ninfer::ToolCallParseFallbackReason::InvalidToolName, "",
                                "invalid function-name character was accepted");
+
+    const std::string prose = "Qwen wraps calls in <tool_call> tags.";
+    failures += check_rejected(prose, contract, ninfer::ToolCallParseFallbackReason::MalformedStructure,
+                               "prose that names the tag was turned into a call");
+    return failures;
+}
+
+// The three calls that ended agent sessions in the queue on 23.09, reduced to their shape.
+int test_queue_failures_are_recovered() {
+    const std::vector<std::string> definitions = {
+        tool_definition("alerts", Json::object()),
+        tool_definition("namespaces_list", Json::object()),
+        tool_definition("Grep", Json{{"pattern", Json{{"type", "string"}}},
+                                     {"-n", Json{{"type", "boolean"}}}}),
+        tool_definition("Bash", Json{{"command", Json{{"type", "string"}}}})};
+    const auto contract = contract_from_definitions(definitions);
+    int failures        = 0;
+
+    // A deferred tool the model had not loaded, called next to two declared ones.
+    const std::string three =
+        tool_call("alerts") + "\n" + tool_call("namespaces_list") + "\n" + tool_call("streams");
+    const auto parallel = fi::parse_qwen_tool_call_output(three, 64, *contract);
+    failures += check(parallel.is_tool_call_response && parallel.tool_calls.size() == 3 &&
+                          parallel.tool_calls[2].name == "streams" &&
+                          parallel.diagnostics.recovered_call_count == 1,
+                      "an undeclared third call discarded the two declared ones");
+
+    // A flag parameter with neither value nor close tag.
+    const std::string flag = "<tool_call>\n<function=Grep>\n<parameter=pattern>\nTODO\n</parameter>\n"
+                             "<parameter=-n>\n</function>\n</tool_call>";
+    const auto grep = fi::parse_qwen_tool_call_output(flag, 64, *contract);
+    failures += check(grep.is_tool_call_response && grep.tool_calls.size() == 1 &&
+                          grep.tool_calls.front().arguments_json == "{\"pattern\":\"TODO\"}" &&
+                          grep.diagnostics.recovered_call_count == 1 &&
+                          grep.diagnostics.empty_arguments_omitted == 1,
+                      "an unclosed empty flag was not recovered");
+
+    // Reasoning leaking into a parameter tag, then an imagined result and another call.
+    const std::string leak = tool_call("Bash", {{"command", "ls"}}) + "\n" +
+                             "<tool_call>\n<function=Bash>\n<parameter=command>\ngit status\n"
+                             "</parameter>\n<parameter<think>\nNo output.\n" +
+                             tool_call("Bash", {{"command", "rm -rf build"}});
+    const auto leaked = fi::parse_qwen_tool_call_output(leak, 64, *contract);
+    failures += check_reported(leaked, ninfer::ToolCallParseFallbackReason::MalformedStructure,
+                               "Bash", "a leaked reasoning tag was not reported");
+    failures += check(leaked.tool_calls.size() == 2 &&
+                          leaked.tool_calls.front().arguments_json == "{\"command\":\"ls\"}",
+                      "the complete call before the broken one was lost, or a later one ran");
+
+    bool every_split_matches = true;
+    for (const std::string* text : {&three, &flag, &leak}) {
+        const auto parsed = fi::parse_qwen_tool_call_output(*text, 64, *contract);
+        fi::ToolCallOutputDecoder bytewise(contract, 64);
+        std::string visible;
+        for (const char byte : *text) { visible += bytewise.feed(std::string_view(&byte, 1)); }
+        const auto terminal = bytewise.finish();
+        if (!visible.empty() || !terminal.content.empty() ||
+            terminal.tool_calls.size() != parsed.tool_calls.size() ||
+            terminal.diagnostics != parsed.diagnostics) {
+            every_split_matches = false;
+        }
+    }
+    failures += check(every_split_matches, "incremental recovery differs from whole-text recovery");
     return failures;
 }
 
@@ -591,9 +702,10 @@ int test_name_limits_and_non_strict_omissions() {
     int failures = 0;
     failures += check(anthropic.is_tool_call_response && anthropic.tool_calls.size() == 1,
                       "128-character Anthropic tool name was rejected");
-    failures += check(!openai.is_tool_call_response, "128-character OpenAI tool name was accepted");
-    failures +=
-        check(!too_long.is_tool_call_response, "129-character Anthropic tool name was accepted");
+    failures += check_reported(openai, ninfer::ToolCallParseFallbackReason::InvalidToolName, "",
+                               "128-character OpenAI tool name was accepted");
+    failures += check_reported(too_long, ninfer::ToolCallParseFallbackReason::InvalidToolName, "",
+                               "129-character Anthropic tool name was accepted");
 
     const std::string definition = tool_definition(
         "optional", Json{{"value", Json{{"type", "string"}}}}, Json::array({"value"}));
@@ -634,12 +746,17 @@ int test_conflicting_duplicate_tool_contracts_use_legacy_normalization() {
     return failures;
 }
 
-int test_all_or_nothing_structural_commit() {
+int test_partial_region_keeps_complete_calls() {
     const auto contract    = contract_for("configure", Json{{"flag", Json{{"type", "boolean"}}}});
     const std::string text = tool_call("configure", {{"flag", "true"}}) +
                              "\n<tool_call>\n<function=configure>\n<parameter=flag>\nfalse\n";
-    return check_rejected(text, contract, ninfer::ToolCallParseFallbackReason::MalformedStructure,
-                          "partially valid tool-call region was partially committed");
+    const auto parsed = fi::parse_qwen_tool_call_output(text, 64, contract);
+    int failures      = check_reported(parsed, ninfer::ToolCallParseFallbackReason::MalformedStructure,
+                                       "configure", "a cut-off second call was not reported");
+    failures += check(parsed.tool_calls.size() == 2 &&
+                          parsed.tool_calls.front().arguments_json == "{\"flag\":true}",
+                      "the complete first call was not kept");
+    return failures;
 }
 
 int test_incremental_valid_and_boolean() {
@@ -683,6 +800,14 @@ int test_incremental_fallback_preserves_bytes() {
     auto malformed_terminal = malformed.finish();
     restored += malformed_terminal.content;
 
+    const std::string prose = "prefix  \n<tool_call> is the tag";
+    fi::ToolCallOutputDecoder prose_decoder(std::make_shared<fi::ToolCallOutputContract>(), 64);
+    std::string prose_restored;
+    prose_restored += prose_decoder.feed(prose.substr(0, 12));
+    prose_restored += prose_decoder.feed(prose.substr(12));
+    auto prose_terminal = prose_decoder.finish();
+    prose_restored += prose_terminal.content;
+
     fi::ToolCallOutputDecoder ordinary(std::make_shared<fi::ToolCallOutputContract>(), 64);
     std::string ordinary_text;
     ordinary_text += ordinary.feed("ordinary text  ");
@@ -696,10 +821,16 @@ int test_incremental_fallback_preserves_bytes() {
     partial_restored += partial.finish().content;
 
     int failures = 0;
-    failures += check(restored == original && malformed_terminal.diagnostics.marker_seen &&
+    failures += check(restored == "prefix" && malformed_terminal.tool_calls.size() == 1 &&
+                          malformed_terminal.tool_calls.front().name == "malformed_tool_call" &&
+                          malformed_terminal.diagnostics.malformed_call_reported &&
                           malformed_terminal.diagnostics.fallback_reason ==
                               ninfer::ToolCallParseFallbackReason::MalformedStructure,
-                      "malformed incremental call lost raw bytes or fallback diagnostics");
+                      "malformed incremental call was not reported to the client");
+    failures += check(prose_restored == prose && prose_terminal.tool_calls.empty() &&
+                          prose_terminal.diagnostics.marker_seen &&
+                          !prose_terminal.diagnostics.recovered,
+                      "prose naming the tag lost raw bytes");
     failures += check(ordinary_text == "ordinary text  ",
                       "ordinary incremental output lost trailing whitespace");
     failures +=
@@ -773,12 +904,14 @@ int test_forced_call_decoder() {
     }
     {
         const auto [visible, terminal] = run("\n<parameter=taskId>\n1\n</par");
-        const std::string content       = visible + terminal.content;
-        failures += check(terminal.tool_calls.empty() && !terminal.diagnostics.forced_call_closed &&
-                              content.starts_with("\n<parameter=taskId>") &&
-                              content.find("<tool_call>") == std::string::npos &&
-                              content.find("<function=TaskUpdate>") == std::string::npos,
-                          "fallback content carried the prompt-owned opener or lost the model's text");
+        failures += check(visible.empty() && terminal.content.empty() &&
+                              terminal.tool_calls.size() == 1 &&
+                              terminal.tool_calls.front().name == "malformed_tool_call" &&
+                              Json::parse(terminal.tool_calls.front().arguments_json)
+                                      .value("intended_function", "") == "TaskUpdate" &&
+                              terminal.diagnostics.malformed_call_reported &&
+                              !terminal.diagnostics.forced_call_closed,
+                          "a cut-off forced call was not reported against its tool");
     }
     return failures;
 }
@@ -790,7 +923,7 @@ int main() {
     failures += test_multiple_calls();
     failures += test_declared_strings_preserve_text();
     failures += test_string_values_preserve_embedded_tool_markup();
-    failures += test_unrepresentable_parameter_delimiters_fall_back();
+    failures += test_unrepresentable_parameter_delimiters_are_reported();
     failures += test_declared_json_types();
     failures += test_boolean_boundary();
     failures += test_exact_integer_boundary();
@@ -798,10 +931,11 @@ int main() {
     failures += test_empty_declared_non_string_is_omitted();
     failures += test_schema_mismatches_remain_structured();
     failures += test_unsupported_schema_uses_legacy_policy();
-    failures += test_strict_structure_and_active_tool_set();
+    failures += test_recovery_of_strict_failures();
+    failures += test_queue_failures_are_recovered();
     failures += test_name_limits_and_non_strict_omissions();
     failures += test_conflicting_duplicate_tool_contracts_use_legacy_normalization();
-    failures += test_all_or_nothing_structural_commit();
+    failures += test_partial_region_keeps_complete_calls();
     failures += test_incremental_valid_and_boolean();
     failures += test_incremental_fallback_preserves_bytes();
     failures += test_incremental_embedded_parameter_markup();

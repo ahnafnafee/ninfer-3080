@@ -302,11 +302,20 @@ std::optional<OperationalRecord> render_tool_call_fallback(const RequestLogConte
         reason == ninfer::ToolCallParseFallbackReason::None) {
         return std::nullopt;
     }
-    return OperationalRecord{
-        .severity = OperationalSeverity::Warning,
-        .message  = "req#" + std::to_string(context.id) + " tool markup returned as text | " +
-                   pretty_code(ninfer::tool_call_parse_fallback_reason_name(reason)),
-    };
+    const ninfer::ToolCallParseDiagnostics& parse = outcome.tool_call_parse;
+    std::string message = "req#" + std::to_string(context.id);
+    if (parse.recovered) {
+        message += " tool markup recovered | " +
+                   pretty_code(ninfer::tool_call_parse_fallback_reason_name(reason)) + ", kept " +
+                   std::to_string(parse.recovered_call_count);
+        if (parse.malformed_call_reported) { message += ", malformed call reported"; }
+        if (parse.trailing_content_dropped) { message += ", trailing text dropped"; }
+    } else {
+        message += " tool markup returned as text | " +
+                   pretty_code(ninfer::tool_call_parse_fallback_reason_name(reason));
+    }
+    return OperationalRecord{.severity = OperationalSeverity::Warning,
+                             .message  = std::move(message)};
 }
 
 OperationalRecord render_request_failure(const RequestLogContext& context,
