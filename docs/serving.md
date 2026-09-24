@@ -85,8 +85,11 @@ staged <MiB>)` and the JSON record carries `vision_overlay`, including `exclusiv
 |---|---|
 | `GET /health` | process health |
 | `GET /v1/load` | serving capacity, current load, and monotonic token counters (see [Load](#load)) |
-| `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
-| `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
+| `GET /metrics` | Prometheus text with llama.cpp's `--metrics` series plus NInfer's (see [Metrics](#metrics)) |
+| `GET /slots` | llama.cpp-shaped lane table: one entry per lane, the first `running` marked processing |
+| `GET /props` | llama.cpp-shaped server properties: default sampling, context, lanes, modalities |
+| `GET /v1/models` | configured OpenAI model alias, effective `max_model_len` (also as `context_window`), and whether it accepts images |
+| `GET /v1/models/{id}` | lookup of the configured alias with the same fields |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
 | `POST /v1/responses` | OpenAI Responses Core generation, state, typed Items, and SSE |
 | `POST /v1/responses/input_tokens` | Responses prompt-token count without generation |
@@ -189,6 +192,20 @@ curl http://127.0.0.1:8080/v1/load -H 'Authorization: Bearer local-secret'
   several tokens per row. `decode_row_rounds` is the sum of decode batch sizes over `decode_rounds`.
 - Gauges and counters come from the snapshot the Engine publishes at execution boundaries, so they
   can trail the instant of the poll by up to one boundary.
+
+### Metrics
+
+`GET /metrics` renders the same snapshot as `/v1/load`, plus totals accumulated from completed
+requests, in the Prometheus text format. The `llamacpp:` series keep the names and meanings of
+llama.cpp's `--metrics`, so dashboards and autoscalers built for it read this server unchanged:
+`prompt_tokens_total` counts prompt tokens evaluated by prefill (reused prefixes excluded),
+`prompt_seconds_total` and `tokens_predicted_seconds_total` the prefill and decode time of completed
+requests, `tokens_predicted_total` their generated tokens, `n_decode_total` and
+`n_busy_slots_per_decode` the decode rounds and their average batch, `kv_cache_usage_ratio` and
+`kv_cache_tokens` the device KV occupancy, and `requests_processing` / `requests_deferred` the
+running and waiting requests. The `ninfer:` series add completed requests, admitted requests,
+prefix-cache hits, context-cache reuse, speculative drafts and acceptances, context-cache
+exhaustions and uptime.
 
 ## OpenAI Chat Completions
 

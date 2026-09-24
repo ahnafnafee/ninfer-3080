@@ -5,6 +5,7 @@
 #include "serve/operational_log.h"
 #include "serve/openai_responses_store.h"
 #include "serve/request_log.h"
+#include "serve/serve_metrics.h"
 #include "serve/serve_options.h"
 
 #include <httplib.h>
@@ -114,6 +115,10 @@ private:
     void handle_response_cancel(const httplib::Request& req, httplib::Response& res);
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
     void handle_load(const httplib::Request& req, httplib::Response& res) const;
+    void handle_metrics(const httplib::Request& req, httplib::Response& res) const;
+    void handle_slots(const httplib::Request& req, httplib::Response& res) const;
+    void handle_props(const httplib::Request& req, httplib::Response& res) const;
+    [[nodiscard]] LoadSample load_sample() const;
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
 
@@ -141,6 +146,7 @@ private:
     OpenAIResponsesStore openai_responses_store_;
     OperationalLog operational_log_;
     JsonlRequestLog request_jsonl_;
+    ServeMetrics metrics_;
     httplib::Server server_;
     std::atomic<std::uint64_t> request_seq_{0};
     std::mutex stats_mutex_;

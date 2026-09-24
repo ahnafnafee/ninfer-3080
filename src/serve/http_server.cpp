@@ -278,6 +278,7 @@ void HttpServer::record_request_done(const RequestLogContext& context,
                                      const GenerationOutcome& outcome) {
     request_jsonl_.write_request_done(context, outcome);
     operational_log_.request_done(context, outcome);
+    metrics_.record(outcome);
 }
 
 void HttpServer::record_request_failure(const RequestLogContext& context,
@@ -462,6 +463,15 @@ void HttpServer::register_routes() {
     server_.Get("/v1/load", [this](const httplib::Request& req, httplib::Response& res) {
         handle_load(req, res);
     });
+    server_.Get("/metrics", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_metrics(req, res);
+    });
+    server_.Get("/slots", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_slots(req, res);
+    });
+    server_.Get("/props", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_props(req, res);
+    });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });
@@ -508,18 +518,76 @@ void HttpServer::register_routes() {
     });
 }
 
-void HttpServer::handle_load(const httplib::Request&, httplib::Response& res) const {
+LoadSample HttpServer::load_sample() const {
     LoadSample sample;
     sample.uptime_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - attached_at_).count();
     sample.admitted_requests = service_->admitted_requests();
     sample.stats             = service_->runtime_stats();
+    return sample;
+}
+
+void HttpServer::handle_load(const httplib::Request&, httplib::Response& res) const {
     res.set_header("Cache-Control", "no-store");
-    res.set_content(make_load_report(load_capacity_, sample), "application/json");
+    res.set_content(make_load_report(load_capacity_, load_sample()), "application/json");
+}
+
+void HttpServer::handle_metrics(const httplib::Request&, httplib::Response& res) const {
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(metrics_.render(load_capacity_, load_sample()),
+                    "text/plain; version=0.0.4; charset=utf-8");
+}
+
+// llama.cpp-shaped lane table. The Engine publishes how many lanes are running, not which request
+// holds which lane, so the first `running` entries read as processing.
+void HttpServer::handle_slots(const httplib::Request&, httplib::Response& res) const {
+    const std::uint32_t running = service_->runtime_stats().running_requests;
+    const bool speculative      = options_.speculative.backend != ninfer::SpeculativeBackend::None;
+    nlohmann::json slots        = nlohmann::json::array();
+    for (std::uint32_t lane = 0; lane < load_capacity_.max_concurrency; ++lane) {
+        slots.push_back({{"id", lane},
+                         {"n_ctx", load_capacity_.max_context},
+                         {"speculative", speculative},
+                         {"is_processing", lane < running}});
+    }
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(slots.dump(), "application/json");
+}
+
+void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) const {
+    const ninfer::SamplingPreset preset = service_->sampling_defaults().for_mode(
+        options_.enable_thinking == false ? ninfer::SamplingMode::NonThinking
+                                          : ninfer::SamplingMode::Thinking);
+    const ninfer::SamplingOverrides& overrides = options_.sampling_overrides;
+    nlohmann::json params = {
+        {"n_predict", options_.default_max_tokens},
+        {"temperature", options_.greedy ? 0.0F : overrides.temperature.value_or(preset.temperature)},
+        {"top_k", overrides.top_k.value_or(preset.top_k)},
+        {"top_p", overrides.top_p.value_or(preset.top_p)},
+        {"min_p", overrides.min_p.value_or(preset.min_p)},
+        {"presence_penalty", overrides.presence_penalty.value_or(preset.presence_penalty)},
+        {"frequency_penalty", overrides.frequency_penalty.value_or(preset.frequency_penalty)},
+    };
+    params["seed"] = overrides.seed ? nlohmann::json(*overrides.seed) : nlohmann::json(-1);
+    const nlohmann::json props = {
+        {"default_generation_settings",
+         {{"n_ctx", load_capacity_.max_context},
+          {"speculative", options_.speculative.backend != ninfer::SpeculativeBackend::None},
+          {"params", std::move(params)}}},
+        {"total_slots", load_capacity_.max_concurrency},
+        {"model_alias", public_model_id_},
+        {"model_path", options_.artifact_path},
+        {"modalities", {{"vision", options_.enable_vision}, {"audio", false}}},
+        {"endpoint_slots", true},
+        {"endpoint_props", true},
+        {"endpoint_metrics", true},
+    };
+    res.set_content(props.dump(), "application/json");
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {
-    res.set_content(make_models_list(public_model_id_, unix_time_now(), options_.max_context),
+    res.set_content(make_models_list(public_model_id_, unix_time_now(), options_.max_context,
+                                     options_.enable_vision),
                     "application/json");
 }
 
@@ -534,7 +602,8 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
         write_openai_error(res, error);
         return;
     }
-    res.set_content(make_model_object(public_model_id_, unix_time_now(), options_.max_context),
+    res.set_content(make_model_object(public_model_id_, unix_time_now(), options_.max_context,
+                                      options_.enable_vision),
                     "application/json");
 }
 
