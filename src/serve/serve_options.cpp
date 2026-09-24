@@ -98,6 +98,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--mlp-a8-decode] [--no-prefill-a8] "
            "[--prefill-cublas [--no-prefill-cublas-projections]] [--lookup-ngram N] "
            "[--no-thinking] [--preserve-thinking] [--cors] [--no-webui] [--usage-chunk-choice] "
+           "[--structured-output] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
@@ -147,7 +148,9 @@ std::string serve_usage_text(const char* argv0) {
            "       sampler defaults come from the loaded model and resolved thinking mode; "
            "server flags and request fields override individual values.\n"
            "       --greedy forces temperature 0 (exact argmax).\n"
-           "       --no-webui stops serving a WebUI built in with NINFER_WEBUI_DIR on GET /.\n";
+           "       --no-webui stops serving a WebUI built in with NINFER_WEBUI_DIR on GET /.\n"
+           "       --structured-output accepts JSON and JSON Schema response formats; it reserves "
+           "the grammar masks and adds a grammar stage to every DFlash round.\n";
 }
 
 // "1,2,3" selects the ordered devices the model's pipeline stages run on; the first also holds the
@@ -446,6 +449,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.enable_cors = true;
         } else if (arg == "--no-webui") {
             options.enable_webui = false;
+        } else if (arg == "--structured-output") {
+            options.structured_output = true;
         } else if (arg == "--usage-chunk-choice") {
             options.usage_chunk_choice = true;
         } else if (arg == "--temperature") {

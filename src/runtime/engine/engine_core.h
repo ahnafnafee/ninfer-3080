@@ -65,6 +65,7 @@ public:
     EngineCore(Instance& instance, DeviceContext& device, const EngineOptions& options,
                ContextMachineCostModel context_cost)
         : instance_(instance), device_(device), max_context_(options.max_context),
+          structured_output_(options.structured_output),
           max_concurrency_(options.max_concurrency),
           max_outstanding_(static_cast<std::size_t>(options.max_concurrency) +
                            options.max_pending_requests),
@@ -170,6 +171,11 @@ public:
                       GenerationObservationOptions observation,
                       Clock::time_point pending_deadline = {}) {
         const Clock::time_point submitted = Clock::now();
+        if (options.execution.structured_output.kind != StructuredOutputKind::None &&
+            !structured_output_) {
+            throw std::invalid_argument(
+                "structured output requires an Engine started with structured_output");
+        }
         if (pending_deadline == Clock::time_point{}) {
             pending_deadline = submitted + pending_timeout_;
         }
@@ -2073,6 +2079,7 @@ private:
     Instance& instance_;
     DeviceContext& device_;
     const std::uint32_t max_context_;
+    const bool structured_output_;
     const std::uint32_t max_concurrency_;
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;

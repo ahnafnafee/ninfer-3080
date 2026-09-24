@@ -125,6 +125,7 @@ for mode in a.modes:
         "0",
         "--request-log-jsonl",
         str(W / f"{mode}-requests.jsonl"),
+        "--structured-output",
     ]
     if mode.startswith("mtp"):
         cmd += ["--spec", "mtp", "--draft-tokens", str(a.draft_tokens or 5)]

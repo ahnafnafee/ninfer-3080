@@ -299,12 +299,15 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                                              {dimension(parameters.model.resources().public_token_count),
                                               static_cast<std::int32_t>(plan.max_concurrency)},
                                              "sampling token counts");
-        out.grammar_masks       = add_tensor(
-            builder, DType::I32,
-            {static_cast<std::int32_t>((parameters.model.resources().public_token_count + 31) / 32),
-             static_cast<std::int32_t>(plan.draft_window + 1),
-             static_cast<std::int32_t>(plan.max_concurrency)},
-            "structured output token masks");
+        if (plan.structured_output) {
+            out.grammar_masks = add_tensor(
+                builder, DType::I32,
+                {static_cast<std::int32_t>((parameters.model.resources().public_token_count + 31) /
+                                           32),
+                 static_cast<std::int32_t>(plan.draft_window + 1),
+                 static_cast<std::int32_t>(plan.max_concurrency)},
+                "structured output token masks");
+        }
         const auto config_words = static_cast<std::int32_t>(
             (sizeof(ops::SamplingConfig) + sizeof(std::int32_t) - 1) / sizeof(std::int32_t));
         out.sampling_config = add_tensor(
@@ -965,6 +968,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->features            = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
     impl->causal_scoring      = inputs.causal_scoring;
+    impl->structured_output   = inputs.structured_output;
     impl->device              = inputs.device;
     impl->context_cache       = inputs.context_cache;
     impl->kv_storage          = inputs.kv_storage;
@@ -1081,6 +1085,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .features            = models::load_options(options),
         .use_cuda_graph      = options.use_cuda_graph,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
+        .structured_output   = options.structured_output,
         .device              = options.device,
         .context_cache       = options.context_cache,
     };

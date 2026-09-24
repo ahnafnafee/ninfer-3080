@@ -86,6 +86,12 @@ response content. This requires no model conversion or additional weights. Ordin
 MTP, DFlash, and DFlash2 share the same target sampling contract, including CUDA Graphs,
 streaming, prefix reuse, and mixed constrained/unconstrained concurrent requests.
 
+It is opt-in: start the server with `--structured-output` (the CLI's `--json` and `--json-schema`
+enable it for their run). That reserves one grammar mask plane per draft position and lane, and a
+DFlash or DFlash2 round then carries a host grammar stage even when no request is constrained.
+Without it the server keeps the default path unchanged and refuses a constrained request with HTTP
+400 `response_format_not_supported`.
+
 Chat Completions accepts:
 
 ```json
@@ -1084,6 +1090,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--default-max-tokens N` | output limit when omitted by a request; `0` generates until the context runs out | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--no-webui` | stop serving a WebUI built in with `NINFER_WEBUI_DIR` | served when built in |
+| `--structured-output` | accept JSON and JSON Schema response formats (see [Structured output](#structured-output)) | off |
 | `--default-reasoning-effort E` | effort for requests that name none: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
 | `--vision-residency resident\|overlay` | `overlay` keeps the Vision tower in pinned host memory and encodes each image inside a window borrowed from the evict-ranked text weight tail, so `--vision` no longer reserves device memory and `--kv-capacity auto` resolves the no-vision capacity; requires `--vision` and CUDA virtual memory management | `resident` |

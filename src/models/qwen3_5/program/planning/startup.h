@@ -99,9 +99,10 @@ struct SequencePlanningInputs {
     ProposalHead proposal_head              = ProposalHead::Full;
     ops::RopeYarn rope_yarn;
     models::LoadOptions features;
-    bool use_cuda_graph = true;
-    bool causal_scoring = false;
-    int device          = 0;
+    bool use_cuda_graph    = true;
+    bool causal_scoring    = false;
+    bool structured_output = false;
+    int device             = 0;
     ContextCacheOptions context_cache;
 };
 
@@ -123,9 +124,10 @@ struct SequencePlanImpl {
     ProposalHead proposal_head              = ProposalHead::Full;
     ops::RopeYarn rope_yarn;
     models::LoadOptions features;
-    bool use_cuda_graph = true;
-    bool causal_scoring = false;
-    int device          = 0;
+    bool use_cuda_graph    = true;
+    bool causal_scoring    = false;
+    bool structured_output = false;
+    int device             = 0;
     ContextCacheOptions context_cache;
     PersistentLayout persistent;
     WorkspacePlan workspace;

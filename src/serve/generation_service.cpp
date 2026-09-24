@@ -270,6 +270,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.mtp_experts_q4           = options.mtp_experts_q4;
     engine_options.gdn_state_fp16           = options.gdn_state_fp16;
     engine_options.rope_yarn                = options.rope_yarn;
+    engine_options.structured_output        = options.structured_output;
     engine_options.wddm_evictable_budget    = options.wddm_evictable_budget;
     engine_options.mlp_a8_decode            = options.mlp_a8_decode;
     engine_options.prefill_a8               = options.prefill_a8;
@@ -361,6 +362,14 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
                                                 ContextCacheHints context_cache,
                                                 CacheParticipation cache_participation,
                                                 DeadlinePolicy deadline_policy) const {
+    if (request.structured_output.kind != StructuredOutputKind::None &&
+        !options_.structured_output) {
+        ApiError error;
+        error.message = "structured output requires the server to start with --structured-output";
+        error.param   = "response_format";
+        error.code    = "response_format_not_supported";
+        throw ApiException(std::move(error));
+    }
     PreparedRequest prepared;
     const ResolvedPromptSemantics semantics = resolve_prompt_semantics(request, options_);
     ninfer::RequestOptions request_options  = to_request_options(
