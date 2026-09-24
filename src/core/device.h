@@ -135,6 +135,8 @@ struct DeviceContext {
     int multiprocessor_count() const noexcept;
     DeviceExecutionView execution_view() const noexcept;
     std::size_t total_vram() const noexcept;
+    // The CUDA synchronization schedule in effect: spin, blocking, yield, or auto.
+    const char* sync_mode() const;
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] bool model_parallel() const noexcept;
     // Rank `index`'s resources. Throws std::out_of_range past the end.

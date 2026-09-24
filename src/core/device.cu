@@ -3,12 +3,37 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ninfer {
 namespace {
+
+struct SyncSchedule {
+    std::string_view name;
+    unsigned int flags;
+};
+
+constexpr SyncSchedule kSyncSchedules[] = {
+    {"spin", cudaDeviceScheduleSpin},
+    {"blocking", cudaDeviceScheduleBlockingSync},
+    {"yield", cudaDeviceScheduleYield},
+    {"auto", cudaDeviceScheduleAuto},
+};
+
+// Unset keeps CUDA's own default (auto), which spins while the host has more cores than active
+// contexts.
+std::optional<unsigned int> sync_schedule_from_environment() {
+    const char* value = std::getenv("NINFER_CUDA_SYNC");
+    if (value == nullptr) { return std::nullopt; }
+    for (const auto& schedule : kSyncSchedules) {
+        if (schedule.name == value) { return schedule.flags; }
+    }
+    throw std::invalid_argument("NINFER_CUDA_SYNC must be spin, blocking, yield, or auto");
+}
 
 std::string cuda_error_message(const char* prefix, cudaError_t err) {
     return std::string(prefix) + ": " + cudaGetErrorName(err) + ": " + cudaGetErrorString(err);
@@ -65,6 +90,7 @@ DeviceContext::DeviceContext(int device_id)
     : DeviceContext(std::span<const int>(&device_id, 1)) {}
 
 DeviceContext::DeviceContext(std::span<const int> device_ids) {
+    const std::optional<unsigned int> sync_flags = sync_schedule_from_environment();
     int count       = 0;
     cudaError_t err = cudaGetDeviceCount(&count);
     if (err != cudaSuccess) {
@@ -99,6 +125,12 @@ DeviceContext::DeviceContext(std::span<const int> device_ids) {
             err                = cudaSetDevice(endpoint.device);
             if (err != cudaSuccess) {
                 throw std::runtime_error(cuda_error_message("cudaSetDevice failed", err));
+            }
+            if (sync_flags.has_value()) {
+                err = cudaSetDeviceFlags(*sync_flags);
+                if (err != cudaSuccess) {
+                    throw std::runtime_error(cuda_error_message("cudaSetDeviceFlags failed", err));
+                }
             }
             err = cudaGetDeviceProperties(&endpoint.props, endpoint.device);
             if (err != cudaSuccess) {
@@ -295,6 +327,19 @@ DeviceExecutionView DeviceContext::execution_view() const noexcept {
 }
 
 std::size_t DeviceContext::total_vram() const noexcept { return props.totalGlobalMem; }
+
+const char* DeviceContext::sync_mode() const {
+    bind_to_current_thread();
+    unsigned int flags    = 0;
+    const cudaError_t err = cudaGetDeviceFlags(&flags);
+    if (err != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaGetDeviceFlags failed", err));
+    }
+    for (const auto& schedule : kSyncSchedules) {
+        if ((flags & cudaDeviceScheduleMask) == schedule.flags) { return schedule.name.data(); }
+    }
+    throw std::runtime_error("unknown CUDA synchronization schedule");
+}
 
 std::size_t DeviceContext::size() const noexcept { return endpoints_.size(); }
 
