@@ -370,14 +370,10 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         const int producer_row0 = warp * 16 + gid;
 #pragma unroll
         for (int g = 0; g < Groups; ++g) {
-            float qs0     = (lid == 0 && producer_row0 < RowCount)
-                                ? q_scale_tmp[producer_row0 * Groups + g]
-                                : 0.0f;
-            float qs1     = (lid == 0 && producer_row0 + 8 < RowCount)
-                                ? q_scale_tmp[(producer_row0 + 8) * Groups + g]
-                                : 0.0f;
-            q_scale_r0[g] = __shfl_sync(FullMask, qs0, gid * 4);
-            q_scale_r1[g] = __shfl_sync(FullMask, qs1, gid * 4);
+            q_scale_r0[g] =
+                producer_row0 < RowCount ? q_scale_tmp[producer_row0 * Groups + g] : 0.0f;
+            q_scale_r1[g] =
+                producer_row0 + 8 < RowCount ? q_scale_tmp[(producer_row0 + 8) * Groups + g] : 0.0f;
         }
     }
     __syncthreads();
@@ -611,14 +607,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     }
                     const int keya = nt * 8 + 2 * lid;
                     const int keyb = keya + 1;
-                    float ka       = 0.0f;
-                    float kb2      = 0.0f;
-                    if (gid == 0) {
-                        ka  = __half2float(k_scale_s[keya * Groups + g]);
-                        kb2 = __half2float(k_scale_s[keyb * Groups + g]);
-                    }
-                    ka  = __shfl_sync(FullMask, ka, lid);
-                    kb2 = __shfl_sync(FullMask, kb2, lid);
+                    const float ka  = __half2float(k_scale_s[keya * Groups + g]);
+                    const float kb2 = __half2float(k_scale_s[keyb * Groups + g]);
                     score[nt][0] += q_scale_r0[g] * ka * static_cast<float>(c0);
                     score[nt][1] += q_scale_r0[g] * kb2 * static_cast<float>(c1);
                     score[nt][2] += q_scale_r1[g] * ka * static_cast<float>(c2);
@@ -713,15 +703,10 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 const int key   = k0 + key_l;
                 __half* dst     = &v_f16[key_l * D + causal_small_t_tc_swz(key_l, d)];
                 if (key >= split_start && key < split_end) {
-                    // dc == lane here, so a value group spans eight consecutive lanes under the
-                    // INT8 G64 coding and four under the packed G32 one.
-                    constexpr int VLanesPerGroup = PackedValues ? 4 : 8;
-                    const int grp = PackedValues ? (d >> 5) : (d >> 6);
-                    float vs      = 0.0f;
-                    if ((lane & (VLanesPerGroup - 1)) == 0) {
-                        vs = __half2float(value_scale_row(key_l)[grp]);
-                    }
-                    vs = __shfl_sync(FullMask, vs, lane & ~(VLanesPerGroup - 1));
+                    // The lanes of one value group read the same scale: a shared-memory broadcast,
+                    // where a shuffle from a computed lane costs an out-of-line call.
+                    const int grp  = PackedValues ? (d >> 5) : (d >> 6);
+                    const float vs = __half2float(value_scale_row(key_l)[grp]);
                     // f16 loaders, because dst is __half* and this tile feeds mma_f16. The bf16
                     // loaders are the same width, so using them here compiles and silently
                     // reinterprets every value.

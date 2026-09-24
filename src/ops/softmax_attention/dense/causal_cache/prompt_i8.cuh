@@ -371,10 +371,8 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
         const int scale_row1 = scale_row0 + 8;
 #pragma unroll
         for (int grp = 0; grp < Groups - 2; ++grp) {
-            float qs0       = lid == 0 ? q_scale[scale_row0 * Groups + grp] : 0.0f;
-            float qs1       = lid == 0 ? q_scale[scale_row1 * Groups + grp] : 0.0f;
-            q_scale_r0[grp] = __shfl_sync(FullMask, qs0, gid * 4);
-            q_scale_r1[grp] = __shfl_sync(FullMask, qs1, gid * 4);
+            q_scale_r0[grp] = q_scale[scale_row0 * Groups + grp];
+            q_scale_r1[grp] = q_scale[scale_row1 * Groups + grp];
         }
     }
 
@@ -409,10 +407,8 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
                 } else {
                     const int scale_row0 = row_base + gid;
                     const int scale_row1 = scale_row0 + 8;
-                    qs0                  = lid == 0 ? q_scale[scale_row0 * Groups + grp] : 0.0f;
-                    qs1                  = lid == 0 ? q_scale[scale_row1 * Groups + grp] : 0.0f;
-                    qs0                  = __shfl_sync(FullMask, qs0, gid * 4);
-                    qs1                  = __shfl_sync(FullMask, qs1, gid * 4);
+                    qs0                  = q_scale[scale_row0 * Groups + grp];
+                    qs1                  = q_scale[scale_row1 * Groups + grp];
                 }
 
                 unsigned af[GroupKc][4];
@@ -439,16 +435,12 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
                         mma_s8(c0, c1, c2, c3, af[kk][0], af[kk][1], af[kk][2], af[kk][3], bf[0],
                                bf[1]);
                     }
+                    // The eight lanes sharing a lid read one address: a shared-memory broadcast,
+                    // where a shuffle from a computed lane costs an out-of-line call.
                     const int keya = nt * 8 + 2 * lid;
                     const int keyb = keya + 1;
-                    float ks0      = 0.0f;
-                    float ks1      = 0.0f;
-                    if (gid == 0) {
-                        ks0 = __half2float(k_scale_s[keya * Groups + grp]);
-                        ks1 = __half2float(k_scale_s[keyb * Groups + grp]);
-                    }
-                    ks0          = __shfl_sync(FullMask, ks0, lid);
-                    ks1          = __shfl_sync(FullMask, ks1, lid);
+                    const float ks0 = __half2float(k_scale_s[keya * Groups + grp]);
+                    const float ks1 = __half2float(k_scale_s[keyb * Groups + grp]);
                     score[nt][0] = __fmaf_rn(qs0 * ks0, static_cast<float>(c0), score[nt][0]);
                     score[nt][1] = __fmaf_rn(qs0 * ks1, static_cast<float>(c1), score[nt][1]);
                     score[nt][2] = __fmaf_rn(qs1 * ks0, static_cast<float>(c2), score[nt][2]);
@@ -540,17 +532,10 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
                 const int key   = k0 + key_l;
                 __half* dst     = &v_f16[key_l * D + causal_prompt_swz(key_l, d)];
                 if (key <= max_query_abs) {
-                    // dc == lane here, so a value group spans D/8/VGroups consecutive lanes:
-                    // eight for the INT8 G64 coding and four for the packed G32 one. One lane per
-                    // group loads the scale and broadcasts it to the rest of that group.
-                    constexpr int VLanesPerGroup = PackedValues ? 4 : 8;
-                    const int grp = PackedValues ? (d >> 5) : (d >> 6);
-                    __half vs     = __float2half_rn(0.0f);
-                    if ((lane & (VLanesPerGroup - 1)) == 0) {
-                        vs = v_scale_s[key_l * VGroups + grp];
-                    }
-                    vs = __shfl_sync(FullMask, vs, lane & ~(VLanesPerGroup - 1));
-                    const float vsf = __half2float(vs);
+                    // The lanes of one value group read the same scale: a shared-memory broadcast,
+                    // where a shuffle from a computed lane costs an out-of-line call.
+                    const int grp   = PackedValues ? (d >> 5) : (d >> 6);
+                    const float vsf = __half2float(v_scale_s[key_l * VGroups + grp]);
 #if NINFER_PROMPT_I8_ABLATE >= 2
                     store_vec(dst, make_int4(0, 0, 0, 0));
 #else
