@@ -15,6 +15,15 @@ namespace {
 template <int Cols, int FullSlabs, int Stride>
 void launch_split2(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t stream) {
     constexpr int kThreads = 2 * 32;
+    if constexpr (Cols >= kQ5SplitRowsFromCols) {
+        const dim3 grid(static_cast<unsigned>(div_up(residual_out.ne[0], 2)), 1u, 1u);
+        q5_rowsplit_gemm_simt_split2_rows_kernel<Q5RowSplitSimtSchedule, 2, Cols, FullSlabs, Stride,
+                                                 true><<<grid, kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
+            static_cast<const std::uint8_t*>(w.qhigh), static_cast<const std::uint8_t*>(w.scales),
+            static_cast<__nv_bfloat16*>(residual_out.data), residual_out.ne[0], w.padded_shape[1]);
+        return;
+    }
     const dim3 grid(static_cast<unsigned>(residual_out.ne[0]), 1u, 1u);
     q5_rowsplit_gemm_simt_split2_kernel<Q5RowSplitSimtSchedule, Cols, FullSlabs, Stride, false, 0,
                                         true><<<grid, kThreads, 0, stream>>>(

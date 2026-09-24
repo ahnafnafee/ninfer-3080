@@ -179,6 +179,19 @@ void launch_q5_split4(const Tensor& x, const Weight& weight, Tensor& value, Tens
                       cudaStream_t stream) {
     constexpr int kThreads    = 4 * 32;
     const std::int32_t out_ld = static_cast<std::int32_t>(value.nb[1] / sizeof(__nv_bfloat16));
+    if constexpr (Cols >= kQ5SplitRowsFromCols) {
+        const dim3 grid(static_cast<unsigned>(div_up(kValueZRows, 2)), 1u, 1u);
+        q5_rowsplit_gemm_simt_split4_rows_kernel<Q5RowSplitSimtSchedule, 2, Cols, 5, kHidden, true,
+                                                 kValueRows><<<grid, kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.qhigh),
+            static_cast<const std::uint8_t*>(weight.scales),
+            static_cast<__nv_bfloat16*>(value.data), static_cast<__nv_bfloat16*>(z.data),
+            kValueZRows, out_ld, weight.padded_shape[1]);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     const dim3 grid(static_cast<unsigned>(kValueZRows), 1u, 1u);
     q5_rowsplit_gemm_simt_split4_kernel<Q5RowSplitSimtSchedule, Cols, 5, kHidden, true, kValueRows>
         <<<grid, kThreads, 0, stream>>>(static_cast<const __nv_bfloat16*>(x.data),

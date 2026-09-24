@@ -150,9 +150,18 @@ q5_simt_consume_slab(const __nv_bfloat16* __restrict__ x0, std::int64_t xslab, s
     }
 }
 
+// The occupancy targets of the split kernels scale with the column tile because their accumulators
+// do. At 16 split2 blocks per SM ptxas gets 64 registers and at 10 split4 blocks 51, which the wide
+// tiles cannot hold: they spill, and on kernels this bandwidth-bound the spill costs more than the
+// extra resident warps return. Narrow tiles fit and keep the warps.
+template <int kTt, int kStride>
+inline constexpr int kQ5Split2BlocksPerSm = (kTt <= 3 || (kStride <= 6144 && kTt <= 6)) ? 16 : 8;
+template <int kTt>
+inline constexpr int kQ5Split4BlocksPerSm = kTt <= 5 ? 10 : 8;
+
 template <class SC, int kTt, int kFullSlabs, int kStride, bool SplitOutput = false,
           int SplitRow = 0, bool AddResidual = false>
-__launch_bounds__(64, 16) __global__
+__launch_bounds__(64, (kQ5Split2BlocksPerSm<kTt, kStride>)) __global__
     void q5_rowsplit_gemm_simt_split2_kernel(const __nv_bfloat16* __restrict__ x,
                                              const std::uint8_t* __restrict__ codes,
                                              const std::uint8_t* __restrict__ high,
@@ -281,7 +290,7 @@ struct Q5Split4StoreEpilogue {
 template <class SC, int kTt, int kFullSlabs, int kStride, bool SplitOutput = false,
           int SplitRow = 0, class Epilogue = Q5Split4StoreEpilogue, bool TriggerPdl = false,
           bool JoinPdl = false>
-__launch_bounds__(128, 10) __global__ void q5_rowsplit_gemm_simt_split4_kernel(
+__launch_bounds__(128, kQ5Split4BlocksPerSm<kTt>) __global__ void q5_rowsplit_gemm_simt_split4_kernel(
     const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ high, const std::uint8_t* __restrict__ scales,
     __nv_bfloat16* __restrict__ out, __nv_bfloat16* __restrict__ out_tail, std::int32_t n,
@@ -404,6 +413,206 @@ __launch_bounds__(128, 10) __global__ void q5_rowsplit_gemm_simt_split4_kernel(
         }
     }
     if constexpr (JoinPdl) { pdl::wait_for_dependencies(); }
+}
+
+// Multi-row split kernels. A CTA owning one output row widens each bf16 activation for exactly one
+// multiply, so the conversion is paired one to one with every FFMA; kRows rows per CTA feed kRows
+// FFMAs from one widened value and one activation load. The K split, the dequant and the
+// accumulation order are the single-row kernels', so every row is bit-identical to theirs. Rows
+// past a ragged end read row0's weights and are dropped at the store.
+//
+// The two-row kernels take over at eight columns, where the saved conversions first outweigh the
+// extra accumulators: below it the single-row kernels win or tie.
+inline constexpr int kQ5SplitRowsFromCols = 8;
+
+template <int kRows>
+__device__ __forceinline__ void
+q5_split_load_rows(const std::uint8_t* __restrict__ codes, const std::uint8_t* __restrict__ high,
+                   const std::uint8_t* __restrict__ scales, int row0, int rows_here, int kg_padded,
+                   int slab, int chunk, int lane, float (&w)[kRows][8]) {
+    const int group_in_slab = chunk * 4 + (lane >> 3);
+    const __half2 bias      = __half2half2(__ushort_as_half(0x6410)); // 1040.0
+#pragma unroll
+    for (int r = 0; r < kRows; ++r) {
+        const std::int64_t row = row0 + (r < rows_here ? r : 0);
+        const std::uint8_t* code_phase =
+            codes + row * kg_padded * 32 + static_cast<std::int64_t>(slab) * 512 + chunk * 128 +
+            lane * 4;
+        const std::uint8_t* high_phase =
+            high + row * kg_padded * Q5RowSplitSimtSchedule::kHighBytesPerGroup +
+            static_cast<std::int64_t>(slab) * 128 + chunk * 32 + lane;
+        std::uint32_t scale_bits = 0;
+        if ((lane & 7) == 0) {
+            scale_bits = *reinterpret_cast<const std::uint16_t*>(
+                scales + row * kg_padded * 2 +
+                (static_cast<std::int64_t>(slab) * 16 + group_in_slab) * 2);
+        }
+        scale_bits = __shfl_sync(0xffffffffu, scale_bits, lane & ~7);
+        const std::uint32_t word = *reinterpret_cast<const std::uint32_t*>(code_phase);
+        const std::uint32_t hc   = static_cast<std::uint32_t>(*high_phase) ^ 0xffu;
+        const float scale        = __half2float(__ushort_as_half(scale_bits));
+#pragma unroll
+        for (int p = 0; p < 4; ++p) {
+            std::uint32_t bits = ((word >> (4 * p)) & 0x000f000fu) | 0x64006400u;
+            bits |= (((hc >> p) & 1u) << 4) | (((hc >> (p + 4)) & 1u) << 20);
+            const __half2 h = __hsub2(half2_from_bits(bits), bias);
+            const float2 f  = __half22float2(h);
+            w[r][p]         = f.x * scale;
+            w[r][p + 4]     = f.y * scale;
+        }
+    }
+}
+
+template <int kRows, int kTt, int kStride>
+__device__ __forceinline__ void q5_split_accumulate_rows(const __nv_bfloat16* __restrict__ x,
+                                                         std::int64_t xoff,
+                                                         const float (&w)[kRows][8],
+                                                         float (&acc)[kRows][kTt]) {
+#pragma unroll
+    for (int tt = 0; tt < kTt; ++tt) {
+        const uint4 xv  = load_vec<uint4>(x + static_cast<std::int64_t>(tt) * kStride + xoff);
+        const float2 f0 = bf16x2_bits_to_float2(xv.x);
+        const float2 f1 = bf16x2_bits_to_float2(xv.y);
+        const float2 f2 = bf16x2_bits_to_float2(xv.z);
+        const float2 f3 = bf16x2_bits_to_float2(xv.w);
+#pragma unroll
+        for (int r = 0; r < kRows; ++r) {
+            acc[r][tt] = fmaf(w[r][0], f0.x, acc[r][tt]);
+            acc[r][tt] = fmaf(w[r][1], f0.y, acc[r][tt]);
+            acc[r][tt] = fmaf(w[r][2], f1.x, acc[r][tt]);
+            acc[r][tt] = fmaf(w[r][3], f1.y, acc[r][tt]);
+            acc[r][tt] = fmaf(w[r][4], f2.x, acc[r][tt]);
+            acc[r][tt] = fmaf(w[r][5], f2.y, acc[r][tt]);
+            acc[r][tt] = fmaf(w[r][6], f3.x, acc[r][tt]);
+            acc[r][tt] = fmaf(w[r][7], f3.y, acc[r][tt]);
+        }
+    }
+}
+
+template <class SC, int kRows, int kTt, int kFullSlabs, int kStride, bool AddResidual = false>
+__launch_bounds__(64, 8) __global__ void q5_rowsplit_gemm_simt_split2_rows_kernel(
+    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const std::uint8_t* __restrict__ high, const std::uint8_t* __restrict__ scales,
+    __nv_bfloat16* __restrict__ out, std::int32_t n, std::int32_t padded_k) {
+    static_assert(std::is_same_v<SC, Q5RowSplitSimtSchedule>, "multi-row split2 is Q5-only");
+    static_assert(kRows >= 2 && kRows * kTt <= 32, "multi-row split2 stores from one warp");
+
+    __shared__ float s_part[2][kRows][kTt];
+
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const int part = static_cast<int>(threadIdx.x) >> 5;
+    const int row0 = static_cast<int>(blockIdx.x) * kRows;
+    if (row0 >= n) { return; }
+    const int rows_here = min(kRows, n - row0);
+    const int kg_padded = padded_k / Q5RowSplitStorage::kGroupK;
+
+    float acc[kRows][kTt];
+#pragma unroll
+    for (int r = 0; r < kRows; ++r) {
+#pragma unroll
+        for (int tt = 0; tt < kTt; ++tt) { acc[r][tt] = 0.0f; }
+    }
+
+#pragma unroll
+    for (int s = 0; s < kFullSlabs; ++s) {
+#pragma unroll
+        for (int local = 0; local < 2; ++local) {
+            const int chunk = part * 2 + local;
+            float w[kRows][8];
+            q5_split_load_rows<kRows>(codes, high, scales, row0, rows_here, kg_padded, s, chunk,
+                                      lane, w);
+            q5_split_accumulate_rows<kRows, kTt, kStride>(
+                x, static_cast<std::int64_t>(s) * 1024 + chunk * 256 + lane * 8, w, acc);
+        }
+    }
+
+#pragma unroll
+    for (int r = 0; r < kRows; ++r) {
+#pragma unroll
+        for (int tt = 0; tt < kTt; ++tt) {
+            const float a = warp_reduce_sum(acc[r][tt]);
+            if (lane == 0) { s_part[part][r][tt] = a; }
+        }
+    }
+
+    __syncthreads();
+
+    if (part == 0 && lane < kRows * kTt) {
+        const int r  = lane / kTt;
+        const int tt = lane - r * kTt;
+        if (r < rows_here) {
+            const std::int64_t index = static_cast<std::int64_t>(tt) * n + row0 + r;
+            float sum                = s_part[0][r][tt] + s_part[1][r][tt];
+            if constexpr (AddResidual) { sum += __bfloat162float(out[index]); }
+            out[index] = __float2bfloat16(sum);
+        }
+    }
+}
+
+template <class SC, int kRows, int kTt, int kFullSlabs, int kStride, bool SplitOutput = false,
+          int SplitRow = 0>
+__launch_bounds__(128, 6) __global__ void q5_rowsplit_gemm_simt_split4_rows_kernel(
+    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const std::uint8_t* __restrict__ high, const std::uint8_t* __restrict__ scales,
+    __nv_bfloat16* __restrict__ out, __nv_bfloat16* __restrict__ out_tail, std::int32_t n,
+    std::int32_t out_ld, std::int32_t padded_k) {
+    static_assert(std::is_same_v<SC, Q5RowSplitSimtSchedule>, "multi-row split4 is Q5-only");
+    static_assert(kRows >= 2 && kRows * kTt <= 32, "multi-row split4 stores from one warp");
+    static_assert(!SplitOutput || SplitRow > 0,
+                  "split-output Q5 split4 requires a positive compile-time seam");
+
+    __shared__ float s_part[4][kRows][kTt];
+
+    const int lane  = static_cast<int>(threadIdx.x) & 31;
+    const int chunk = static_cast<int>(threadIdx.x) >> 5;
+    const int row0  = static_cast<int>(blockIdx.x) * kRows;
+    if (row0 >= n) { return; }
+    const int rows_here = min(kRows, n - row0);
+    const int kg_padded = padded_k / Q5RowSplitStorage::kGroupK;
+
+    float acc[kRows][kTt];
+#pragma unroll
+    for (int r = 0; r < kRows; ++r) {
+#pragma unroll
+        for (int tt = 0; tt < kTt; ++tt) { acc[r][tt] = 0.0f; }
+    }
+
+#pragma unroll
+    for (int s = 0; s < kFullSlabs; ++s) {
+        float w[kRows][8];
+        q5_split_load_rows<kRows>(codes, high, scales, row0, rows_here, kg_padded, s, chunk, lane,
+                                  w);
+        q5_split_accumulate_rows<kRows, kTt, kStride>(
+            x, static_cast<std::int64_t>(s) * 1024 + chunk * 256 + lane * 8, w, acc);
+    }
+
+#pragma unroll
+    for (int r = 0; r < kRows; ++r) {
+#pragma unroll
+        for (int tt = 0; tt < kTt; ++tt) {
+            const float a = warp_reduce_sum(acc[r][tt]);
+            if (lane == 0) { s_part[chunk][r][tt] = a; }
+        }
+    }
+
+    __syncthreads();
+
+    if (chunk == 0 && lane < kRows * kTt) {
+        const int r  = lane / kTt;
+        const int tt = lane - r * kTt;
+        if (r < rows_here) {
+            float sum = 0.0f;
+#pragma unroll
+            for (int p = 0; p < 4; ++p) { sum += s_part[p][r][tt]; }
+            const int row = row0 + r;
+            if (SplitOutput && row >= SplitRow) {
+                out_tail[static_cast<std::int64_t>(tt) * (n - SplitRow) + row - SplitRow] =
+                    __float2bfloat16(sum);
+            } else {
+                out[static_cast<std::int64_t>(tt) * out_ld + row] = __float2bfloat16(sum);
+            }
+        }
+    }
 }
 
 // full_slabs is computed on the host: k/1024 when k % 8 == 0 and x is 16-byte
