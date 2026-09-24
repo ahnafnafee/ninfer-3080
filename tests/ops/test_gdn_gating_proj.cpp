@@ -40,9 +40,14 @@ constexpr ReductionCriterion kGdnProjectionFp32{/*relative_l2=*/4.0e-6,
                                                 /*gross_absolute=*/5.0e-7,
                                                 /*gross_relative_to_max_reference=*/5.0e-6};
 #else
-constexpr ReductionCriterion kGdnProjectionFp32{/*relative_l2=*/1.4e-6,
+// Sized for the unsplit MMA route, the least accurate registered projection route: it chains all
+// 320 K tiles into one fp32 accumulator where a split-K route chains K/SplitK and reduces across
+// the grid, so its rounding error measures 5-8x theirs. It covers T >= 4097 everywhere, and the
+// planner also falls back to it when a split cooperative grid exceeds device residency: on an
+// 82-SM laptop RTX 5090 that is T = 1024, whose split8 grid of 192 CTAs does not fit 164.
+constexpr ReductionCriterion kGdnProjectionFp32{/*relative_l2=*/2.0e-6,
                                                 /*gross_absolute=*/5.0e-7,
-                                                /*gross_relative_to_max_reference=*/2.5e-6};
+                                                /*gross_relative_to_max_reference=*/5.0e-6};
 #endif
 constexpr ReductionCriterion kGdnNormOutputBf16{/*relative_l2=*/1.75e-3,
                                                 /*gross_absolute=*/1.0e-4,
