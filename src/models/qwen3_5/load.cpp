@@ -1,7 +1,10 @@
 #include "models/qwen3_5/load.h"
 
 #include "artifact/reader.h"
+#include "core/dtype.h"
 #include "core/evictable_weight_pool.h"
+#include "core/paged_kv_cache.h"
+#include "core/paged_kv_storage.h"
 #include "core/stage_plan.h"
 #include "models/qwen3_5/load/bindings.h"
 
@@ -148,7 +151,7 @@ std::uint64_t parameter_bytes(const artifact::Reader& reader, const loading::Bin
 } // namespace
 
 std::vector<std::uint32_t> default_stage_layers(const artifact::Reader& reader,
-                                                LoadOptions options,
+                                                LoadOptions options, const StageSizing& sizing,
                                                 std::span<const std::uint64_t> free_bytes) {
     if (free_bytes.size() < 2) {
         throw std::invalid_argument("default stage layers need at least two devices");
@@ -172,9 +175,22 @@ std::vector<std::uint32_t> default_stage_layers(const artifact::Reader& reader,
             cost.weight_bytes += parameter_bytes(reader, bindings, id);
         }
         if (text.layer_types[layer] == MixerKind::FullAttention && text.attention) {
-            // K and V for one token, at two bytes an element: the unit that KV capacity is counted
-            // in. Stored narrower the ratio between layers is the same.
-            cost.kv_bytes_per_page_group = 2 * text.attention->key_width() * 2;
+            // One page group of this layer: every plane of a page, for every KV head, as stored.
+            const PagedKVStorageLayout storage = paged_kv_storage_layout(
+                sizing.kv_storage, static_cast<std::int32_t>(text.attention->head_dim));
+            cost.kv_bytes_per_page_group = static_cast<std::uint64_t>(kPagedKVPageSize) *
+                                           text.attention->num_key_value_heads *
+                                           storage.physical_bytes_per_token_head();
+        } else if (text.gdn) {
+            // The convolution window and the recurrent matrix of every state slot.
+            const auto& gdn = *text.gdn;
+            const std::uint64_t conv_bytes =
+                gdn.conv_channels() * (gdn.linear_conv_kernel_dim - 1) * dtype_size(DType::BF16);
+            const std::uint64_t recurrent_bytes =
+                static_cast<std::uint64_t>(gdn.linear_key_head_dim) * gdn.linear_value_head_dim *
+                gdn.linear_num_value_heads *
+                dtype_size(options.gdn_state_fp16 ? DType::FP16 : DType::FP32);
+            cost.state_bytes = sizing.state_slots * (conv_bytes + recurrent_bytes);
         }
         layer_bytes_total += cost.weight_bytes;
         layers.push_back(cost);

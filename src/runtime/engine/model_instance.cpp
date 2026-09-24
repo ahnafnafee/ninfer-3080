@@ -184,8 +184,12 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
     if (options.devices.size() > 1 && options.stage_layers.empty()) {
         const std::vector<std::size_t> free_now = free_bytes_by_rank(device);
         const std::vector<std::uint64_t> free_bytes(free_now.begin(), free_now.end());
-        options.stage_layers =
-            models::qwen3_5::default_stage_layers(reader, models::load_options(options), free_bytes);
+        const models::qwen3_5::StageSizing sizing{
+            .kv_storage = options.kv_cache,
+            .state_slots =
+                options.max_concurrency + options.context_cache.device_state_slots.value_or(0U)};
+        options.stage_layers = models::qwen3_5::default_stage_layers(
+            reader, models::load_options(options), sizing, free_bytes);
     }
     StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
     auto plan = models::qwen3_5::plan_load(reader, models::load_options(options));

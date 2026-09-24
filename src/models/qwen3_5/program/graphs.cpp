@@ -133,7 +133,7 @@ void ProgramImpl::prepare_graphs() {
         allocations.reserve(max_concurrency);
         for (std::uint32_t row = 0; row < max_concurrency; ++row) {
             std::optional<KVAddressSpaceHandle> allocation =
-                addresses.create_active(1, static_cast<std::int32_t>(row));
+                addresses.create_active(1, static_cast<std::int32_t>(row), compute_streams);
             if (!allocation) { throw std::bad_alloc(); }
             allocations.push_back(*allocation);
             addresses.ensure_mapped_to_tokens(*allocation, 1, compute_streams);

@@ -30,9 +30,10 @@ second GPU. Distinct ids are refused on Windows.
   30,34` sets the counts. Without it `default_stage_layers` (`models/qwen3_5/load.cpp`) sizes each
   layer from the artifact and calls `solve_stage_plan`, an exact memory-balancing solver (maximum
   page groups every stage can hold, then least-full stage), verified against a brute-force
-  partition oracle. It works from the bytes free on each device and rough constants for what a
-  stage needs beyond weights (context, workspace, graphs; more on rank 0 for the head), and
-  ignores per-slot GDN state, so it is a good default rather than exact; if it finds nothing fits
+  partition oracle. It works from the bytes free on each device, the stored KV page-group and
+  per-slot GDN state bytes of each layer (from the engine's KV storage format and slot count), and
+  rough constants for what a stage needs beyond weights (context, workspace, graphs; more on rank
+  0 for the head), so it is a good default rather than exact; if it finds nothing fits
   it deals the layers evenly and lets the Program's planning report the device that runs out.
 - **Placement.** `bind_text` places every layer's weights on its stage's device
   (`Bindings::place`, recorded for rank 0 as well so an object shared between a rank-0 layer and a

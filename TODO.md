@@ -395,7 +395,7 @@ what it says about kernels and measurements still holds except where this sectio
       also be run as a real race; worth doing if this ever runs there.
 - [ ] **Not built for pipeline stages yet:** vision and DFlash/DFlash2 refuse a split (DFlash needs
       its feature taps carried across stage boundaries); the default split's per-stage
-      overheads are constants, not measured, and it ignores GDN state (`default_stage_layers`);
+      overheads are constants, not measured (`default_stage_layers`);
       prefill does not overlap stages (micro-chunk wavefront); tensor parallelism is unbuilt.
       `docs/maintainer/pipeline-parallel-plan.md` is the design of record.
 

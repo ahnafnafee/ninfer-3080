@@ -589,7 +589,7 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
     try {
         state = state_store->reserve_reset(compute_streams);
         if (!state) { throw std::bad_alloc(); }
-        address = text_kv_addresses->create_active(entitlement, 0);
+        address = text_kv_addresses->create_active(entitlement, 0, compute_streams);
         if (!address) { throw std::bad_alloc(); }
         if (text_kv_addresses->bound_row(*address) != 0) {
             throw std::logic_error("causal score did not bind the unique Main KV row");

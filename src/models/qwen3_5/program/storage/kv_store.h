@@ -860,13 +860,14 @@ public:
 
     [[nodiscard]] std::uint32_t occupied() const noexcept { return capacity() - free_count_; }
 
-    [[nodiscard]] std::optional<KVAddressSpaceHandle> create_active(std::uint32_t entitlement,
-                                                                    std::int32_t execution_row) {
+    // `streams` carries every rank's stream: activation publishes the row's table to each replica.
+    [[nodiscard]] std::optional<KVAddressSpaceHandle>
+    create_active(std::uint32_t entitlement, std::int32_t execution_row, RankStreams streams) {
         if (entitlement == 0 || entitlement > page_capacity_) { return std::nullopt; }
         std::optional<KVAddressSpaceHandle> handle = create_inactive();
         if (!handle) { return std::nullopt; }
         try {
-            activate(*handle, entitlement, execution_row);
+            activate(*handle, entitlement, execution_row, streams);
             return handle;
         } catch (...) {
             (void)release(*handle);
@@ -893,13 +894,13 @@ public:
     }
 
     void activate(KVAddressSpaceHandle handle, std::uint32_t entitlement,
-                  std::int32_t execution_row) {
+                  std::int32_t execution_row, RankStreams streams) {
         Address& address = require(handle);
         if (entitlement < address.page_count) {
             throw std::logic_error("KV address space is not activatable");
         }
         auto reservation = prepare_activation(handle, entitlement, execution_row);
-        commit_activation(std::move(reservation));
+        commit_activation(std::move(reservation), streams);
     }
 
     [[nodiscard]] KVActivationReservation
