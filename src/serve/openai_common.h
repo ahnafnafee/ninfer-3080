@@ -43,6 +43,9 @@ std::string make_models_list(const std::string& model_id, std::int64_t created,
 std::string make_model_object(const std::string& model_id, std::int64_t created,
                               std::uint32_t max_model_len, bool vision,
                               const ninfer::ModelMetadata& metadata);
+// The /v1 discovery document: startup announces the API base as a URL, so the bare base answers
+// with the configured model alias and the endpoints this build serves instead of a 404.
+nlohmann::json make_api_index(const std::string& model_id);
 std::string make_error_body(const ApiError& error);
 std::int64_t unix_time_now();
 

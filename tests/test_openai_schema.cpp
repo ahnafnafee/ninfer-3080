@@ -1092,6 +1092,17 @@ int test_common_objects() {
                           list_meta["size"] == 17000000000ULL &&
                           list_meta["ftype"] == "groupwise-int",
                       "models list exposes the llama.cpp-compatible model meta");
+    failures += check(models["data"][0]["status"]["value"] == "loaded",
+                      "models list marks the resident model as loaded");
+    const Json index = make_api_index("qwen");
+    failures += check(index["object"] == "api_base" && index["model"] == "qwen",
+                      "the API base index names the configured model alias");
+    bool lists_chat = false;
+    for (const auto& endpoint : index["endpoints"]) {
+        lists_chat = lists_chat || (endpoint["method"] == "POST" &&
+                                    endpoint["path"] == "/v1/chat/completions");
+    }
+    failures += check(lists_chat, "the API base index lists Chat Completions");
     const Json model = Json::parse(make_model_object("qwen", 7, 240000, false, metadata));
     failures += check(model["max_model_len"] == 240000 && model["context_window"] == 240000 &&
                           model["modalities"]["vision"] == false,

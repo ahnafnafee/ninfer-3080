@@ -210,6 +210,7 @@ Json model_json(const std::string& model_id, std::int64_t created, std::uint32_t
                 {"max_model_len", max_model_len},
                 {"context_window", max_model_len},
                 {"modalities", Json{{"vision", vision}}},
+                {"status", Json{{"value", "loaded"}}},
                 {"meta",
                  Json{{"n_vocab", metadata.vocab_size},
                       {"n_ctx", max_model_len},
@@ -229,6 +230,38 @@ std::string make_models_list(const std::string& model_id, std::int64_t created,
         {"object", "list"},
         {"data", Json::array({model_json(model_id, created, max_model_len, vision, metadata)})}};
     return payload.dump();
+}
+
+Json make_api_index(const std::string& model_id) {
+    const auto endpoint = [](const char* method, const char* path, const char* description) {
+        return Json{{"method", method}, {"path", path}, {"description", description}};
+    };
+    return Json{
+        {"object", "api_base"},
+        {"service", "ninfer-serve"},
+        {"model", model_id},
+        {"endpoints",
+         Json::array(
+             {endpoint("GET", "/health", "process health"),
+              endpoint("GET", "/v1/load", "serving capacity, current load, and token counters"),
+              endpoint("GET", "/metrics", "Prometheus text metrics"),
+              endpoint("GET", "/slots", "llama.cpp-shaped lane table"),
+              endpoint("GET", "/props", "llama.cpp-shaped server properties"),
+              endpoint("GET", "/v1/models", "configured OpenAI model alias"),
+              endpoint("GET", "/v1/models/{id}", "lookup of the configured alias"),
+              endpoint("POST", "/v1/chat/completions", "OpenAI-style chat generation"),
+              endpoint("POST", "/v1/responses", "OpenAI Responses generation, state, and SSE"),
+              endpoint("POST", "/v1/responses/input_tokens",
+                       "Responses prompt-token count without generation"),
+              endpoint("POST", "/v1/responses/compact", "Responses conversation compaction"),
+              endpoint("POST", "/v1/responses/{id}/cancel", "cancel a background Response"),
+              endpoint("GET", "/v1/responses/{id}", "retrieve a locally stored terminal Response"),
+              endpoint("DELETE", "/v1/responses/{id}", "delete a locally stored Response"),
+              endpoint("GET", "/v1/responses/{id}/input_items",
+                       "list that Response's normalized input Items"),
+              endpoint("POST", "/v1/messages", "Anthropic-style message generation"),
+              endpoint("POST", "/v1/messages/count_tokens",
+                       "checkpoint-native expanded input-token count")})}};
 }
 
 std::string make_model_object(const std::string& model_id, std::int64_t created,

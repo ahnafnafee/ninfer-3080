@@ -121,6 +121,7 @@ int main(int argc, char** argv) {
         serving = true;
         operational_log.server_ready(options.host, options.port, server.public_model_id(),
                                      !options.api_key.empty());
+        operational_log.server_urls(options.host, options.port, server.webui_enabled());
 
         const bool ok = server.listen();
         g_server.store(nullptr);

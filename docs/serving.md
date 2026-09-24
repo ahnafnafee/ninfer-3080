@@ -191,6 +191,7 @@ this adds a CPU synchronization point and mask transfers per round. No speedup c
 | `GET /metrics` | Prometheus text with llama.cpp's `--metrics` series plus NInfer's (see [Metrics](#metrics)) |
 | `GET /slots` | llama.cpp-shaped lane table: one entry per lane, the first `running` marked processing |
 | `GET /props` | llama.cpp-shaped server properties: default sampling, context, lanes, modalities |
+| `GET /v1` | endpoint index for the announced API base: the model alias and this table |
 | `GET /v1/models` | configured OpenAI model alias, effective `max_model_len` (also as `context_window`), whether it accepts images, and a llama.cpp-compatible `meta` object (see [Models](#models)) |
 | `GET /v1/models/{id}` | lookup of the configured alias with the same fields |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -1050,7 +1051,13 @@ curl http://127.0.0.1:8080/v1/models \
   -H 'Authorization: Bearer local-secret'
 ```
 
-`--cors` adds permissive browser CORS headers. It is disabled by default.
+`--cors` adds permissive browser CORS headers. It is disabled by default. A preflight's
+`Access-Control-Request-Headers` are allowed on top of the fixed list, so browser clients that send
+their own headers (a WebUI's `x-conversation-id`) pass the preflight.
+
+After the listening line, startup prints the URLs to open: the API base (`/v1`) and the WebUI when
+one is served. A wildcard bind address (`0.0.0.0`, `::`) is announced through loopback, since a
+browser does not accept it as a destination.
 
 ## Server options
 

@@ -57,6 +57,9 @@ public:
     void listen_failure(std::string_view host, int port) const;
     void server_ready(std::string_view host, int port, std::string_view model_id,
                       bool auth_enabled) const;
+    // The URLs to open: a wildcard bind address is not a destination a browser accepts, so it is
+    // announced through loopback, followed by the WebUI when one is served and the API base.
+    void server_urls(std::string_view host, int port, bool webui) const;
     void server_stopped() const;
     void server_failure(bool serving, std::string_view detail) const;
 

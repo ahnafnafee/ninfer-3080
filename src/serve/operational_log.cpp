@@ -536,6 +536,20 @@ void OperationalLog::server_ready(std::string_view host, int port, std::string_v
                   auth_enabled ? "bearer" : "disabled");
 }
 
+void OperationalLog::server_urls(std::string_view host, int port, bool webui) const {
+    std::string browse_host(host);
+    if (host == "0.0.0.0") {
+        browse_host = "127.0.0.1";
+    } else if (host == "::" || host == "[::]") {
+        browse_host = "[::1]";
+    } else if (host.find(':') != std::string_view::npos && !host.starts_with('[')) {
+        browse_host = "[" + browse_host + "]";
+    }
+    const std::string base = "http://" + browse_host + ":" + std::to_string(port);
+    if (webui) { logger_->info("webui {}/", product::format_pretty_text(base)); }
+    logger_->info("api base {}/v1", product::format_pretty_text(base));
+}
+
 void OperationalLog::server_stopped() const { logger_->info("server stopped"); }
 
 void OperationalLog::server_failure(bool serving, std::string_view detail) const {

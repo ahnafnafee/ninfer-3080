@@ -19,6 +19,10 @@
 namespace ninfer::serve {
 namespace {
 
+constexpr std::string_view kCorsAllowedHeaders =
+    "Authorization, Content-Type, X-API-Key, anthropic-version, anthropic-beta, "
+    "anthropic-user-profile-id";
+
 // API routes keep their own 404s. Every other GET path belongs to the WebUI, whose client-side
 // router owns paths the server has no file for.
 bool is_api_path(std::string_view path) {
@@ -359,14 +363,21 @@ void HttpServer::register_routes() {
         server_.set_default_headers(
             {{"Access-Control-Allow-Origin", "*"},
              {"Access-Control-Expose-Headers", "x-request-id, request-id"},
-             {"Access-Control-Allow-Headers",
-              "Authorization, Content-Type, X-API-Key, anthropic-version, anthropic-beta, "
-              "anthropic-user-profile-id"},
+             {"Access-Control-Allow-Headers", std::string(kCorsAllowedHeaders)},
              {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"}});
         // CORS preflight: browsers send OPTIONS with no credentials before the real
-        // request; answer it without auth so the actual GET/POST can carry the key.
-        server_.Options(R"(.*)",
-                        [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
+        // request; answer it without auth so the actual GET/POST can carry the key. Headers a
+        // client asks for beyond the fixed list (a WebUI's x-conversation-id, say) are allowed
+        // too, since the preflight only gates which headers the browser may send.
+        server_.Options(R"(.*)", [](const httplib::Request& req, httplib::Response& res) {
+            res.status            = 204;
+            const auto& requested = req.get_header_value("Access-Control-Request-Headers");
+            if (!requested.empty()) {
+                res.headers.erase("Access-Control-Allow-Headers");
+                res.set_header("Access-Control-Allow-Headers",
+                               std::string(kCorsAllowedHeaders) + ", " + requested);
+            }
+        });
     }
 
     server_.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
@@ -482,6 +493,11 @@ void HttpServer::register_routes() {
     server_.Get("/props", [this](const httplib::Request& req, httplib::Response& res) {
         handle_props(req, res);
     });
+    for (const char* base : {"/v1", "/v1/"}) {
+        server_.Get(base, [this](const httplib::Request&, httplib::Response& res) {
+            res.set_content(make_api_index(public_model_id_).dump(), "application/json");
+        });
+    }
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });
