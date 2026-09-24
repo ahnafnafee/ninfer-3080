@@ -1,4 +1,5 @@
 #pragma once
+#include "models/qwen3_5/program/speculative/mtp_adaptive.h"
 #include "models/qwen3_5/program/internal.h"
 
 #include "core/arena.h"
@@ -287,6 +288,8 @@ struct PendingCandidate {
     std::uint32_t base_S        = 0;
     std::uint32_t prompt_tokens = 0;
     std::uint32_t produced      = 0;
+    // Columns the speculative round recorded GDN transitions at; the fold reads them back at it.
+    std::uint32_t record_width = 0;
 };
 
 enum class Lifecycle : std::uint8_t {
@@ -333,6 +336,8 @@ struct DecodeGraphProfile {
     std::uint32_t min_execution_frontier = 0;
     std::uint32_t max_execution_frontier = 0;
     std::uint32_t topology_class         = 0;
+    // MTP: the drafts the round verifies; zero for the other families.
+    std::uint32_t verify_window = 0;
     DecodeGraphDefinition definition;
 };
 
@@ -413,6 +418,8 @@ struct RequestControl {
     std::uint32_t first_token_top_logprobs = 0;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
+    // Adaptive MTP: how far this request's drafts survive.
+    MtpAdaptiveSignal mtp_signal;
     detail::PhysicalResources active_resources;
     detail::PhysicalResources optional_resources;
     bool publish_continuation = true;
@@ -588,6 +595,7 @@ public:
     const bool fast_prefill_kernel;
     const std::uint32_t draft_window;
     const std::uint32_t lookup_ngram;
+    const MtpDraftPolicy mtp_policy;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
@@ -682,6 +690,10 @@ public:
     // The logits behind a request's first token, copied when the request reports log
     // probabilities.
     std::optional<PinnedHostBuffer> first_token_logits_host;
+    // Present under adaptive MTP: picks each round's verification width.
+    std::optional<MtpAdaptiveBatchController> mtp_controller;
+    // The width the latest MTP round verified, which lays out its target buffers.
+    std::uint32_t mtp_round_verify_window = 0;
     TokenId* host_tokens = nullptr;
     std::optional<PinnedHostBuffer> ordinary_host;
     qwen3_5::OrdinaryDecodeIngress* ordinary_host_ingress = nullptr;

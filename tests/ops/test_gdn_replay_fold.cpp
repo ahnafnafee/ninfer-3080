@@ -81,7 +81,8 @@ std::vector<std::int32_t> selected_slots(std::int32_t rows) {
 
 int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
              const std::vector<std::int32_t>& commits, std::uint32_t seed,
-             bool distinct_destination = false) {
+             bool distinct_destination = false, std::int32_t physical_width = 0) {
+    if (physical_width == 0) { physical_width = width; }
     const std::vector<std::int32_t> source_slots = selected_slots(rows);
     std::vector<std::int32_t> destination_slots  = source_slots;
     if (distinct_destination) { destination_slots[0] = rows == 1 ? 1 : 3; }
@@ -95,7 +96,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     const GdnReplayRecordSpec record_spec{
         .layers          = profile.layers,
         .record_capacity = kRecordCapacity,
-        .width           = width,
+        .width           = physical_width,
         .conv_channels   = profile.conv_channels,
         .qk_heads        = kQkHeads,
         .value_heads     = profile.value_heads,
@@ -119,10 +120,10 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     for (std::int32_t layer = 0; layer < profile.layers; ++layer) {
         for (std::int32_t row = 0; row < rows; ++row) {
             const std::int32_t commit = commits[static_cast<std::size_t>(row)];
-            const std::int64_t record_outer =
-                static_cast<std::int64_t>(layer) * kRecordCapacity + row;
+            const std::int64_t record_column_base =
+                static_cast<std::int64_t>(layer) * kRecordCapacity * physical_width + row * width;
             for (std::int32_t token = 0; token < (commit == 0 ? 0 : width); ++token) {
-                const std::int64_t column = record_outer * width + token;
+                const std::int64_t column = record_column_base + token;
                 for (std::int32_t channel = 0; channel < profile.conv_channels; ++channel) {
                     conv_records[static_cast<std::size_t>(column) * profile.conv_channels +
                                  channel] =
@@ -219,13 +220,13 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
             if (commit == 0 && destination_slots[row] != source_slots[row])
                 std::fill(expected.begin(), expected.end(), 0);
             if (commit > 0) {
-                const std::int64_t record_outer =
-                    static_cast<std::int64_t>(layer) * kRecordCapacity + row;
+                const std::int64_t record_column_base =
+                    static_cast<std::int64_t>(layer) * kRecordCapacity * physical_width +
+                    row * width;
                 for (std::int32_t channel = 0; channel < profile.conv_channels; ++channel) {
                     const auto record_value = [&](std::int32_t token) {
-                        return conv_records[static_cast<std::size_t>(
-                                                (record_outer * width + token) *
-                                                profile.conv_channels) +
+                        return conv_records[static_cast<std::size_t>((record_column_base + token) *
+                                                                     profile.conv_channels) +
                                             channel];
                     };
                     if (commit == 1) {
@@ -274,7 +275,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     WorkspaceArena reference_workspace(256);
 
     for (std::int32_t layer = 0; layer < profile.layers; ++layer) {
-        const GdnReplayRecordLayer layer_records = records.layer(layer, rows);
+        const GdnReplayRecordLayer layer_records = records.layer(layer, rows, width);
         for (std::int32_t row = 0; row < rows; ++row) {
             const auto initial_recurrent =
                 initial_recurrent_values(recurrent_slot_elements, seed, layer, row);
@@ -301,12 +302,12 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
             }
             std::vector<float> g_host(static_cast<std::size_t>(profile.value_heads) * width);
             std::vector<float> beta_host(static_cast<std::size_t>(profile.value_heads) * width);
-            const std::int64_t record_outer =
-                static_cast<std::int64_t>(layer) * kRecordCapacity + row;
+            const std::int64_t record_column_base =
+                static_cast<std::int64_t>(layer) * kRecordCapacity * physical_width + row * width;
             for (std::int32_t token = 0; token < width; ++token) {
                 for (std::int32_t head = 0; head < profile.value_heads; ++head) {
                     const std::size_t source = static_cast<std::size_t>(
-                        ((record_outer * width + token) * profile.value_heads + head) * 2);
+                        ((record_column_base + token) * profile.value_heads + head) * 2);
                     const std::size_t destination =
                         static_cast<std::size_t>(token) * profile.value_heads + head;
                     g_host[destination]    = std::bit_cast<float>(gate_records[source]);
@@ -360,7 +361,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
         DeviceContext context;
         DecodeGraphDefinition definition;
         DecodeGraphExecutable graph;
-        definition.capture(context.stream, [&] { fold_plan.execute(fold_rows, context.stream); });
+        definition.capture(context.stream,
+                           [&] { fold_plan.execute(fold_rows, width, context.stream); });
         graph.instantiate(definition);
         // Host row descriptors are captured by value. Restore GPU state between replays.
         for (int replay = 0; replay < 2; ++replay) {
@@ -371,7 +373,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
             context.synchronize();
         }
     } else {
-        fold_plan.execute(fold_rows, nullptr);
+        fold_plan.execute(fold_rows, width, nullptr);
         cuda_synchronize();
     }
 
@@ -654,7 +656,7 @@ int run_record_fold_rounds() {
         device_beta.copy_from_host(beta_host.data(), device_beta.bytes);
 
         for (std::int32_t layer = 0; layer < kProfile.layers; ++layer) {
-            GdnReplayRecordLayer layer_records = records.layer(layer, 1);
+            GdnReplayRecordLayer layer_records = records.layer(layer, 1, kWidth);
             Tensor conv_states = state_pool.layer_view(static_cast<std::uint32_t>(layer)).conv;
             ops::gdn_input_proj_conv_snapshot(
                 x, qk_parent.view(), vz_parent.view(), conv_weight, conv_states, valid,
@@ -722,7 +724,7 @@ int run_record_fold_rounds() {
         }
 
         const std::array fold_rows{ops::GdnReplayFoldRow{kInitialSlot, kInitialSlot, commit}};
-        fold_plan.execute(fold_rows, nullptr);
+        fold_plan.execute(fold_rows, kWidth, nullptr);
         cuda_synchronize();
         for (std::int32_t layer = 0; layer < kProfile.layers; ++layer) {
             const Tensor folded_recurrent =
@@ -772,6 +774,8 @@ int main() {
     failures += run_case({24, 48, 10240}, 6, 4, {0, 2, 5, 6}, 1861U, true);
     failures += run_case({7, 48, 10240}, 3, 8, {3, 0, 1, 2, 3, 1, 2, 0}, 1863U);
     failures += run_case({11, 32, 8192}, 6, 2, {6, 1}, 1865U);
+    // Records packed at a round's narrower width inside blocks planned for a wider one.
+    failures += run_case({48, 48, 10240}, 5, 3, {1, 3, 5}, 1826U, false, 9);
     failures += run_case({30, 32, 8192}, 2, 1, {2}, 1831U);
     failures += run_case({30, 32, 8192}, 6, 1, {6}, 1841U);
     failures += run_case({30, 32, 8192}, 6, 2, {2, 5}, 1851U);

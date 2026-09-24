@@ -160,7 +160,7 @@ template <class Geometry, class StateT>
 void launch_replay_fold_typed(const GdnReplayRecords& records,
                               LinearAttentionStateAllLayersView states,
                               const GdnReplayFoldKernelRows& rows, std::int32_t active_rows,
-                              cudaStream_t stream) {
+                              std::int32_t active_width, cudaStream_t stream) {
     const FoldAccess<Geometry, StateT> access{
         static_cast<const __nv_bfloat16*>(records.key.data),
         static_cast<const __nv_bfloat16*>(records.value.data),
@@ -170,8 +170,8 @@ void launch_replay_fold_typed(const GdnReplayRecords& records,
         static_cast<__nv_bfloat16*>(states.conv_layer0.data),
         states.recurrent_layer_stride_bytes / static_cast<std::int64_t>(sizeof(StateT)),
         states.conv_layer_stride_bytes / static_cast<std::int64_t>(sizeof(__nv_bfloat16)),
-        records.spec.record_capacity,
-        records.spec.width,
+        records.spec.record_capacity * records.spec.width,
+        active_width,
         rows,
     };
     const dim3 grid(static_cast<unsigned>(Geometry::kValueHeads),
@@ -186,11 +186,13 @@ template <class Geometry>
 void launch_replay_fold_fixed(const GdnReplayRecords& records,
                               LinearAttentionStateAllLayersView states,
                               const GdnReplayFoldKernelRows& rows, std::int32_t active_rows,
-                              cudaStream_t stream) {
+                              std::int32_t active_width, cudaStream_t stream) {
     if (states.recurrent_layer0.dtype == DType::FP16) {
-        launch_replay_fold_typed<Geometry, __half>(records, states, rows, active_rows, stream);
+        launch_replay_fold_typed<Geometry, __half>(records, states, rows, active_rows, active_width,
+                                                   stream);
     } else {
-        launch_replay_fold_typed<Geometry, float>(records, states, rows, active_rows, stream);
+        launch_replay_fold_typed<Geometry, float>(records, states, rows, active_rows, active_width,
+                                                  stream);
     }
 }
 
@@ -256,17 +258,19 @@ void launch_recurrent_record(const Tensor& q, const Tensor& k, const Tensor& v, 
 
 void launch_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
                         const GdnReplayFoldKernelRows& rows, std::int32_t active_rows,
-                        cudaStream_t stream) {
+                        std::int32_t active_width, cudaStream_t stream) {
     if (records.spec.qk_heads == FoldGeometry16x48::kQkHeads &&
         records.spec.value_heads == FoldGeometry16x48::kValueHeads &&
         records.spec.conv_channels == FoldGeometry16x48::kConvChannels) {
-        launch_replay_fold_fixed<FoldGeometry16x48>(records, states, rows, active_rows, stream);
+        launch_replay_fold_fixed<FoldGeometry16x48>(records, states, rows, active_rows,
+                                                    active_width, stream);
         return;
     }
     if (records.spec.qk_heads == FoldGeometry16x32::kQkHeads &&
         records.spec.value_heads == FoldGeometry16x32::kValueHeads &&
         records.spec.conv_channels == FoldGeometry16x32::kConvChannels) {
-        launch_replay_fold_fixed<FoldGeometry16x32>(records, states, rows, active_rows, stream);
+        launch_replay_fold_fixed<FoldGeometry16x32>(records, states, rows, active_rows,
+                                                    active_width, stream);
         return;
     }
     throw std::invalid_argument("GDN replay fold launcher received an unregistered geometry");

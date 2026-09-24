@@ -105,6 +105,14 @@ enum class SpeculativeBackend : std::uint8_t {
     DFlash2,
 };
 
+// How many of its drafts an MTP round verifies: always all of them, or a width the Engine adapts
+// to the drafts' measured survival and the measured round cost. Greedy output does not depend on
+// it.
+enum class MtpDraftPolicy : std::uint8_t {
+    Fixed,
+    Adaptive,
+};
+
 struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
     // Startup-fixed K: MTP, DFlash and DFlash2 1..15 (query width K+1).
@@ -116,6 +124,8 @@ struct SpeculativeOptions {
     // head is weakest -- output that repeats the input. Used as a draft source alongside the
     // configured backend, preferred whenever it finds a match.
     std::uint32_t lookup_ngram = 0;
+    // MTP only; Adaptive verifies 1..draft_tokens drafts per round.
+    MtpDraftPolicy mtp_policy = MtpDraftPolicy::Fixed;
 };
 
 enum class StartupPhase : std::uint8_t {
@@ -879,6 +889,10 @@ struct SpeculativeStats {
     std::uint64_t accepted_tokens = 0;
     std::uint64_t fallback_steps  = 0;
     std::vector<std::uint64_t> accepted_per_position;
+    // Adaptive MTP: rounds verified at each width 1..draft_window, and width changes.
+    bool adaptive                    = false;
+    std::uint64_t window_transitions = 0;
+    std::vector<std::uint64_t> rounds_per_window;
 };
 
 struct ThinkingBudgetStats {

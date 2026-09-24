@@ -599,6 +599,17 @@ int main() {
     failures += check(redaction_present, "startup argv omitted the API-key redaction marker");
 
     failures += check(!defaults.fast_prefill_kernel, "the fast prefill kernel must default off");
+    failures += check(defaults.speculative.mtp_policy == ninfer::MtpDraftPolicy::Fixed &&
+                          parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens",
+                                 "5", "--adaptive-mtp"})
+                                  .speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive,
+                      "--adaptive-mtp did not default off or was not preserved");
+    bool adaptive_without_mtp_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "7",
+                     "--adaptive-mtp"});
+    } catch (const std::invalid_argument&) { adaptive_without_mtp_rejected = true; }
+    failures += check(adaptive_without_mtp_rejected, "--adaptive-mtp was accepted without MTP");
     failures += check(
         !defaults.first_token_logprobs &&
             parse({"ninfer-serve", "model.ninfer", "--first-token-logprobs"}).first_token_logprobs,

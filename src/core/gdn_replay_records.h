@@ -42,8 +42,10 @@ struct GdnReplayRecordLayer {
 /**
  * Bound non-owning all-layer ReplaySSM transition records.
  *
- * Layer and physical record row share the outer index `layer * record_capacity + row` in every
- * plane. The object owns no allocation and stores no active-row or valid-prefix metadata.
+ * Each layer owns a block of `record_capacity * width` columns in every plane, and a round packs
+ * its rows inside that block at the width it records: row `r` of a round of width `w` starts at
+ * column `layer * record_capacity * width + r * w`. The object owns no allocation and stores no
+ * active-row or valid-prefix metadata.
  */
 struct GdnReplayRecords {
     Tensor conv;
@@ -55,7 +57,11 @@ struct GdnReplayRecords {
     GdnReplayRecords() = default;
     GdnReplayRecords(DeviceSpan backing, const GdnReplayRecordLayout& layout);
 
-    [[nodiscard]] GdnReplayRecordLayer layer(std::int32_t layer, std::int32_t rows) const;
+    // One layer's records for `rows` active rows of `active_width` columns. Rows are packed at
+    // the active width inside the layer's block, so a round that records fewer columns than the
+    // planned width must fold with the same width.
+    [[nodiscard]] GdnReplayRecordLayer layer(std::int32_t layer, std::int32_t rows,
+                                             std::int32_t active_width) const;
 };
 
 } // namespace ninfer

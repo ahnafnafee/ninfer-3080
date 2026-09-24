@@ -308,6 +308,7 @@ std::string usage_text(std::string_view program) {
         << "  --fast-prefill-kernel       fast INT8-KV prompt kernel, wave-aligned chunks\n"
         << "  --spec <mtp|dflash|dflash2> speculative backend (default: none)\n"
         << "  --draft-tokens <n>         MTP, DFlash and DFlash2 1..15\n"
+        << "  --adaptive-mtp              verify an adaptive 3..K drafts per MTP round\n"
         << "  --lm-head-draft             use the optimized proposal head; requires a speculative "
            "backend\n"
         << "  --device <id>               CUDA device ordinal (default: 0)\n"
@@ -379,6 +380,8 @@ BenchOptions parse_args(int argc, char** argv) {
             options.prefill_cublas = true;
         } else if (arg == "--no-prefill-cublas-projections") {
             options.prefill_cublas_projections = false;
+        } else if (arg == "--adaptive-mtp") {
+            options.speculative.mtp_policy = MtpDraftPolicy::Adaptive;
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--device") {

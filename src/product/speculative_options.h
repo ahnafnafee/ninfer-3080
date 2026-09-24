@@ -36,6 +36,9 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
             throw std::invalid_argument(
                 "--draft-tokens and --lm-head-draft require --spec mtp|dflash|dflash2");
         }
+        if (options.mtp_policy != MtpDraftPolicy::Fixed) {
+            throw std::invalid_argument("--adaptive-mtp requires --spec mtp");
+        }
         return;
     case SpeculativeBackend::Mtp:
         if (options.draft_tokens == 0 || options.draft_tokens > 15) {
@@ -46,10 +49,16 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         if (options.draft_tokens == 0 || options.draft_tokens > 15) {
             throw std::invalid_argument("--spec dflash requires --draft-tokens in [1,15]");
         }
+        if (options.mtp_policy != MtpDraftPolicy::Fixed) {
+            throw std::invalid_argument("--adaptive-mtp requires --spec mtp");
+        }
         return;
     case SpeculativeBackend::DFlash2:
         if (options.draft_tokens == 0 || options.draft_tokens > 15) {
             throw std::invalid_argument("--spec dflash2 requires --draft-tokens in [1,15]");
+        }
+        if (options.mtp_policy != MtpDraftPolicy::Fixed) {
+            throw std::invalid_argument("--adaptive-mtp requires --spec mtp");
         }
         return;
     }

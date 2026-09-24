@@ -306,6 +306,32 @@ MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& l
     }
 }
 
+MtpDecodeState MtpDecodeState::verification_view(std::uint32_t verify_window) const {
+    const std::int32_t batch = anchors.ne[0];
+    if (verify_window == 0 || static_cast<std::int64_t>(verify_window) > current_drafts.ne[0]) {
+        throw std::invalid_argument("MTP verification width exceeds the draft window");
+    }
+    const auto width   = static_cast<std::int32_t>(verify_window) + 1;
+    const auto columns = [batch](const Tensor& tensor, std::int32_t leading_columns) {
+        return Tensor(tensor.data, tensor.dtype, {leading_columns, batch});
+    };
+    const auto rows_by_columns = [batch, width](const Tensor& tensor) {
+        return Tensor(tensor.data, tensor.dtype, {tensor.ne[0], width, batch});
+    };
+    MtpDecodeState out        = *this;
+    out.current_drafts        = columns(current_drafts, width - 1);
+    out.target_rope_positions = columns(target_rope_positions, width);
+    out.licensed_tokens       = columns(licensed_tokens, width);
+    out.verify_ids            = columns(verify_ids, width);
+    out.target_positions      = columns(target_positions, width);
+    out.target_argmax         = columns(target_argmax, width);
+    out.alignment_ids         = columns(alignment_ids, width);
+    out.target_logits         = rows_by_columns(target_logits);
+    out.target_hidden         = rows_by_columns(target_hidden);
+    out.alignment_hidden      = rows_by_columns(alignment_hidden);
+    return out;
+}
+
 DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeStateLayout& layout,
                                      std::uint32_t batch_capacity, std::uint32_t draft_window) {
     if (batch_capacity == 0 || batch_capacity > kMaximumConcurrency || draft_window == 0 ||

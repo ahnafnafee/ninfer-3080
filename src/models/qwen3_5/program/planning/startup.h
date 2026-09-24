@@ -95,6 +95,7 @@ struct SequencePlanningInputs {
     bool fast_prefill_kernel                = false;
     std::uint32_t draft_window              = 0;
     std::uint32_t lookup_ngram             = 0;
+    MtpDraftPolicy mtp_policy               = MtpDraftPolicy::Fixed;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
@@ -123,6 +124,7 @@ struct SequencePlanImpl {
     bool fast_prefill_kernel                = false;
     std::uint32_t draft_window              = 0;
     std::uint32_t lookup_ngram             = 0;
+    MtpDraftPolicy mtp_policy               = MtpDraftPolicy::Fixed;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;

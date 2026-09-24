@@ -252,6 +252,11 @@ struct MtpDecodeState {
     MtpDecodeState() = default;
     MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& layout,
                    std::uint32_t batch_capacity, std::uint32_t draft_window);
+
+    // The same buffers shaped for a round that verifies verify_window of the draft window's
+    // drafts: every per-column tensor is re-viewed contiguous at width verify_window+1, and the
+    // host fills the ingress at that stride. Proposal tensors keep the full draft window.
+    [[nodiscard]] MtpDecodeState verification_view(std::uint32_t verify_window) const;
 };
 
 struct DFlashDecodeState {

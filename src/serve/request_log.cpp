@@ -314,13 +314,18 @@ Json vision_workspace_json(const std::optional<ninfer::VisionWorkspaceMemorySumm
 }
 
 Json speculative_json(const GenerationMetrics& metrics) {
-    return Json{{"backend", product::speculative_backend_name(metrics.speculative_backend)},
-                {"draft_window", metrics.speculative_draft_window},
-                {"rounds", metrics.speculative_rounds},
-                {"drafted_tokens", metrics.speculative_draft_tokens},
-                {"accepted_tokens", metrics.speculative_accepted_tokens},
-                {"fallback_steps", metrics.speculative_fallback_steps},
-                {"accepted_per_position", metrics.speculative_accepted_per_position}};
+    Json out{{"backend", product::speculative_backend_name(metrics.speculative_backend)},
+             {"draft_window", metrics.speculative_draft_window},
+             {"rounds", metrics.speculative_rounds},
+             {"drafted_tokens", metrics.speculative_draft_tokens},
+             {"accepted_tokens", metrics.speculative_accepted_tokens},
+             {"fallback_steps", metrics.speculative_fallback_steps},
+             {"accepted_per_position", metrics.speculative_accepted_per_position}};
+    if (metrics.speculative_adaptive) {
+        out["window_transitions"] = metrics.speculative_window_transitions;
+        out["rounds_per_window"]  = metrics.speculative_rounds_per_window;
+    }
+    return out;
 }
 
 Json materialization_json(const ninfer::MaterializationDiagnostics& diagnostics) {
@@ -726,6 +731,9 @@ std::string format_server_start_json(
              {"speculative_backend",
               product::speculative_backend_name(engine_options.speculative.backend)},
              {"speculative_draft_window", engine_options.speculative.draft_tokens},
+             {"mtp_policy", engine_options.speculative.mtp_policy == MtpDraftPolicy::Adaptive
+                                ? "adaptive"
+                                : "fixed"},
              {"proposal_head", proposal_head_name(engine_options.speculative.proposal_head)},
              {"context_cost", Json{{"transfer_source", ninfer::context_cost_preset_source_name(
                                                            context_cost.transfer_source)},

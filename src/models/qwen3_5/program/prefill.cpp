@@ -789,6 +789,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     std::array<ops::GdnReplayFoldRow, kMaximumConcurrency> fold_rows{};
     std::array<std::int32_t, kMaximumConcurrency> hidden_selectors{};
     bool needs_hidden_correction = false;
+    std::uint32_t record_width   = 0;
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const std::uint32_t lane = lanes[row];
         if (lane >= max_concurrency || requests[lane].lifecycle != Lifecycle::Pending ||
@@ -797,6 +798,10 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
         }
         const PendingCandidate& pending = requests[lane].pending;
         const SequenceState& sequence   = active_sequence(lane);
+        if (row == 0) { record_width = pending.record_width; }
+        if (pending.record_width == 0 || pending.record_width != record_width) {
+            throw std::logic_error("speculative pending rows disagree on their record width");
+        }
         if (sequence.execution_frontier != pending.base_E ||
             sequence.ledger_frontier != pending.base_S ||
             sequence.ledger.size() != pending.base_S ||
@@ -834,12 +839,14 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
         {
             // Each state shard folds its own layers on its own device's stream.
             RankBinding bind(device, state_images->shard(0).rank);
-            replay_fold->execute(fold_span, compute_streams[state_images->shard(0).rank]);
+            replay_fold->execute(fold_span, static_cast<std::int32_t>(record_width),
+                                 compute_streams[state_images->shard(0).rank]);
         }
         for (std::size_t shard = 1; shard < state_images->shard_count(); ++shard) {
             RankBinding bind(device, state_images->shard(shard).rank);
-            extra_replay_fold[shard - 1]->execute(
-                fold_span, compute_streams[state_images->shard(shard).rank]);
+            extra_replay_fold[shard - 1]->execute(fold_span,
+                                                  static_cast<std::int32_t>(record_width),
+                                                  compute_streams[state_images->shard(shard).rank]);
         }
 
         // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
@@ -867,7 +874,9 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
             Tensor selected;
             Tensor destinations;
             if (speculative_backend == SpeculativeBackend::Mtp && io.mtp_decode) {
-                qwen3_5::MtpDecodeState& frame = *io.mtp_decode;
+                // The round's target hidden is laid out at the width it verified.
+                const qwen3_5::MtpDecodeState frame =
+                    io.mtp_decode->verification_view(mtp_round_verify_window);
                 selector_tensor                = frame.current_extents.slice(0, 0, batch);
                 hidden                         = frame.target_hidden.slice(2, 0, batch);
                 selected     = frame.target_continuation_hidden.slice(1, 0, batch);

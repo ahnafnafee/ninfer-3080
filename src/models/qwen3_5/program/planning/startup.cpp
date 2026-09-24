@@ -963,6 +963,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->fast_prefill_kernel = inputs.fast_prefill_kernel;
     impl->draft_window        = inputs.draft_window;
     impl->lookup_ngram        = inputs.lookup_ngram;
+    impl->mtp_policy          = inputs.mtp_policy;
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
     impl->rope_yarn           = inputs.rope_yarn;
@@ -983,26 +984,38 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
             impl->graph_allowance_bytes = checked_mul(12ULL * kMiB, impl->max_concurrency,
                                                       "ordinary exact-b graph allowance");
         } else if (impl->speculative_backend == SpeculativeBackend::Mtp) {
-            const auto profiles = mtp_graph_profiles(impl->capacity, impl->draft_window);
-            const std::size_t per_batch_allowance = graph_topology_allowance(
-                profiles,
-                [&](GraphExecutionProfile profile) {
-                    const std::uint64_t final_visible = std::min<std::uint64_t>(
-                        impl->capacity,
-                        static_cast<std::uint64_t>(profile.max) + 2ULL * impl->draft_window);
+            // Adaptive MTP captures one graph set per verification width it can select.
+            const std::uint32_t first_window = impl->mtp_policy == MtpDraftPolicy::Adaptive
+                                                   ? mtp_minimum_adaptive_window(impl->draft_window)
+                                                   : impl->draft_window;
+            std::size_t per_batch_allowance  = 0;
+            for (std::uint32_t verify_window = first_window; verify_window <= impl->draft_window;
+                 ++verify_window) {
+                const auto profiles =
+                    mtp_graph_profiles(impl->capacity, verify_window, impl->draft_window);
+                per_batch_allowance = checked_add(
+                    per_batch_allowance,
+                    graph_topology_allowance(
+                        profiles,
+                        [&](GraphExecutionProfile profile) {
+                            const std::uint64_t final_visible = std::min<std::uint64_t>(
+                                impl->capacity, static_cast<std::uint64_t>(profile.max) +
+                                                    verify_window + impl->draft_window);
 #ifdef NINFER_SM8X_COMPAT
-                    if (final_visible <= 4096) {
-                        // The reduced-startup graph set still consumes 35.8 MiB at C1/K3 and
-                        // 43.1 MiB at C1/K4 on SM86. K2 retains the smaller qualified allowance;
-                        // reserve one 64 MiB class for K3 and deeper captures.
-                        return (impl->draft_window >= 3 ? 64ULL : 16ULL) * kMiB;
-                    }
-                    return 86ULL * kMiB;
+                            if (final_visible <= 4096) {
+                                // The reduced-startup graph set still consumes 35.8 MiB at C1/K3
+                                // and 43.1 MiB at C1/K4 on SM86. K2 retains the smaller qualified
+                                // allowance; reserve one 64 MiB class for K3 and deeper captures.
+                                return (verify_window >= 3 ? 64ULL : 16ULL) * kMiB;
+                            }
+                            return 86ULL * kMiB;
 #else
-                    return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
+                            return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
 #endif
-                },
-                "MTP graph allowance");
+                        },
+                        "MTP graph allowance"),
+                    "MTP graph allowance");
+            }
             impl->graph_allowance_bytes = checked_mul(per_batch_allowance, impl->max_concurrency,
                                                       "MTP exact-b graph allowance");
         } else {
@@ -1098,6 +1111,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .fast_prefill_kernel = options.fast_prefill_kernel,
         .draft_window        = options.speculative.draft_tokens,
         .lookup_ngram        = options.speculative.lookup_ngram,
+        .mtp_policy          = options.speculative.mtp_policy,
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,

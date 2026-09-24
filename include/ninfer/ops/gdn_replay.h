@@ -49,7 +49,10 @@ class GdnReplayFoldPlan {
 public:
     GdnReplayFoldPlan(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states);
 
-    void execute(std::span<const GdnReplayFoldRow> rows, cudaStream_t stream) const;
+    // active_width is the column count the round recorded at, in [1,records.spec.width]; the
+    // records must have been written through GdnReplayRecords::layer at that width.
+    void execute(std::span<const GdnReplayFoldRow> rows, std::int32_t active_width,
+                 cudaStream_t stream) const;
 
 private:
     GdnReplayRecords records_;

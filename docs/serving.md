@@ -52,6 +52,22 @@ and prefill remain outside speculative acceleration. A later request cannot enab
 omitted at startup. The artifact need only contain the Text backbone and the optional components
 selected for this process.
 
+### Adaptive MTP
+
+With `--adaptive-mtp`, `--draft-tokens K` is the most drafts an MTP round verifies; every round
+still proposes `K` for the next one. Each request tracks how far its drafts survive, position by
+position, with a fast and a slow moving average; the Engine prices each verification width from
+the round times it has measured at that width and batch size (a width not yet run is priced from
+a relative cost shape scaled by the widths that have) and picks the width with the most expected
+committed tokens per second over this round and the next. A width changes only after it has won
+several rounds, and a width is probed upward when every row's drafts have kept surviving. While
+three drafts are ready the width stays at three or more, so the Engine captures CUDA Graphs for
+widths `min(3, K)..K`: the graph memory, and the startup capture time, grow with the number of
+widths. Committed tokens are still the target's greedy choices, but attention splits its
+reduction by the verify width, so a near-tie can resolve differently at another width, as it does
+between two fixed `--draft-tokens` settings. The per-request log reports the rounds run at each
+width and the width changes.
+
 ### Vision residency
 
 `--vision` keeps the Vision tower, its encode workspace and the item handoff resident for the
@@ -1115,6 +1131,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | `1..15` for MTP, DFlash and DFlash2 | unset |
 | `--lm-head-draft` | optimized proposal head | off |
+| `--adaptive-mtp` | MTP only: each round verifies 3..`--draft-tokens` drafts, the width favored by the drafts' measured survival and the measured round cost; see [Adaptive MTP](#adaptive-mtp) | off |
 | `--lookup-ngram N` | context-lookup drafting alongside `--spec`: the last `N` tokens are matched against the sequence so far and what followed is proposed; exact, since verification rejects a wrong guess | `0` (off) |
 | `--prefill-cublas` | hand wide prefill GEMMs to cuBLAS: a large prefill speedup for a small perplexity cost, and it wants a larger `--prefill-chunk` to pay (see [performance](performance.md)) | off |
 | `--no-prefill-cublas-projections` | with `--prefill-cublas`, keep the attention and GDN input projections off that route | projections on |
@@ -1230,8 +1247,9 @@ preserved for consumer validation, and a stable text-fallback reason. Fallback r
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
-`drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`. Rates can be
-derived downstream from raw token counts and seconds instead of rounded stderr strings.
+`drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`, and under
+`--adaptive-mtp` also `window_transitions` and `rounds_per_window`. Rates can be derived downstream
+from raw token counts and seconds instead of rounded stderr strings.
 
 For `server_start.memory`, `workspace.capacity_bytes` is the only physical workspace allocation.
 When Vision is enabled, `vision_workspace` reports the aggregate prompt and maximum-item token

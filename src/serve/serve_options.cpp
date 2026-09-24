@@ -96,7 +96,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--vision] [--vision-residency resident|overlay] [--vision-max-merged N] "
            "[--no-cuda-graph] [--cuda-graph-allowance-mib N] [--no-prefix-reuse] [--auto-prefix-grid] [--devices N,M,...] [--stage-layers A,B,...] "
            "[--chat-template FILE] "
-           "[--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] "
+           "[--lm-head-draft] [--adaptive-mtp] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] "
            "[--gdn-state-fp16] [--rope-yarn] [--wddm-evictable-budget] "
            "[--mlp-a8-decode] [--no-prefill-a8] "
            "[--prefill-cublas [--no-prefill-cublas-projections]] [--lookup-ngram N] "
@@ -153,6 +153,9 @@ std::string serve_usage_text(const char* argv0) {
            "survive restarts; --disk-kv-restore seeds a new request's matching prefix from it; "
            "--disk-kv-directstorage reads restores through DirectStorage (Windows builds with "
            "NINFER_DIRECTSTORAGE)\n"
+           "       --adaptive-mtp lets each MTP round verify 3..--draft-tokens drafts, the width "
+           "that the drafts' measured survival and the measured round cost favor; greedy output "
+           "is unchanged, and every width gets its own CUDA Graphs\n"
            "       --first-token-logprobs accepts Chat Completions top_logprobs (non-streaming) "
            "and reports the first generated token's log probability with its alternatives\n"
            "       --context-cache-policy rolling lets a capture that extends a resident "
@@ -483,6 +486,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.auto_prefix_grid = true;
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
+        } else if (arg == "--adaptive-mtp") {
+            options.speculative.mtp_policy = MtpDraftPolicy::Adaptive;
         } else if (arg == "--lm-head-q4") {
             options.lm_head_q4 = true;
         } else if (arg == "--lm-head-q6") {

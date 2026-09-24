@@ -147,12 +147,11 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), fast_prefill_kernel(plan.fast_prefill_kernel),
-      draft_window(plan.draft_window), lookup_ngram(plan.lookup_ngram),
+      draft_window(plan.draft_window), lookup_ngram(plan.lookup_ngram), mtp_policy(plan.mtp_policy),
       speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
       proposal_head(plan.proposal_head), rope_yarn(plan.rope_yarn),
-      vision_enabled(plan.features.vision),
-      use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
-      kv_payload_bytes(plan.persistent.kv_payload_bytes),
+      vision_enabled(plan.features.vision), use_cuda_graph(plan.use_cuda_graph),
+      causal_scoring(plan.causal_scoring), kv_payload_bytes(plan.persistent.kv_payload_bytes),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
       kv_arena(make_kv_arena(device_in, parameters_in, plan)),
       persistent(kv_arena ? DeviceArena(kv_arena->arena()) : DeviceArena(plan.persistent.bytes)),
@@ -525,6 +524,11 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
             cudaMemsetAsync(sampling_config.data, 0, sampling_config.bytes(), device.stream));
     }
     device.synchronize();
+    mtp_round_verify_window = draft_window;
+    if (speculative_backend == SpeculativeBackend::Mtp && mtp_policy == MtpDraftPolicy::Adaptive) {
+        mtp_controller.emplace();
+        mtp_controller->reset(draft_window);
+    }
     if (use_cuda_graph) {
         StartupPhaseScope graph_phase(startup_observer, StartupPhase::CudaGraphPrepare);
         prepare_graphs();

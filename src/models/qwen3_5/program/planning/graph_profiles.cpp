@@ -86,27 +86,28 @@ std::vector<GraphExecutionProfile> ordinary_graph_profiles(std::uint32_t capacit
 }
 
 std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
+                                                      std::uint32_t verify_window,
                                                       std::uint32_t draft_window) {
-    if (draft_window == 0 || capacity == 0) { return {}; }
-    // Bound the final AR window E+2K at split-policy transitions until the grid reaches its cap.
+    if (verify_window == 0 || draft_window < verify_window || capacity == 0) { return {}; }
+    // Bound the final AR window E+V+K at split-policy transitions until the grid reaches its cap.
     std::vector<std::uint32_t> ends;
     const auto add_shifted = [&](std::uint32_t visible_end, std::uint32_t offset) {
         if (visible_end >= offset) { ends.push_back(visible_end - offset); }
     };
     for (const std::uint32_t visible_end : {128U, 512U, 2048U, 4096U, 8198U, 16390U, 32768U}) {
-        add_shifted(visible_end, 2 * draft_window);
+        add_shifted(visible_end, verify_window + draft_window);
     }
-    // Target verify and MTP batch both have T=K+1 and W=E+K+1. Preserve one concrete INT8
+    // Target verify and MTP batch both have T=V+1 and W=E+V+1. Preserve one concrete INT8
     // implementation per range at the T=4/5/6 launch boundaries.
-    if (draft_window == 3) {
-        add_shifted(1029, draft_window + 1);
-    } else if (draft_window == 4) {
+    if (verify_window == 3) {
+        add_shifted(1029, verify_window + 1);
+    } else if (verify_window == 4) {
         for (const std::uint32_t visible_end : {128U, 512U, 1029U}) {
-            add_shifted(visible_end, draft_window + 1);
+            add_shifted(visible_end, verify_window + 1);
         }
-    } else if (draft_window == 5) {
+    } else if (verify_window == 5) {
         for (const std::uint32_t visible_end : {128U, 160U, 2054U, 8198U}) {
-            add_shifted(visible_end, draft_window + 1);
+            add_shifted(visible_end, verify_window + 1);
         }
     }
     // instantiate_graph_family builds one executable per topology class and installs the other
@@ -114,17 +115,17 @@ std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
     // count. Past a verify width of six the attention route turns on the envelope visible-key
     // count, so the frontier breaks where the route flips and the class follows the same
     // predicate; the MTP draft cap (five) keeps both inert today.
-    const std::uint32_t flip_target = verify_route_flip_target(draft_window);
-    if (flip_target != 0U) { add_shifted(flip_target, draft_window + 1); }
+    const std::uint32_t flip_target = verify_route_flip_target(verify_window);
+    if (flip_target != 0U) { add_shifted(flip_target, verify_window + 1); }
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
 
     std::vector<GraphExecutionProfile> profiles = graph_profiles_through(capacity - 1, ends);
     for (GraphExecutionProfile& profile : profiles) {
         const std::uint32_t target_max = static_cast<std::uint32_t>(std::min<std::uint64_t>(
-            capacity, static_cast<std::uint64_t>(profile.max) + draft_window + 1ULL));
+            capacity, static_cast<std::uint64_t>(profile.max) + verify_window + 1ULL));
         profile.topology_class =
-            verify_uses_chunked_small_t(draft_window, 1U, target_max) ? 1U : 0U;
+            verify_uses_chunked_small_t(verify_window, 1U, target_max) ? 1U : 0U;
     }
     return profiles;
 }
