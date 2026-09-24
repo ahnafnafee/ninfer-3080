@@ -43,6 +43,7 @@ struct ExecutionCore {
     // Null on one device; see StageRuntime.
     StageRuntime* stages = nullptr;
     ops::RopeYarn rope_yarn;
+    bool fast_prefill_kernel = false;
 };
 
 struct PrefillContext {

@@ -305,6 +305,7 @@ std::string usage_text(std::string_view program) {
         << " (default: " << kDefaultPrefillChunk << ")\n"
         << "  --kv-dtype <bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4>  KV cache storage "
            "(default: bf16)\n"
+        << "  --fast-prefill-kernel       fast INT8-KV prompt kernel, wave-aligned chunks\n"
         << "  --spec <mtp|dflash|dflash2> speculative backend (default: none)\n"
         << "  --draft-tokens <n>         MTP, DFlash and DFlash2 1..15\n"
         << "  --lm-head-draft             use the optimized proposal head; requires a speculative "
@@ -364,6 +365,8 @@ BenchOptions parse_args(int argc, char** argv) {
             options.prefill_chunk = parse_u32(value("--prefill-chunk"), "prefill-chunk");
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value("--kv-dtype"));
+        } else if (arg == "--fast-prefill-kernel") {
+            options.fast_prefill_kernel = true;
         } else if (arg == "--spec") {
             options.speculative.backend = product::parse_speculative_backend(value("--spec"));
         } else if (arg == "--draft-tokens") {
@@ -614,6 +617,7 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
         << format_bytes(env.memory.kv_payload_bytes) << '\n'
         << "  corpus:     " << env.corpus_path << " (" << env.corpus_tokens << " tokens)\n"
         << "  config:     max_context=" << env.max_context << " prefill_chunk=" << env.prefill_chunk
+        << " fast_prefill_kernel=" << (env.fast_prefill_kernel ? "on" : "off")
         << " kv_cache=" << kv_cache_name(env.kv_cache)
         << " spec=" << product::speculative_backend_name(env.speculative.backend)
         << " draft_tokens=" << env.speculative.draft_tokens
@@ -731,6 +735,7 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "  \"config\": {\n"
         << "    \"max_context\": " << env.max_context << ",\n"
         << "    \"prefill_chunk\": " << env.prefill_chunk << ",\n"
+        << "    \"fast_prefill_kernel\": " << (env.fast_prefill_kernel ? "true" : "false") << ",\n"
         << "    \"kv_cache\": \"" << kv_cache_name(env.kv_cache) << "\",\n"
         << "    \"speculative_backend\": \""
         << product::speculative_backend_name(env.speculative.backend) << "\",\n"

@@ -77,7 +77,7 @@ std::string serve_usage_text(const char* argv0) {
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
-           "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
+           "[--prefill-chunk N] [--fast-prefill-kernel] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
@@ -133,6 +133,9 @@ std::string serve_usage_text(const char* argv0) {
            "are matched against the sequence so far and what followed is proposed; it is exact, and "
            "0 (the default) disables it\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
+           "       --fast-prefill-kernel prefills an INT8-G64 KV cache with the fast prompt-attention "
+           "kernel (FP16 PV per 64-key tile) and rounds --prefill-chunk down to whole attention "
+           "waves; off by default\n"
            "       --auto-prefix-grid offers shared candidates on a token grid so unrelated "
            "callers whose prompts start alike share a cached prefix without any client hint; a grid "
            "frontier is only published once two callers have both asked for it\n"
@@ -281,6 +284,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--prefill-chunk"), "prefill-chunk"));
+        } else if (arg == "--fast-prefill-kernel") {
+            options.fast_prefill_kernel = true;
         } else if (arg == "--context-cost-presets") {
             options.context_cost_presets = require_value("--context-cost-presets");
             if (options.context_cost_presets.empty()) {

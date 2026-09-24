@@ -50,6 +50,7 @@ void configure_text_card(TextContext& card, const ExecutionCore& execution,
     card.set_linear_state_slots(state_source_slot, state_destination_slot);
     card.set_gdn_state_action(GdnStateAction::UpdateInPlace, nullptr);
     card.set_mtp_proposal_extent(mtp_proposal_extent);
+    card.set_fast_prefill_kernel(execution.fast_prefill_kernel);
     if (execution.proposal_head == ProposalHead::Full) {
         card.set_proposal_head(nullptr, nullptr, 0);
         return;
@@ -1037,7 +1038,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         execution::PrefillContext schedule_state{
             {device, parameters, work, state_images->linear(0),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head, stage_runtime.get(), rope_yarn},
+             proposal_head, stage_runtime.get(), rope_yarn, fast_prefill_kernel},
             text_kv_view(sequence),
             mtp_kv_view(sequence),
             decoder->text_kv,

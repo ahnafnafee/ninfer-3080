@@ -14,6 +14,10 @@ namespace ninfer::ops::detail {
 
 enum class CausalAttentionRoute { SmallT, ChunkedSmallT, Prompt };
 
+// The widest prompt-route row block (the eight-warp fast INT8 kernel); every prompt kernel's row
+// block divides it.
+inline constexpr std::int32_t kPromptWaveRows = 128;
+
 struct CausalSmallTInvocation {
     const Tensor* valid_columns = nullptr;
     const Tensor* table_rows    = nullptr;
@@ -88,10 +92,11 @@ void causal_attention_cached_small_t_k8v4_launch(const Tensor& q, const Tensor& 
 void causal_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor& v,
                                     const Tensor& positions, const Tensor& valid_columns,
                                     const Tensor& table_rows, float scale,
-                                    PagedKVBatchLayerView cache, Tensor& out, cudaStream_t stream);
+                                    PagedKVBatchLayerView cache, Tensor& out, bool fast,
+                                    cudaStream_t stream);
 
 void causal_attention_prompt_attention_launch(const Tensor& q, const Tensor& positions, float scale,
-                                              const PagedKVLayerView& cache, Tensor& out,
+                                              const PagedKVLayerView& cache, Tensor& out, bool fast,
                                               cudaStream_t stream);
 
 void causal_attention_prompt_fp8_launch(const Tensor& q, const Tensor& k, const Tensor& v,

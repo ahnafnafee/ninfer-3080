@@ -254,7 +254,7 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
     execution::DFlashAppendContext state{{device, parameters, work, state_images->linear(0),
                                           replay_records ? &*replay_records : nullptr, io,
                                           prefill_hidden, prefill_chunk, proposal_head,
-                                          stage_runtime.get(), rope_yarn},
+                                          stage_runtime.get(), rope_yarn, fast_prefill_kernel},
                                          *dflash};
     mark_workspace_usage(workspace_plan.dflash_context);
     execution::dflash_append_context(state, features, positions, device_counts,
@@ -346,7 +346,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
         execution::OrdinaryBatchContext schedule_state{
             {device, parameters, work, state_images->linear(0),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head, stage_runtime.get(), rope_yarn},
+             proposal_head, stage_runtime.get(), rope_yarn, fast_prefill_kernel},
             decoder->text_kv,
             *io.ordinary,
             *ordinary_host_ingress,
@@ -509,16 +509,16 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                       std::min(capacity, frontier + extent + draft_window));
         }
 
-        execution::MtpBatchContext schedule_state{{device, parameters, work, state_images->linear(0),
-                                                   replay_records ? &*replay_records : nullptr, io,
-                                                   prefill_hidden, prefill_chunk, proposal_head,
-                                                   stage_runtime.get(), rope_yarn},
-                                                  decoder->text_kv,
-                                                  *decoder->mtp_cache(),
-                                                  *io.mtp_decode,
-                                                  *mtp_host_ingress,
-                                                  *mtp_host_egress,
-                                                  state_images->continuation_hidden_store()};
+        execution::MtpBatchContext schedule_state{
+            {device, parameters, work, state_images->linear(0),
+             replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
+             proposal_head, stage_runtime.get(), rope_yarn, fast_prefill_kernel},
+            decoder->text_kv,
+            *decoder->mtp_cache(),
+            *io.mtp_decode,
+            *mtp_host_ingress,
+            *mtp_host_egress,
+            state_images->continuation_hidden_store()};
 
         mark_workspace_usage(workspace_plan.mtp_round);
         execution::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
@@ -715,7 +715,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         execution::DFlashBatchContext schedule_state{
             {device, parameters, work, state_images->linear(0),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head, stage_runtime.get(), rope_yarn},
+             proposal_head, stage_runtime.get(), rope_yarn, fast_prefill_kernel},
             decoder->text_kv,
             *dflash,
             *io.dflash_decode,

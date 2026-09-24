@@ -215,6 +215,10 @@ struct AttentionCase {
     std::uint32_t seed;
     bool zero_q       = false;
     bool graph_replay = false;
+    // Multiplies every generated V value, cached history included. Large values reach V group
+    // scales whose FP16 partial products would leave the FP16 range.
+    float value_scale       = 1.0f;
+    bool fast_prompt_kernel = false;
 };
 
 enum class MappingPattern { Identity, Offset, Fragmented };
@@ -1183,11 +1187,11 @@ HostCache make_cache(const Geometry& geometry, const CachePlan& plan, std::int32
 // covers (BFloat16/Int8Group64/Fp8E4M3Row256), so DeviceCache/verify_cache work identically
 // whichever overload produced the HostCache; nvfp4/k8v4 never read those fields.
 HostCache make_cache(const Geometry& geometry, KvCacheStorage storage, std::int32_t max_context,
-                     std::uint32_t seed) {
+                     std::uint32_t seed, float value_scale = 1.0f) {
     const std::int32_t logical_capacity = align_up_page(max_context);
     const std::size_t elements          = cache_elements(geometry, logical_capacity);
     std::vector<float> logical_k        = make_bf16_values(elements, seed, -0.25f, 0.25f);
-    std::vector<float> logical_v        = make_bf16_values(elements, seed + 1u, -1.0f, 1.0f);
+    std::vector<float> logical_v = make_bf16_values(elements, seed + 1u, -value_scale, value_scale);
 
     if (storage == KvCacheStorage::Nvfp4Group16 || storage == KvCacheStorage::Fp8KeyNvfp4Value) {
         HostCache cache{.geometry         = geometry,
@@ -2474,7 +2478,16 @@ std::string case_label(const char* entry, const Geometry& geometry, KvCacheStora
            " mapping=" + mapping_name(mapping) + " T=" + std::to_string(test_case.tokens) +
            " keys=" + std::to_string(test_case.base + test_case.tokens) +
            " envelope_max=" + std::to_string(test_case.envelope_max) +
-           (test_case.graph_replay ? " graph-replay" : "");
+           (test_case.graph_replay ? " graph-replay" : "") +
+           (test_case.fast_prompt_kernel ? " fast-prompt" : "");
+}
+
+// Attention is linear in V, so a case with scaled V is compared at unit V magnitude, where the
+// fixed criterion's absolute floor covers BF16 output rounding as it does for every other case.
+// A power-of-two scale commutes exactly with the codec, the kernel and BF16 rounding.
+std::vector<double> unit_value_scale(std::vector<double> values, const AttentionCase& test_case) {
+    for (double& value : values) { value /= static_cast<double>(test_case.value_scale); }
+    return values;
 }
 
 template <class Launch>
@@ -2541,8 +2554,8 @@ int run_a1_case(const Geometry& geometry, const CachePlan& plan, const Attention
     for (std::int32_t token = 0; token < test_case.tokens; ++token) {
         positions[static_cast<std::size_t>(token)] = test_case.base + token;
     }
-    const ops::CausalAttentionExecutionEnvelope envelope{static_cast<std::uint32_t>(total),
-                                                         test_case.envelope_max};
+    const ops::CausalAttentionExecutionEnvelope envelope{
+        static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.fast_prompt_kernel};
 
     const HostCache initial = make_cache(geometry, plan, max_context, test_case.seed + 10u);
     HostCache expected      = initial;
@@ -2624,16 +2637,18 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     std::vector<float> q = make_bf16_values(q_elements, test_case.seed, -0.25f, 0.25f);
     if (test_case.zero_q) std::fill(q.begin(), q.end(), 0.0f);
     std::vector<float> k = make_bf16_values(kv_elements, test_case.seed + 1u, -0.25f, 0.25f);
-    std::vector<float> v = make_bf16_values(kv_elements, test_case.seed + 2u, -1.0f, 1.0f);
+    std::vector<float> v = make_bf16_values(kv_elements, test_case.seed + 2u,
+                                            -test_case.value_scale, test_case.value_scale);
     inject_codec_edges(geometry, test_case.tokens, k, v);
     std::vector<std::int32_t> positions(static_cast<std::size_t>(test_case.tokens));
     for (std::int32_t token = 0; token < test_case.tokens; ++token) {
         positions[static_cast<std::size_t>(token)] = test_case.base + token;
     }
-    const ops::CausalAttentionExecutionEnvelope envelope{static_cast<std::uint32_t>(total),
-                                                         test_case.envelope_max};
+    const ops::CausalAttentionExecutionEnvelope envelope{
+        static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.fast_prompt_kernel};
 
-    const HostCache initial = make_cache(geometry, storage, max_context, test_case.seed + 10u);
+    const HostCache initial =
+        make_cache(geometry, storage, max_context, test_case.seed + 10u, test_case.value_scale);
     HostCache expected      = initial;
     append_cache(expected, k, v, positions);
     const std::vector<double> reference = ideal_attention(q, expected, positions);
@@ -2680,8 +2695,9 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         case_label("causal_softmax_attention", geometry, storage, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
-    int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
-                                    attention_criterion(storage));
+    int failures =
+        verify_attention(label, unit_value_scale(bf16_bits_to_double(output_bits), test_case),
+                         unit_value_scale(reference, test_case), attention_criterion(storage));
     failures += verify_cache(label, cache.snapshot(), expected,
                              storage == KvCacheStorage::BFloat16 ||
                                  storage == KvCacheStorage::Nvfp4Group16 ||
@@ -2727,8 +2743,8 @@ int run_a3_case(const Geometry& geometry, const CachePlan& plan, const Attention
     for (std::int32_t token = 0; token < test_case.tokens; ++token) {
         positions[static_cast<std::size_t>(token)] = test_case.base + token;
     }
-    const ops::CausalAttentionExecutionEnvelope envelope{static_cast<std::uint32_t>(total),
-                                                         test_case.envelope_max};
+    const ops::CausalAttentionExecutionEnvelope envelope{
+        static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.fast_prompt_kernel};
 
     const HostCache cache_host = make_cache(geometry, plan, max_context, test_case.seed + 10u);
     const std::vector<double> reference = ideal_attention(q, cache_host, positions);
@@ -2792,10 +2808,11 @@ int run_a3_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     for (std::int32_t token = 0; token < test_case.tokens; ++token) {
         positions[static_cast<std::size_t>(token)] = test_case.base + token;
     }
-    const ops::CausalAttentionExecutionEnvelope envelope{static_cast<std::uint32_t>(total),
-                                                         test_case.envelope_max};
+    const ops::CausalAttentionExecutionEnvelope envelope{
+        static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.fast_prompt_kernel};
 
-    const HostCache cache_host = make_cache(geometry, storage, max_context, test_case.seed + 10u);
+    const HostCache cache_host =
+        make_cache(geometry, storage, max_context, test_case.seed + 10u, test_case.value_scale);
     const std::vector<double> reference = ideal_attention(q, cache_host, positions);
     DeviceCache cache(cache_host, mapping);
 
@@ -2827,8 +2844,9 @@ int run_a3_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         case_label("causal_softmax_attention_cached", geometry, storage, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
-    int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
-                                    attention_criterion(storage));
+    int failures =
+        verify_attention(label, unit_value_scale(bf16_bits_to_double(output_bits), test_case),
+                         unit_value_scale(reference, test_case), attention_criterion(storage));
     failures += verify_cache(label + " cache unchanged", cache.snapshot(), cache_host, true);
     failures += verify_input(label + " q unchanged", dq, q_bits);
     failures += verify_positions(label + " positions unchanged", dp, positions);
@@ -3374,6 +3392,39 @@ int run_batch_cases() {
     return failures;
 }
 
+// INT8 prompt-scale widths for one prompt kernel: partial row blocks, both fast-kernel CTA shapes
+// (its launcher picks four or eight warps from the width), and V magnitudes on either side of the
+// fast kernel's FP16-partial scale limit.
+int run_int8_prompt_cases(bool fast) {
+    constexpr KvCacheStorage storage = KvCacheStorage::Int8Group64;
+    int failures                     = 0;
+    const auto with                  = [fast](AttentionCase test_case) {
+        test_case.fast_prompt_kernel = fast;
+        return test_case;
+    };
+    const Geometry& h24 = kGeometries[0];
+    const Geometry& h16 = kGeometries[1];
+    failures += run_a1_case(h24, storage, with({300, 700, 1000, 901u}), MappingPattern::Fragmented);
+    failures += run_a3_case(h24, storage, with({300, 700, 1000, 902u}), MappingPattern::Identity);
+    failures += run_a1_case(h24, storage, with({1100, 0, 1100, 903u}), MappingPattern::Fragmented);
+    failures += run_a3_case(h24, storage, with({1057, 131, 1188, 904u}), MappingPattern::Offset);
+    failures += run_a1_case(h16, storage, with({1500, 500, 2000, 905u}), MappingPattern::Identity);
+    failures +=
+        run_a3_case(h16, storage, with({129, 2000, 2129, 906u}), MappingPattern::Fragmented);
+    // |V| up to 2048 puts group scales near 16, whose FP16 partials would overflow without the
+    // power-of-two rescale; |V| up to 900 keeps scales near 7, inside the unscaled FP16 path's
+    // margin.
+    failures += run_a1_case(h24, storage, with({200, 1000, 1200, 907u, false, false, 2048.0f}),
+                            MappingPattern::Identity);
+    failures += run_a3_case(h24, storage, with({1100, 64, 1164, 908u, false, false, 2048.0f}),
+                            MappingPattern::Fragmented);
+    failures += run_a3_case(h24, storage, with({640, 400, 1040, 909u, false, false, 900.0f}),
+                            MappingPattern::Identity);
+    failures += run_a1_case(h24, storage, with({600, 300, 900, 910u, false, true}),
+                            MappingPattern::Identity);
+    return failures;
+}
+
 int run_geometry(const Geometry& geometry) {
     int failures = 0;
     for (const CachePlan& plan : {kPlanBf16, kPlanInt8, kPlanRk8v4}) {
@@ -3909,6 +3960,13 @@ int run_batch_profile_validation_cases() {
     return failures;
 }
 
+int run_softmax_attention_int8_prompt_tests() {
+    if (cuda_unavailable()) return 77;
+    const int failures = run_int8_prompt_cases(false) + run_int8_prompt_cases(true);
+    std::cout << (failures ? "FAIL" : "PASS") << " INT8 prompt-scale causal attention\n";
+    return failures ? 1 : 0;
+}
+
 int run_softmax_attention_dflash2_tests() {
     // Profile validation first, and without a GPU: it is pure host logic, and if it is broken the
     // sweep below is the thing it was meant to protect.
@@ -3951,6 +4009,8 @@ int run_softmax_attention_causal_cache_tests() {
     failures += run_case_allowing_arch_skip("causal_softmax_attention k8v4 KV cache (prompt)",
                                             [] { return run_k8v4_prompt_cases(); });
     for (const Geometry& geometry : kGeometries) { failures += run_geometry(geometry); }
+    failures += run_int8_prompt_cases(false);
+    failures += run_int8_prompt_cases(true);
     failures += run_case_allowing_arch_skip("causal_softmax_attention FP8 KV cache (decode)",
                                             [&] { return run_fp8_decode_cases(); });
     failures += run_case_allowing_arch_skip("causal_softmax_attention FP8 KV cache (prompt)",

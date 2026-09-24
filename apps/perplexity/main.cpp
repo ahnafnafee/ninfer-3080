@@ -66,6 +66,7 @@ struct Options {
     bool prefill_a8                     = true;
     bool prefill_cublas                 = false;
     bool prefill_cublas_projections     = true;
+    bool fast_prefill_kernel            = false;
     ninfer::product::LogLevel log_level = ninfer::product::LogLevel::Info;
 };
 
@@ -80,7 +81,7 @@ std::string usage_text() {
            "        only, and scoring runs the prefill phase)\n"
            "       (--no-prefill-a8 is the opposite: scoring runs the prefill phase, so this is\n"
            "        how the integer prefill routes' perplexity cost is measured)\n"
-           "       [--prefill-cublas [--no-prefill-cublas-projections]]\n"
+           "       [--prefill-cublas [--no-prefill-cublas-projections]] [--fast-prefill-kernel]\n"
            "       (--prefill-cublas scores through the cuBLAS prefill route, which is how its\n"
            "        perplexity cost is measured; the projections flag keeps the attention and GDN\n"
            "        input projections off it)\n"
@@ -128,6 +129,8 @@ Options parse_options(int argc, char** argv) {
             out.stride = parse_integer<std::uint32_t>(value("--stride"), "stride");
         } else if (option == "--device") {
             out.device = parse_integer<int>(value("--device"), "device");
+        } else if (option == "--fast-prefill-kernel") {
+            out.fast_prefill_kernel = true;
         } else if (option == "--kv-dtype") {
             const std::string_view dtype = value("--kv-dtype");
             if (dtype == "bf16") {
@@ -302,6 +305,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.prefill_a8       = options.prefill_a8;
     engine_options.prefill_cublas   = options.prefill_cublas;
     engine_options.prefill_cublas_projections = options.prefill_cublas_projections;
+    engine_options.fast_prefill_kernel        = options.fast_prefill_kernel;
     engine_options.startup_observer = startup_log.observer();
     ninfer::Engine engine(std::move(engine_options));
     const ninfer::LoadSummary load = engine.load_summary();
@@ -471,6 +475,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
          {{"purpose", "causal_scoring"},
           {"device", options.device},
           {"context_tokens", options.context},
+          {"fast_prefill_kernel", options.fast_prefill_kernel},
           {"stride_tokens", options.stride},
           {"prefill_chunk_tokens", 1024},
           {"score_tile_tokens", 1024},

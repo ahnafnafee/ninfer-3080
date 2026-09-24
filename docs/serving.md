@@ -1083,6 +1083,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `600000` |
 | `--prefill-chunk N` | text-prefill chunk | `1024` |
+| `--fast-prefill-kernel` | prefill an `int8` KV cache with the fast prompt-attention kernel (FP16 PV accumulation per 64-key tile) and round `--prefill-chunk` down to whole attention waves; a small perplexity cost (see [perplexity](perplexity.md)) | off |
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
 | `--device N` | CUDA device index | `0` |
 | `--devices A,B,...` | one pipeline stage per listed CUDA device (2 to 8, Linux; see the [README](../README.md#several-gpus-pipeline-stages---devices-ab)); overrides `--device` | none |

@@ -2,6 +2,8 @@
 #include "ninfer/ops/softmax_attention.h"
 
 #include "core/layout.h"
+#include "core/device.h"
+#include "core/paged_kv_storage.h"
 #include "ops/kv_cache/d256_profile.h"
 #include "ops/softmax_attention/dense/causal_cache/launch.h"
 
@@ -391,6 +393,18 @@ const char* causal_attention_route_name(CausalAttentionRoute route) {
 
 } // namespace detail
 
+std::int32_t causal_softmax_attention_prompt_wave_tokens(AttentionHeadGeometry geometry) {
+    require_causal_geometry(geometry, "causal_softmax_attention prompt wave");
+    int device          = 0;
+    int multiprocessors = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CUDA_CHECK(cudaDeviceGetAttribute(&multiprocessors, cudaDevAttrMultiProcessorCount, device));
+    // Every prompt kernel runs one CTA per SM over at most kPromptWaveRows query rows of one head,
+    // and kPromptWaveRows is a multiple of every prompt kernel's row block.
+    const std::int32_t row_blocks = std::max(1, multiprocessors / geometry.query_heads);
+    return row_blocks * detail::kPromptWaveRows;
+}
+
 std::size_t causal_softmax_attention_workspace_capacity_bytes(
     AttentionHeadGeometry geometry, KvCacheStorage cache_storage,
     CausalAttentionExecutionEnvelope envelope, std::int32_t batch_size, std::int32_t min_width,
@@ -482,7 +496,7 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
         return;
     }
     detail::causal_attention_prompt_launch(q, k, v, positions, valid_columns, kv_table_rows, scale,
-                                           cache, out, stream);
+                                           cache, out, envelope.fast_prompt_kernel, stream);
 }
 
 void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
@@ -509,7 +523,8 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
             q, positions, scale, cache, envelope, partial.acc, partial.m, partial.l, out, stream);
         return;
     }
-    detail::causal_attention_prompt_attention_launch(q, positions, scale, cache, out, stream);
+    detail::causal_attention_prompt_attention_launch(q, positions, scale, cache, out,
+                                                     envelope.fast_prompt_kernel, stream);
 }
 
 } // namespace ninfer::ops

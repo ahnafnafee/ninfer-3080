@@ -64,6 +64,8 @@ add_test(NAME ninfer_softmax_attention_rk2v4_e8_test
 # under a third of it.
 add_test(NAME ninfer_softmax_attention_dflash2_test
   COMMAND ninfer_tests ninfer_softmax_attention_test --dflash2-only)
+add_test(NAME ninfer_softmax_attention_int8_prompt_test
+  COMMAND ninfer_tests ninfer_softmax_attention_test --int8-prompt-only)
 
 set_tests_properties(
   ninfer_softmax_attention_nvfp4_test
@@ -71,6 +73,7 @@ set_tests_properties(
   ninfer_softmax_attention_rk4v4_e8_test
   ninfer_softmax_attention_rk2v4_e8_test
   ninfer_softmax_attention_dflash2_test
+  ninfer_softmax_attention_int8_prompt_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
 ninfer_add_op_test(ninfer_sliding_window_attention_test

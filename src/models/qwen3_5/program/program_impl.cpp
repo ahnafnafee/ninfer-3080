@@ -146,7 +146,8 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       context_cache(plan.context_cache),
       continuation_capacity(normalized_private_capacity(plan.context_cache)),
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
-      prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window), lookup_ngram(plan.lookup_ngram),
+      prefill_chunk(plan.prefill_chunk), fast_prefill_kernel(plan.fast_prefill_kernel),
+      draft_window(plan.draft_window), lookup_ngram(plan.lookup_ngram),
       speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
       proposal_head(plan.proposal_head), rope_yarn(plan.rope_yarn),
       vision_enabled(plan.features.vision),
@@ -647,7 +648,7 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
             const std::uint32_t nominal = std::min(prefill_chunk, predictor_count - cursor);
             execution::PrefillContext schedule_state{
                 {device, parameters, work, state_images->linear(0), nullptr, io, prefill_hidden,
-                 prefill_chunk, proposal_head, stage_runtime.get(), rope_yarn},
+                 prefill_chunk, proposal_head, stage_runtime.get(), rope_yarn, fast_prefill_kernel},
                 decoder->text_kv.execution_view(text_kv_addresses->execution_row(*address)),
                 {},
                 decoder->text_kv,

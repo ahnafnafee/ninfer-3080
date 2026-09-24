@@ -24,6 +24,8 @@ KV representations are `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `nvfp4`, and `k8
 
 All seven have been measured on this corpus; the results, alongside each format's size and decode
 speed, are in [`docs/config-calculator.html`](config-calculator.html).
+`--fast-prefill-kernel` scores `int8` with the fast prompt-attention kernel (as
+`ninfer-serve --fast-prefill-kernel` prefills); `report.json` records it as `fast_prefill_kernel`.
 
 ```bash
 ./build/apps/ninfer-perplexity models/qwen3_8_27b.ninfer \

@@ -960,6 +960,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
         "resolved Paged KV capacity exceeds int32"));
     impl->max_concurrency     = inputs.max_concurrency;
     impl->prefill_chunk       = inputs.prefill_chunk;
+    impl->fast_prefill_kernel = inputs.fast_prefill_kernel;
     impl->draft_window        = inputs.draft_window;
     impl->lookup_ngram        = inputs.lookup_ngram;
     impl->speculative_backend = inputs.speculative_backend;
@@ -1070,6 +1071,21 @@ ops::RopeYarn planned_rope_yarn(const execution::Parameters& parameters,
     return {static_cast<float>(options.max_context) / static_cast<float>(native), native};
 }
 
+// Every chunk but a prompt's last one has the effective width, so with the fast prefill kernel it
+// is rounded down to whole prompt-attention waves, keeping each full chunk's attention free of a
+// partial last wave.
+std::uint32_t effective_prefill_chunk(const execution::Parameters& parameters,
+                                      const EngineOptions& options) {
+    const std::uint32_t requested = std::min(options.prefill_chunk, options.max_context);
+    if (!options.fast_prefill_kernel) { return requested; }
+    const auto& attention = *parameters.model.config().text.attention;
+    const auto wave = static_cast<std::uint32_t>(ops::causal_softmax_attention_prompt_wave_tokens(
+        {static_cast<std::int32_t>(attention.head_dim),
+         static_cast<std::int32_t>(attention.num_attention_heads),
+         static_cast<std::int32_t>(attention.num_key_value_heads)}));
+    return requested < wave ? requested : requested / wave * wave;
+}
+
 std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
 make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,
                            const EngineOptions& options) {
@@ -1078,7 +1094,8 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .parameters          = &parameters,
         .capacity            = options.max_context,
         .max_concurrency     = options.max_concurrency,
-        .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
+        .prefill_chunk       = effective_prefill_chunk(parameters, options),
+        .fast_prefill_kernel = options.fast_prefill_kernel,
         .draft_window        = options.speculative.draft_tokens,
         .lookup_ngram        = options.speculative.lookup_ngram,
         .speculative_backend = options.speculative.backend,
