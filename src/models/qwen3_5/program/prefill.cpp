@@ -3,6 +3,7 @@
 #include "models/qwen3_5/program/context_work.h"
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/execution/linear.h"
+#include "core/token_logprobs.h"
 #include "core/device.h"
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/sampling.h"
@@ -72,6 +73,7 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     card.set_rope_yarn(state.execution.rope_yarn);
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
+    card.set_first_token_logits(state.first_token_logits);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
@@ -97,6 +99,7 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
     card.set_rope_yarn(state.execution.rope_yarn);
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
+    card.set_first_token_logits(state.first_token_logits);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
@@ -156,6 +159,14 @@ void sample_from_hidden(PrefillContext& state, const Tensor& hidden, std::int32_
     Tensor logits = state.execution.io.logits.slice(1, 0, 1);
     project(hidden, state.execution.parameters.text.output_head, logits, state.execution.work,
             state.execution.device.stream);
+    if (state.first_token_logits != nullptr) {
+        CUDA_CHECK(
+            cudaMemcpyAsync(state.first_token_logits, logits.data,
+                            static_cast<std::size_t>(dimension(
+                                state.execution.parameters.model.resources().public_token_count)) *
+                                sizeof(std::uint16_t),
+                            cudaMemcpyDeviceToHost, state.execution.device.stream));
+    }
     CUDA_CHECK(cudaMemcpyAsync(state.execution.io.pos.data, &absolute_position,
                                sizeof(absolute_position), cudaMemcpyHostToDevice,
                                state.execution.device.stream));
@@ -643,7 +654,8 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
             : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
                                                                 : 0U;
         ensure_sequence_kv_mapped(sequence, prompt_tokens, backend_materialized);
-        request.grammar = request_plan.grammar;
+        request.grammar                  = request_plan.grammar;
+        request.first_token_top_logprobs = request_plan.first_token_top_logprobs;
         install_sampling(sequence, request, request_plan.sampling);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
@@ -1052,6 +1064,14 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             selectors.destination,
             staged.initial_mtp_extent,
             dflash_host_ingress};
+        const auto public_tokens =
+            static_cast<std::size_t>(dimension(parameters.model.resources().public_token_count));
+        if (request.first_token_top_logprobs != 0) {
+            if (!first_token_logits_host) {
+                first_token_logits_host.emplace(public_tokens * sizeof(std::uint16_t));
+            }
+            schedule_state.first_token_logits = first_token_logits_host->data();
+        }
 
         if (staged.mtp_bridge == MtpBridgeMode::BeforeSuffix) {
             if (staged.cursor != staged.base || staged.base == 0 ||
@@ -1278,6 +1298,14 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             staged.next_capture < staged.capture_groups.size() &&
             staged.capture_groups[staged.next_capture].frontier == prompt_tokens;
         if (!prompt_frontier_capture) { request.prefill.reset(); }
+        std::optional<FirstTokenLogprobs> first_token_logprobs;
+        if (request.first_token_top_logprobs != 0) {
+            first_token_logprobs = token_logprobs_from_bf16(
+                std::span<const std::uint16_t>(
+                    static_cast<const std::uint16_t*>(first_token_logits_host->data()),
+                    public_tokens),
+                host_tokens[0], request.first_token_top_logprobs);
+        }
         request.pending   = PendingCandidate{.kind          = PendingKind::Begin,
                                              .base_E        = 0,
                                              .base_S        = 0,
@@ -1290,6 +1318,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             .processed_prompt_tokens = reported_tokens(),
             .complete                = true,
             .timing                  = timing.finish(),
+            .first_token_logprobs    = std::move(first_token_logprobs),
         };
     } catch (...) {
         timing.begin_wait();

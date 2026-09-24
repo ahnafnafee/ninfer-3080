@@ -75,7 +75,7 @@ std::string require_function_name(const Json& object, std::string param) {
     return name;
 }
 
-void validate_standard_output_controls(const Json& body) {
+void validate_standard_output_controls(const Json& body, const RequestLimits& limits) {
     if (body.contains("functions") && !body.at("functions").is_null()) {
         const Json& functions = body.at("functions");
         if (!functions.is_array()) { bad_request("functions must be an array", "functions"); }
@@ -131,11 +131,22 @@ void validate_standard_output_controls(const Json& body) {
         }
     }
     if (const std::optional<int> top_logprobs = optional_int(body, "top_logprobs")) {
-        if (*top_logprobs != 0) {
+        if (*top_logprobs != 0 && !limits.first_token_logprobs) {
             bad_request(
                 "nonzero top_logprobs requires alternative-token probabilities in the response, "
-                "which NInfer does not provide",
+                "which this server does not provide without --first-token-logprobs",
                 "top_logprobs", "logprobs_not_supported");
+        }
+        if (*top_logprobs < 0 ||
+            *top_logprobs > static_cast<int>(ninfer::kMaximumFirstTokenTopLogprobs)) {
+            bad_request("top_logprobs must be in [0," +
+                            std::to_string(ninfer::kMaximumFirstTokenTopLogprobs) + "]",
+                        "top_logprobs");
+        }
+        if (*top_logprobs != 0 && body.contains("stream") && body.at("stream").is_boolean() &&
+            body.at("stream").get<bool>()) {
+            bad_request("top_logprobs is reported only for non-streaming requests", "top_logprobs",
+                        "logprobs_not_supported");
         }
     }
 
@@ -958,7 +969,7 @@ void parse_output_limit(const Json& body, const RequestLimits& limits, OpenAICha
 
 OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestLimits& limits) {
     require_object(body, "request body must be a JSON object");
-    validate_standard_output_controls(body);
+    validate_standard_output_controls(body, limits);
     validate_constrained_decoding_extensions(body);
     validate_compatibility_hints(body);
 
@@ -983,6 +994,9 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     parse_messages(body, output.generation);
     parse_stop(body, output.generation);
     parse_sampling(body, output.generation);
+    if (const std::optional<int> top_logprobs = optional_int(body, "top_logprobs")) {
+        output.generation.first_token_top_logprobs = static_cast<std::uint32_t>(*top_logprobs);
+    }
     parse_stream_options(body, output);
     parse_response_observations(body, output);
     parse_output_limit(body, limits, output);

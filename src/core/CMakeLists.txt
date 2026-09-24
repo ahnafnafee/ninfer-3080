@@ -9,6 +9,7 @@ add_library(ninfer_core STATIC
   host_kv_arena.cpp
   disk_kv_store.cpp
   disk_kv_bridge.cpp
+  token_logprobs.cpp
   paged_kv_cache.cpp
   linear_attention_state.cpp
   layout.cpp

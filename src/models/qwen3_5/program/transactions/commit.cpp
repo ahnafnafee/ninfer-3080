@@ -49,6 +49,7 @@ PrefillProgress ProgramImpl::wrap_prefill(std::uint32_t lane, runtime::PrefillSt
     out.processed_prompt_tokens = step.processed_prompt_tokens;
     out.complete                = step.complete;
     out.timing                  = step.timing;
+    out.first_token_logprobs    = std::move(step.first_token_logprobs);
     if (step.complete) {
         const std::array<std::uint32_t, 1> lanes{lane};
         const runtime::BatchedGeneratedRound round{

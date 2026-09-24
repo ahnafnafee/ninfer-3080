@@ -503,6 +503,17 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.thinking            = result.thinking;
     outcome.finish_reason       = result.finish_reason;
     outcome.matched_stop_string = std::move(result.matched_stop_string);
+    if (result.first_token_logprobs) {
+        const auto view = [this](const ninfer::TokenLogprob& entry) {
+            return TokenLogprobView{.bytes   = engine_->token_bytes(entry.token),
+                                    .logprob = entry.logprob};
+        };
+        FirstTokenLogprobsView logprobs{.selected = view(result.first_token_logprobs->selected)};
+        for (const ninfer::TokenLogprob& entry : result.first_token_logprobs->top) {
+            logprobs.top.push_back(view(entry));
+        }
+        outcome.first_token_logprobs = std::move(logprobs);
+    }
 
     outcome.metrics.prepare_seconds = prepared.prepare_seconds;
     outcome.metrics.ttft_seconds =

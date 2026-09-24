@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -191,6 +192,68 @@ CompletionUsage usage_from(const GenerationOutcome& outcome) {
     };
 }
 
+// A token's bytes as JSON text: an invalid or truncated UTF-8 sequence becomes U+FFFD, since a
+// token can end inside a multi-byte character. The exact bytes travel beside it.
+std::string lossy_utf8(std::string_view bytes) {
+    std::string out;
+    out.reserve(bytes.size());
+    std::size_t index = 0;
+    while (index < bytes.size()) {
+        const auto lead       = static_cast<unsigned char>(bytes[index]);
+        std::size_t length    = 0;
+        std::uint32_t minimum = 0;
+        if (lead < 0x80) {
+            length = 1;
+        } else if (lead >= 0xC2 && lead <= 0xDF) {
+            length  = 2;
+            minimum = 0x80;
+        } else if (lead >= 0xE0 && lead <= 0xEF) {
+            length  = 3;
+            minimum = 0x800;
+        } else if (lead >= 0xF0 && lead <= 0xF4) {
+            length  = 4;
+            minimum = 0x10000;
+        }
+        bool valid              = length != 0 && index + length <= bytes.size();
+        std::uint32_t codepoint = length == 1 ? lead : lead & (0x7FU >> length);
+        for (std::size_t offset = 1; valid && offset < length; ++offset) {
+            const auto next = static_cast<unsigned char>(bytes[index + offset]);
+            valid           = (next & 0xC0U) == 0x80U;
+            codepoint       = (codepoint << 6U) | (next & 0x3FU);
+        }
+        valid = valid && codepoint >= minimum && codepoint <= 0x10FFFF &&
+                (codepoint < 0xD800 || codepoint > 0xDFFF);
+        if (valid) {
+            out.append(bytes.substr(index, length));
+            index += length;
+        } else {
+            out.append("\xEF\xBF\xBD");
+            ++index;
+        }
+    }
+    return out;
+}
+
+Json token_logprob_json(const TokenLogprobView& entry) {
+    Json bytes = Json::array();
+    for (const char byte : entry.bytes) { bytes.push_back(static_cast<unsigned char>(byte)); }
+    return Json{{"token", lossy_utf8(entry.bytes)},
+                {"logprob", entry.logprob},
+                {"bytes", std::move(bytes)}};
+}
+
+// Only the first generated token carries log probabilities (--first-token-logprobs).
+Json choice_logprobs(const GenerationOutcome& outcome) {
+    if (!outcome.first_token_logprobs) { return nullptr; }
+    Json first = token_logprob_json(outcome.first_token_logprobs->selected);
+    Json top   = Json::array();
+    for (const TokenLogprobView& entry : outcome.first_token_logprobs->top) {
+        top.push_back(token_logprob_json(entry));
+    }
+    first["top_logprobs"] = std::move(top);
+    return Json{{"content", Json::array({std::move(first)})}, {"refusal", nullptr}};
+}
+
 Json base_payload(const OpenAIChatResponseIdentity& identity, const char* object) {
     return Json{{"id", identity.id},
                 {"object", object},
@@ -258,7 +321,7 @@ std::string make_chat_completion_response(const OpenAIChatResponseIdentity& iden
     payload["choices"] = Json::array(
         {Json{{"index", 0},
               {"message", std::move(message)},
-              {"logprobs", nullptr},
+              {"logprobs", choice_logprobs(outcome)},
               {"finish_reason",
                has_tool_calls ? Json("tool_calls") : Json(finish_reason(outcome.finish_reason))}}});
     payload["usage"]   = usage_json(usage_from(outcome));

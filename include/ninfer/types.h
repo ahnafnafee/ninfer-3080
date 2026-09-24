@@ -385,12 +385,17 @@ struct StructuredOutputOptions {
     std::string schema; // JSON Schema for JsonSchema, otherwise empty
 };
 
+inline constexpr std::uint32_t kMaximumFirstTokenTopLogprobs = 20;
+
 struct ExecutionOptions {
     StructuredOutputOptions structured_output;
     SamplingOverrides sampling;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
+    // Report the first generated token's log probability and this many likely alternatives
+    // (at most kMaximumFirstTokenTopLogprobs); zero reports nothing. Sampling is unaffected.
+    std::uint32_t first_token_top_logprobs = 0;
 };
 
 struct OutputOptions {
@@ -980,6 +985,19 @@ struct MaterializationDiagnostics {
                const MaterializationDiagnostics&) noexcept = default;
 };
 
+// A token and its log probability under a raw next-token distribution.
+struct TokenLogprob {
+    TokenId token = 0;
+    float logprob = 0.0F;
+};
+
+// The first generated token and the most likely alternatives, under the full distribution at the
+// prompt's last position before temperature, penalties or filters.
+struct FirstTokenLogprobs {
+    TokenLogprob selected;
+    std::vector<TokenLogprob> top;
+};
+
 struct GenerationResult {
     PromptSummary prompt;
     std::vector<TokenId> generated_token_ids;
@@ -997,6 +1015,8 @@ struct GenerationResult {
     GenerationEngineTiming engine_timing;
     SpeculativeStats speculative;
     ThinkingBudgetStats thinking;
+    // Present when ExecutionOptions::first_token_top_logprobs asked for it.
+    std::optional<FirstTokenLogprobs> first_token_logprobs;
 };
 
 struct ArenaMemorySummary {

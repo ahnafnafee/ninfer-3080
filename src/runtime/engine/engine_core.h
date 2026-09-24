@@ -909,6 +909,7 @@ private:
         result.timings                 = request->generation_timings;
         result.timings.prepare_seconds = request->prepare_seconds;
         result.speculative             = std::move(request->speculative_stats);
+        result.first_token_logprobs    = std::move(request->first_token_logprobs);
         result.thinking                = request->output.thinking_stats();
         result.materialization         = request->materialization_diagnostics;
         if (request->first_token) {
@@ -1418,7 +1419,8 @@ private:
             scheduler_.clear_prefill_lane(lane);
             request_admission_check();
         }
-        request->begin = progress.summary;
+        request->begin                = progress.summary;
+        request->first_token_logprobs = std::move(progress.first_token_logprobs);
         const std::array<std::uint32_t, 1> lanes{lane};
         phase.finish();
         commit_pending(std::move(*progress.pending), lanes, false, cancelled_at_unit_start);

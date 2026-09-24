@@ -190,6 +190,7 @@ struct RequestRecord {
     GenerationTimings generation_timings;
     RequestHostTiming host_timing;
     SpeculativeStats speculative_stats;
+    std::optional<FirstTokenLogprobs> first_token_logprobs;
     MaterializationDiagnostics materialization_diagnostics;
 
     std::mutex mutex;

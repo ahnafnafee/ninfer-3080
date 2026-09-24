@@ -84,7 +84,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
            "[--max-private-continuations N] [--max-shared-prefixes N] "
            "[--max-long-anchors-per-continuation N] [--max-cache-markers-per-request N] "
-           "[--disk-kv-path DIR] [--disk-kv-gib N] [--disk-kv-restore] "
+           "[--disk-kv-path DIR] [--disk-kv-gib N] [--disk-kv-restore] [--first-token-logprobs] "
            "[--context-cache-policy default|rolling] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
@@ -150,6 +150,8 @@ std::string serve_usage_text(const char* argv0) {
            "       --disk-kv-path DIR adds a disk tier: evicted continuations write their KV and "
            "StateImages there (per artifact and profile, --disk-kv-gib total, default 64) and "
            "survive restarts; --disk-kv-restore seeds a new request's matching prefix from it\n"
+           "       --first-token-logprobs accepts Chat Completions top_logprobs (non-streaming) "
+           "and reports the first generated token's log probability with its alternatives\n"
            "       --context-cache-policy rolling lets a capture that extends a resident "
            "checkpoint inherit its demand, for one conversation whose prompt only grows\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
@@ -287,6 +289,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--prefill-chunk"), "prefill-chunk"));
+        } else if (arg == "--first-token-logprobs") {
+            options.first_token_logprobs = true;
         } else if (arg == "--fast-prefill-kernel") {
             options.fast_prefill_kernel = true;
         } else if (arg == "--context-cost-presets") {

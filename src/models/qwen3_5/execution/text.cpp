@@ -1500,6 +1500,14 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 Tensor last_xf = xf.slice(1, len - 1, 1);
                 Tensor logits  = matrix_window(io_.logits, 1);
                 project(last_xf, *lm_head_, logits, work_, s);
+                if (first_token_logits_ != nullptr) {
+                    CUDA_CHECK(
+                        cudaMemcpyAsync(first_token_logits_, logits.data,
+                                        static_cast<std::size_t>(dimension(
+                                            parameters_.model.resources().public_token_count)) *
+                                            sizeof(std::uint16_t),
+                                        cudaMemcpyDeviceToHost, s));
+                }
                 // Set io_.pos to the bonus token's absolute position (base + T) before picking so
                 // the sampler RNG is keyed by it (prefill purpose keeps it distinct from the first
                 // decode step, which reuses the same io_.pos).

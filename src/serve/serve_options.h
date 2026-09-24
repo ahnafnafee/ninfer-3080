@@ -97,6 +97,9 @@ struct ServeOptions {
     // is given and carries no API key, so it stays off unless asked for by name.
     bool webui_mcp_proxy = false;
     bool structured_output = false; // accept JSON/JSON Schema constrained requests
+    // Accept Chat Completions top_logprobs and report the first generated token's log
+    // probability with that many alternatives.
+    bool first_token_logprobs = false;
     // --usage-chunk-choice: emit the streaming usage chunk with a zero-delta choice instead of the
     // OpenAI-conformant empty choices array. Strict client parsers (GitHub Copilot) reject the
     // empty array as "Response contained no choices"; the extra choice is inert for other clients.

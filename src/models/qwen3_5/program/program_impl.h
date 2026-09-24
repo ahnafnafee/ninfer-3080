@@ -192,6 +192,7 @@ struct RequestBasePlanImpl {
     qwen3_5::detail::PrefixShortlistDigests prefix_digests;
     std::uint32_t prefix_identity_tag = 0;
     bool allow_prefix_reuse           = false;
+    std::uint32_t first_token_top_logprobs = 0;
 };
 
 // Program-owned physical planning state shared by request materialization and active capture.
@@ -248,6 +249,7 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
     std::vector<CaptureGroup> shared_candidates;
     ops::SamplingConfig sampling;
     std::shared_ptr<text::GrammarState> grammar;
+    std::uint32_t first_token_top_logprobs    = 0;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
     runtime::LaneId destination{};
@@ -408,6 +410,7 @@ struct RequestControl {
     PendingCandidate pending;
     ops::SamplingConfig sampling_host;
     std::shared_ptr<text::GrammarState> grammar;
+    std::uint32_t first_token_top_logprobs = 0;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     detail::PhysicalResources active_resources;
@@ -676,6 +679,9 @@ public:
 
     std::optional<PinnedHostBuffer> round_host;
     std::optional<PinnedHostBuffer> score_logprobs_host;
+    // The logits behind a request's first token, copied when the request reports log
+    // probabilities.
+    std::optional<PinnedHostBuffer> first_token_logits_host;
     TokenId* host_tokens = nullptr;
     std::optional<PinnedHostBuffer> ordinary_host;
     qwen3_5::OrdinaryDecodeIngress* ordinary_host_ingress = nullptr;

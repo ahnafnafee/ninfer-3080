@@ -49,6 +49,8 @@ inline constexpr int kUnboundedOutputTokens = std::numeric_limits<int>::max();
 // Server-side context needed while parsing/validating a request.
 struct RequestLimits {
     int default_max_tokens = 8192;
+    // Accept top_logprobs for the first generated token (--first-token-logprobs).
+    bool first_token_logprobs = false;
 };
 
 enum class ContentKind {
@@ -211,6 +213,8 @@ struct GenerationRequest {
     bool parallel_tool_calls = true;
     SamplingParams sampling;
     StructuredOutputOptions structured_output;
+    // Log probabilities of the first generated token with this many alternatives; zero is off.
+    std::uint32_t first_token_top_logprobs = 0;
 
     [[nodiscard]] bool uses_tools() const noexcept {
         return !tools.empty() && tool_choice.mode != ToolChoiceMode::None;

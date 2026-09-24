@@ -58,6 +58,11 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
     resolved.execution.allow_prefix_reuse      = options.execution.allow_prefix_reuse;
     resolved.execution.thinking                = options.execution.thinking;
     resolved.execution.structured_output       = std::move(options.execution.structured_output);
+    if (options.execution.first_token_top_logprobs > kMaximumFirstTokenTopLogprobs) {
+        throw std::invalid_argument("first_token_top_logprobs must be at most " +
+                                    std::to_string(kMaximumFirstTokenTopLogprobs));
+    }
+    resolved.execution.first_token_top_logprobs = options.execution.first_token_top_logprobs;
     resolved.stop                              = std::move(options.stop);
     resolved.output                            = options.output;
     return resolved;
@@ -257,6 +262,11 @@ PreparedPrompt Engine::prepare_tokens(std::vector<TokenId> token_ids,
 std::vector<TokenId> Engine::tokenize_text(std::string_view text) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     return impl_->active->frontend.tokenize_text(text);
+}
+
+std::string Engine::token_bytes(TokenId token) const {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    return impl_->active->frontend.token_bytes(token);
 }
 
 std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32_t first_target) {

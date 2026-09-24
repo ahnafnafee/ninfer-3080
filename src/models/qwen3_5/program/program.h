@@ -711,6 +711,7 @@ struct PrefillProgress {
     runtime::ExecutionTiming timing;
     std::optional<PendingBatch> pending;
     std::optional<CaptureOffer> capture;
+    std::optional<FirstTokenLogprobs> first_token_logprobs;
 };
 
 enum class CaptureStatePlacement : std::uint8_t {

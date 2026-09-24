@@ -66,6 +66,8 @@ struct PrefillStepResult {
     std::uint32_t processed_prompt_tokens = 0;
     bool complete                         = false;
     ExecutionTiming timing;
+    // On the completing step of a request that asked for them.
+    std::optional<FirstTokenLogprobs> first_token_logprobs;
 };
 
 struct RoundBudget {

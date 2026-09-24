@@ -366,6 +366,7 @@ ninfer::RequestOptions to_request_options(const GenerationRequest& request,
             request.thinking_budget ? request.thinking_budget : server.default_thinking_budget;
     }
     options.execution.sampling             = resolve_sampling_overrides(request.sampling, server);
+    options.execution.first_token_top_logprobs = request.first_token_top_logprobs;
     options.output.raw                     = false;
     options.output.preserve_special_tokens =
         request.structured_output.kind == StructuredOutputKind::None &&

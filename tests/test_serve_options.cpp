@@ -593,6 +593,10 @@ int main() {
     failures += check(redaction_present, "startup argv omitted the API-key redaction marker");
 
     failures += check(!defaults.fast_prefill_kernel, "the fast prefill kernel must default off");
+    failures += check(
+        !defaults.first_token_logprobs &&
+            parse({"ninfer-serve", "model.ninfer", "--first-token-logprobs"}).first_token_logprobs,
+        "--first-token-logprobs did not default off or was not preserved");
     failures += check(parse({"ninfer-serve", "model.ninfer", "--fast-prefill-kernel"})
                           .fast_prefill_kernel,
                       "--fast-prefill-kernel was not preserved");

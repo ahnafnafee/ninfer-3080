@@ -51,6 +51,17 @@ struct GenerationMetrics {
     ninfer::MaterializationDiagnostics materialization;
 };
 
+// One token's decoded bytes (not necessarily whole UTF-8) and its log probability.
+struct TokenLogprobView {
+    std::string bytes;
+    float logprob = 0.0F;
+};
+
+struct FirstTokenLogprobsView {
+    TokenLogprobView selected;
+    std::vector<TokenLogprobView> top;
+};
+
 struct GenerationOutcome {
     std::string text;
     std::string reasoning;
@@ -62,6 +73,7 @@ struct GenerationOutcome {
     ninfer::ThinkingBudgetStats thinking;
     ninfer::FinishReason finish_reason = ninfer::FinishReason::OutputLimit;
     std::optional<std::string> matched_stop_string;
+    std::optional<FirstTokenLogprobsView> first_token_logprobs;
     GenerationMetrics metrics;
 };
 
