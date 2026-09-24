@@ -104,6 +104,67 @@ static __device__ const float kKVCacheE8RadiusScale[16] = {
     0.5000f, 0.6300f, 0.7937f, 1.0000f, 1.2599f, 1.5874f, 2.0000f, 2.5198f,
 };
 
+// Table-driven decode. A decoded lane is rint(v * scale) over eleven arguments: a root lane v is
+// one of {-4, -2, 0, 2, 4} and the residual axis adds +-1 to exactly one lane. kKVCacheE8RootLanes
+// holds each root's lane indices v/2 + 2 as eight nibbles, dimension 0 lowest, so one byte permute
+// per four lanes gathers the codes from the radius's row of kKVCacheE8EvenCodes; the axis lane is
+// patched from kKVCacheE8OddCodes, v + 1 at index k + 1 and v - 1 at index k. The codes are the
+// products of the reference arithmetic below, and tests/ops/test_e8_root_decode.cu checks every
+// code pair against it.
+static __device__ const std::uint32_t kKVCacheE8RootLanes[240] = {
+    0x22222200u, 0x22222240u, 0x22222204u, 0x22222244u, 0x22222020u, 0x22222420u, 0x22222024u,
+    0x22222424u, 0x22220220u, 0x22224220u, 0x22220224u, 0x22224224u, 0x22202220u, 0x22242220u,
+    0x22202224u, 0x22242224u, 0x22022220u, 0x22422220u, 0x22022224u, 0x22422224u, 0x20222220u,
+    0x24222220u, 0x20222224u, 0x24222224u, 0x02222220u, 0x42222220u, 0x02222224u, 0x42222224u,
+    0x22222002u, 0x22222402u, 0x22222042u, 0x22222442u, 0x22220202u, 0x22224202u, 0x22220242u,
+    0x22224242u, 0x22202202u, 0x22242202u, 0x22202242u, 0x22242242u, 0x22022202u, 0x22422202u,
+    0x22022242u, 0x22422242u, 0x20222202u, 0x24222202u, 0x20222242u, 0x24222242u, 0x02222202u,
+    0x42222202u, 0x02222242u, 0x42222242u, 0x22220022u, 0x22224022u, 0x22220422u, 0x22224422u,
+    0x22202022u, 0x22242022u, 0x22202422u, 0x22242422u, 0x22022022u, 0x22422022u, 0x22022422u,
+    0x22422422u, 0x20222022u, 0x24222022u, 0x20222422u, 0x24222422u, 0x02222022u, 0x42222022u,
+    0x02222422u, 0x42222422u, 0x22200222u, 0x22240222u, 0x22204222u, 0x22244222u, 0x22020222u,
+    0x22420222u, 0x22024222u, 0x22424222u, 0x20220222u, 0x24220222u, 0x20224222u, 0x24224222u,
+    0x02220222u, 0x42220222u, 0x02224222u, 0x42224222u, 0x22002222u, 0x22402222u, 0x22042222u,
+    0x22442222u, 0x20202222u, 0x24202222u, 0x20242222u, 0x24242222u, 0x02202222u, 0x42202222u,
+    0x02242222u, 0x42242222u, 0x20022222u, 0x24022222u, 0x20422222u, 0x24422222u, 0x02022222u,
+    0x42022222u, 0x02422222u, 0x42422222u, 0x00222222u, 0x40222222u, 0x04222222u, 0x44222222u,
+    0x11111111u, 0x31111113u, 0x31111131u, 0x11111133u, 0x31111311u, 0x11111313u, 0x11111331u,
+    0x31111333u, 0x31113111u, 0x11113113u, 0x11113131u, 0x31113133u, 0x11113311u, 0x31113313u,
+    0x31113331u, 0x11113333u, 0x31131111u, 0x11131113u, 0x11131131u, 0x31131133u, 0x11131311u,
+    0x31131313u, 0x31131331u, 0x11131333u, 0x11133111u, 0x31133113u, 0x31133131u, 0x11133133u,
+    0x31133311u, 0x11133313u, 0x11133331u, 0x31133333u, 0x31311111u, 0x11311113u, 0x11311131u,
+    0x31311133u, 0x11311311u, 0x31311313u, 0x31311331u, 0x11311333u, 0x11313111u, 0x31313113u,
+    0x31313131u, 0x11313133u, 0x31313311u, 0x11313313u, 0x11313331u, 0x31313333u, 0x11331111u,
+    0x31331113u, 0x31331131u, 0x11331133u, 0x31331311u, 0x11331313u, 0x11331331u, 0x31331333u,
+    0x31333111u, 0x11333113u, 0x11333131u, 0x31333133u, 0x11333311u, 0x31333313u, 0x31333331u,
+    0x11333333u, 0x33111111u, 0x13111113u, 0x13111131u, 0x33111133u, 0x13111311u, 0x33111313u,
+    0x33111331u, 0x13111333u, 0x13113111u, 0x33113113u, 0x33113131u, 0x13113133u, 0x33113311u,
+    0x13113313u, 0x13113331u, 0x33113333u, 0x13131111u, 0x33131113u, 0x33131131u, 0x13131133u,
+    0x33131311u, 0x13131313u, 0x13131331u, 0x33131333u, 0x33133111u, 0x13133113u, 0x13133131u,
+    0x33133133u, 0x13133311u, 0x33133313u, 0x33133331u, 0x13133333u, 0x13311111u, 0x33311113u,
+    0x33311131u, 0x13311133u, 0x33311311u, 0x13311313u, 0x13311331u, 0x33311333u, 0x33313111u,
+    0x13313113u, 0x13313131u, 0x33313133u, 0x13313311u, 0x33313313u, 0x33313331u, 0x13313333u,
+    0x33331111u, 0x13331113u, 0x13331131u, 0x33331133u, 0x13331311u, 0x33331313u, 0x33331331u,
+    0x13331333u, 0x13333111u, 0x33333113u, 0x33333131u, 0x13333133u, 0x33333311u, 0x13333313u,
+    0x13333331u, 0x33333333u,
+};
+
+// rint(v * scale[radius]) for v = -4, -2, 0, 2, 4 in bytes 0..4.
+static __device__ const std::uint64_t kKVCacheE8EvenCodes[16] = {
+    0x0000000000000000ULL, 0x0000000000000000ULL, 0x0000000000000000ULL, 0x00000001000000ffULL,
+    0x00000001000000ffULL, 0x00000001000000ffULL, 0x000000010100ffffULL, 0x000000020100fffeULL,
+    0x000000020100fffeULL, 0x000000030100fffdULL, 0x000000030200fefdULL, 0x000000040200fefcULL,
+    0x000000050300fdfbULL, 0x000000060300fdfaULL, 0x000000080400fcf8ULL, 0x0000000a0500fbf6ULL,
+};
+
+// rint(v * scale[radius]) for v = -5, -3, -1, 1, 3, 5 in bytes 0..5.
+static __device__ const std::uint64_t kKVCacheE8OddCodes[16] = {
+    0x0000000000000000ULL, 0x0000000000000000ULL, 0x00000100000000ffULL, 0x00000100000000ffULL,
+    0x000001010000ffffULL, 0x000001010000ffffULL, 0x000002010000fffeULL, 0x000002010000fffeULL,
+    0x000002020000fefeULL, 0x0000030201fffefdULL, 0x0000040201fffefcULL, 0x0000050301fffdfbULL,
+    0x0000060401fffcfaULL, 0x0000080502fefbf8ULL, 0x00000a0602fefaf6ULL, 0x00000d0803fdf8f3ULL,
+};
+
 // The radius index is the nearest integer to 3*log2(r)+8 clamped to [1,15], for r the block norm
 // over its group scale times sqrt(8): one plus the count of thresholds 2^((k-8.5)/3), k=2..15, that
 // r reaches, so no logarithm is evaluated. Relative norms below 0.08 are the empty block.
@@ -264,9 +325,9 @@ __device__ __forceinline__ void kv_cache_e8_root_store_key_group(std::uint8_t* p
 }
 
 // One block back to eight signed int8 codes, dimension 0 in the lowest byte: the root and the unit
-// residual axis, added and scaled by the radius.
-__device__ __forceinline__ uint2 kv_cache_e8_root_decode_block(std::uint32_t root,
-                                                               std::uint32_t radius_axis) {
+// residual axis, added and scaled by the radius. This is the arithmetic the tables encode.
+__device__ __forceinline__ uint2
+kv_cache_e8_root_decode_block_reference(std::uint32_t root, std::uint32_t radius_axis) {
     const std::uint32_t radius = radius_axis >> 4;
     if (radius == 0 || root >= 240) { return make_uint2(0, 0); }
     const std::uint64_t direction = __ldg(&kKVCacheE8Roots[root]);
@@ -281,6 +342,26 @@ __device__ __forceinline__ uint2 kv_cache_e8_root_decode_block(std::uint32_t roo
         const int code = __float2int_rn(__fmul_rn(static_cast<float>(value), scale));
         words[d >> 2] |= (static_cast<std::uint32_t>(code) & 0xffu) << (8 * (d & 3));
     }
+    return make_uint2(words[0], words[1]);
+}
+
+__device__ __forceinline__ uint2 kv_cache_e8_root_decode_block(std::uint32_t root,
+                                                               std::uint32_t radius_axis) {
+    if (root >= 240) { return make_uint2(0, 0); }
+    const std::uint32_t radius   = radius_axis >> 4;
+    const std::uint32_t lanes    = __ldg(&kKVCacheE8RootLanes[root]);
+    const std::uint64_t even     = __ldg(&kKVCacheE8EvenCodes[radius]);
+    const auto even_low          = static_cast<std::uint32_t>(even);
+    const auto even_high         = static_cast<std::uint32_t>(even >> 32);
+    std::uint32_t words[2]       = {__byte_perm(even_low, even_high, lanes & 0xffffu),
+                                    __byte_perm(even_low, even_high, lanes >> 16)};
+    const std::uint32_t axis_dim = (radius_axis >> 1) & 7u;
+    const std::uint32_t index    = ((lanes >> (4 * axis_dim)) & 0xfu) + ((radius_axis & 1u) ^ 1u);
+    const std::uint32_t axis_code =
+        static_cast<std::uint32_t>(__ldg(&kKVCacheE8OddCodes[radius]) >> (8 * index)) & 0xffu;
+    const std::uint32_t shift = 8 * (axis_dim & 3u);
+    std::uint32_t& word       = words[axis_dim >> 2];
+    word                      = (word & ~(0xffu << shift)) | (axis_code << shift);
     return make_uint2(words[0], words[1]);
 }
 

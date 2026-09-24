@@ -119,6 +119,11 @@ ninfer_add_op_test(ninfer_sparse_moe_route_network_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_sparse_moe_route_network.cu"
   LIBRARIES ninfer_ops)
 
+# Table decode of the E8 root codec against its arithmetic reference, over every code pair.
+ninfer_add_op_test(ninfer_e8_root_decode_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_e8_root_decode.cu"
+  LIBRARIES ninfer_ops)
+
 ninfer_add_op_test(ninfer_mtp_pack_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_mtp_pack.cpp"
   LIBRARIES ninfer_ops)
