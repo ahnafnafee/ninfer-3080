@@ -278,11 +278,37 @@ int test_tools() {
     failures +=
         check(resolve_prompt_semantics(default_reasoning, thinking_server).enable_thinking == false,
               "a forced choice turns off reasoning that the server default enables");
+    ServeOptions effort_server;
+    effort_server.default_reasoning_effort = RequestedReasoningEffort::Low;
+    const ResolvedPromptSemantics forced_effort =
+        resolve_prompt_semantics(default_reasoning, effort_server);
+    failures += check(forced_effort.enable_thinking == false && !forced_effort.reasoning_effort,
+                      "a forced choice turns off reasoning that the server default effort enables");
     body["reasoning_effort"] = "high";
     failures += check(api_error([&] { (void)prompt(parse(body).generation); }).code ==
                           "tool_choice_not_supported",
                       "a forced choice with a requested reasoning effort is rejected");
     body.erase("reasoning_effort");
+
+    {
+        Json plain = base_request();
+        const GenerationRequest omitted = parse(plain).generation;
+        const ResolvedPromptSemantics defaulted = resolve_prompt_semantics(omitted, effort_server);
+        failures += check(defaulted.enable_thinking == true &&
+                              defaulted.reasoning_effort == ninfer::ReasoningEffort::Low,
+                          "the server default effort applies when the request names none");
+        plain["reasoning_effort"] = "high";
+        const ResolvedPromptSemantics explicit_effort =
+            resolve_prompt_semantics(parse(plain).generation, effort_server);
+        failures += check(explicit_effort.reasoning_effort == ninfer::ReasoningEffort::XHigh,
+                          "a request effort overrides the server default effort");
+        plain.erase("reasoning_effort");
+        plain["enable_thinking"] = false;
+        const ResolvedPromptSemantics disabled =
+            resolve_prompt_semantics(parse(plain).generation, effort_server);
+        failures += check(disabled.enable_thinking == false && !disabled.reasoning_effort,
+                          "a request that disables thinking ignores the server default effort");
+    }
 
     body                        = base_request();
     body["tools"]               = Json::array({function_tool(), function_tool("search")});

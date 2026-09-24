@@ -152,6 +152,28 @@ int main() {
     } catch (const std::invalid_argument&) { zero_thinking_budget_rejected = true; }
     failures += check(zero_thinking_budget_rejected, "zero --default-thinking-budget was accepted");
 
+    const ServeOptions reasoning_effort =
+        parse({"ninfer-serve", "model.ninfer", "--default-reasoning-effort", "low"});
+    failures += check(reasoning_effort.default_reasoning_effort == RequestedReasoningEffort::Low,
+                      "--default-reasoning-effort did not preserve its value");
+    failures += check(!parse({"ninfer-serve", "model.ninfer"}).default_reasoning_effort,
+                      "the server default reasoning effort is not unset by default");
+    for (const std::vector<std::string>& rejected :
+         {std::vector<std::string>{"ninfer-serve", "model.ninfer", "--default-reasoning-effort",
+                                   "extreme"},
+          std::vector<std::string>{"ninfer-serve", "model.ninfer", "--no-thinking",
+                                   "--default-reasoning-effort", "low"}}) {
+        bool thrown = false;
+        try {
+            (void)parse(rejected);
+        } catch (const std::invalid_argument&) { thrown = true; }
+        failures += check(thrown, "an invalid --default-reasoning-effort was accepted");
+    }
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--no-thinking",
+                             "--default-reasoning-effort", "none"})
+                              .default_reasoning_effort == RequestedReasoningEffort::None,
+                      "--default-reasoning-effort none was refused beside --no-thinking");
+
     bool empty_model_id_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--model-id", ""});

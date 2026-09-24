@@ -155,9 +155,18 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
         .preserve_thinking         = preserve ? preserve : server.preserve_thinking,
         .chat_template_kwargs_json = kwargs.dump(),
     };
-    if (effort) {
-        const bool enables = *effort != RequestedReasoningEffort::None;
-        if (thinking && *thinking != enables)
+    // The server's default effort yields to everything the request decides: its own thinking
+    // switch, a forced call, and an assistant prefill.
+    std::optional<RequestedReasoningEffort> applied = effort;
+    if (!applied && server.default_reasoning_effort && result.enable_thinking != false &&
+        !(thinking && *server.default_reasoning_effort == RequestedReasoningEffort::None) &&
+        request.tool_choice.forced_name.empty() &&
+        request.continuation != ninfer::PromptContinuationMode::ContinueFinalAssistant) {
+        applied = server.default_reasoning_effort;
+    }
+    if (applied) {
+        const bool enables = *applied != RequestedReasoningEffort::None;
+        if (effort && thinking && *thinking != enables)
             invalid_prompt_option("reasoning effort conflicts with enable_thinking",
                                   "reasoning_effort", "conflicting_template_option");
         // A request effort overrides the server's thinking default.
@@ -167,7 +176,7 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
         // three rungs (low, medium, xhigh) and raise on anything else, so the outer values collapse
         // onto the nearest rung rather than failing the request -- rejecting 'high' is what makes
         // Claude Code unusable against a stock Qwen3.8 template (QwenLM/Qwen3.8#217).
-        switch (*effort) {
+        switch (*applied) {
         case RequestedReasoningEffort::None:
             result.reasoning_effort = ninfer::ReasoningEffort::None;
             break;

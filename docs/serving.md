@@ -322,6 +322,11 @@ For Chat Completions, `reasoning_effort: "none"` requests disabled thinking. The
 interprets the other standard values (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
 Conflicting explicit `enable_thinking` and effort values return `conflicting_template_option`.
 
+`--default-reasoning-effort` sets the effort for requests that name none. It yields to everything
+the request decides: a request effort replaces it, and a request that disables thinking, forces a
+tool call or prefills the assistant turn is served as if it were unset. `none` turns thinking off
+by default; any other value conflicts with `--no-thinking` and fails startup.
+
 `preserve_thinking` controls reasoning retention according to the selected template. Request
 options override server defaults set with `--no-thinking` and `--preserve-thinking`. Unspecified
 thinking, effort and preservation options use the template's defaults.
@@ -800,6 +805,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--no-prefill-cublas-projections` | with `--prefill-cublas`, keep the attention and GDN input projections off that route | projections on |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
+| `--default-reasoning-effort E` | effort for requests that name none: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
 | `--vision-residency resident\|overlay` | `overlay` keeps the Vision tower in pinned host memory and encodes each image inside a window borrowed from the evict-ranked text weight tail, so `--vision` no longer reserves device memory and `--kv-capacity auto` resolves the no-vision capacity; requires `--vision` and CUDA virtual memory management | `resident` |
 | `--vision-max-merged N` | merged-token budget of one media item, `[64, 16384]`; larger images and video frame pairs are downscaled at preprocessing instead of being rejected, and the overlay window is sized for it | 16384 |
