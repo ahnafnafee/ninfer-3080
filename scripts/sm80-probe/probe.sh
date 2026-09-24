@@ -198,13 +198,19 @@ done
 
 # Order matters a little: a long compute probe first heats the card, so the bandwidth numbers that
 # follow are honest for a sustained load rather than an idle P-state.
+# One failure policy for every stage: keep going so all logs are produced, remember what failed, and
+# exit non-zero at the end so automation cannot accept incomplete or invalid results.
+FAILED_STAGES=()
 run() {
   local label="$1" file="$2"; shift 2
   echo "--- $label ---"
-  timeout 600 "$@" > "$OUT/$file" 2>&1
-  local rc=$?
+  local rc=0
+  timeout 600 "$@" > "$OUT/$file" 2>&1 || rc=$?
   cat "$OUT/$file"
-  (( rc == 0 )) || echo "($label exited $rc)"
+  if (( rc != 0 )); then
+    echo "($label exited $rc)"
+    FAILED_STAGES+=("$label (exit $rc)")
+  fi
 }
 run "FP32 / INT32 / packed-half rates" fma.txt    "$OUT/bin/fma_rate_probe"
 run "tensor core rates"                tensor.txt "$OUT/bin/tensor_core_rate_probe"
@@ -267,7 +273,9 @@ if (( ENGINE )); then
     --prompt "List the first eight prime numbers, then explain briefly why 1 is not prime." \
     --max-new 200 --greedy --kv-dtype int8 --no-thinking --max-context 8192 --kv-capacity 8192 \
     --device 0 > "$OUT/engine-output.txt" 2> "$OUT/engine-stderr.txt"
-  echo "ENGINE_EXIT=$?"
+  engine_rc=$?
+  echo "ENGINE_EXIT=$engine_rc"
+  (( engine_rc == 0 )) || FAILED_STAGES+=("engine generation (exit $engine_rc)")
   grep -E "gpu weights used|free after weights|free after startup|decode speed|error" "$OUT/engine-stderr.txt" | head
   echo "--- output (read it: sensible text means the kernels are right here) ---"
   cat "$OUT/engine-output.txt"
@@ -287,12 +295,14 @@ ninfer_rmsnorm_test ninfer_kv_cache_test ninfer_gdn_gating_proj_test"
   [[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "TESTS_BUILD_FAILED"; exit 1; }
   pattern="^($(echo $TEST_TARGETS | tr ' ' '|'))\$"
   ctest --test-dir /root/build -j1 --output-on-failure -R "$pattern" 2>&1 | tee "$OUT/tests.txt" | tail -30
-  TESTS_RC="${PIPESTATUS[0]}"
+  tests_rc="${PIPESTATUS[0]}"
+  (( tests_rc == 0 )) || FAILED_STAGES+=("ctest (exit $tests_rc; see $OUT/tests.txt)")
 fi
 
-if (( TESTS )) && [[ "${TESTS_RC:-0}" -ne 0 ]]; then
+if (( ${#FAILED_STAGES[@]} )); then
   echo
-  echo "=== TESTS_FAILED (ctest exit $TESTS_RC; see $OUT/tests.txt) ==="
+  echo "=== FAILED: ${#FAILED_STAGES[@]} stage(s); results in $OUT are incomplete or invalid ==="
+  printf '  - %s\n' "${FAILED_STAGES[@]}"
   exit 1
 fi
 
