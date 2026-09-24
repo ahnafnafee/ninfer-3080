@@ -42,6 +42,14 @@ private:
     void require_range(std::size_t byte_offset, std::size_t count, const char* operation) const;
 };
 
+namespace core {
+// WDDM residency (Windows builds with NINFER_D3D12_RESIDENCY, --wddm-evictable-budget): owning
+// DeviceArenas come from a D3D12 heap held resident at maximum priority, so WDDM evicts other
+// allocations on the adapter rather than paging the arena out. Elsewhere enabling it throws.
+void set_wddm_residency_lock_enabled(bool enabled);
+[[nodiscard]] bool wddm_residency_lock_enabled() noexcept;
+} // namespace core
+
 class DeviceArena {
 public:
     class Scope {

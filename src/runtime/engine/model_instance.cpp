@@ -1,4 +1,5 @@
 #include "runtime/engine/model_instance.h"
+#include "core/arena.h"
 #include "artifact/reader.h"
 #include "artifact/formats.h"
 #include "core/startup.h"
@@ -67,9 +68,13 @@ std::size_t current_free_device_bytes() {
 }
 
 // Free memory on each rank's device, in rank order. Ranks that share a physical device (a test mode
-// that exercises the multi-stage path on one card) split what is free between them, since each one's
-// budget is spent from the same memory.
-std::vector<std::size_t> free_bytes_by_rank(const DeviceContext& device) {
+// that exercises the multi-stage path on one card) split what is free between them, since each
+// one's budget is spent from the same memory. Under the WDDM evictable budget the primary device
+// may also count what other processes hold beyond the desktop floor: all of it but the resident
+// weights.
+std::vector<std::size_t> free_bytes_by_rank(const DeviceContext& device,
+                                            bool evictable_budget      = false,
+                                            std::size_t resident_bytes = 0) {
     std::vector<std::size_t> out;
     for (std::size_t rank = 0; rank < device.size(); ++rank) {
         std::size_t sharing = 0;
@@ -77,7 +82,17 @@ std::vector<std::size_t> free_bytes_by_rank(const DeviceContext& device) {
             if (device.same_physical_device(rank, other)) { ++sharing; }
         }
         DeviceBinding bind(device.rank(rank).device);
-        out.push_back(current_free_device_bytes() / sharing);
+        std::size_t free_bytes = current_free_device_bytes();
+        if (evictable_budget && rank == 0) {
+            constexpr std::size_t kDesktopFloor = 512ULL << 20;
+            std::size_t free_now                = 0;
+            std::size_t total                   = 0;
+            CUDA_CHECK(cudaMemGetInfo(&free_now, &total));
+            if (total > resident_bytes + kDesktopFloor) {
+                free_bytes = std::max(free_bytes, total - resident_bytes - kDesktopFloor);
+            }
+        }
+        out.push_back(free_bytes / sharing);
     }
     return out;
 }
@@ -191,6 +206,7 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
         options.stage_layers = models::qwen3_5::default_stage_layers(
             reader, models::load_options(options), sizing, free_bytes);
     }
+    core::set_wddm_residency_lock_enabled(options.wddm_evictable_budget);
     StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
     auto plan = models::qwen3_5::plan_load(reader, models::load_options(options));
     binding.complete();
@@ -210,7 +226,9 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
             .prefill_signature = signature},
         options.context_cost.preset_path);
     auto planner    = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
-    const std::vector<std::size_t> free_by_rank = free_bytes_by_rank(device);
+    const std::vector<std::size_t> free_by_rank =
+        free_bytes_by_rank(device, options.wddm_evictable_budget,
+                           instance->model->storage_stats().device_capacity_bytes);
     auto resolution = resolve_kv_capacity(
         options.kv_capacity, planner.capacity_curve(), free_by_rank.front(),
         std::span<const std::size_t>(free_by_rank).subspan(1));

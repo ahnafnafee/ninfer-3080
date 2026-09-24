@@ -210,6 +210,12 @@ struct EngineOptions {
     // unscaled RoPE, or with rope_yarn the whole window takes Qwen's YaRN at factor
     // max_context / native (ops::RopeYarn).
     bool rope_yarn = false;
+    // Windows builds with NINFER_D3D12_RESIDENCY only: allocate the device arenas from a D3D12
+    // heap held resident at maximum priority and budget the runtime against the adapter's
+    // dedicated memory less the weights and a 512 MiB desktop floor, not against what is free now,
+    // on the grounds that WDDM will evict other allocations. Not for a GPU that drives the
+    // desktop, whose allocations are often not evictable.
+    bool wddm_evictable_budget         = false;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(2048);
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;

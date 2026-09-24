@@ -93,7 +93,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--no-cuda-graph] [--no-prefix-reuse] [--auto-prefix-grid] [--devices N,M,...] [--stage-layers A,B,...] "
            "[--chat-template FILE] "
            "[--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] "
-           "[--gdn-state-fp16] [--rope-yarn] "
+           "[--gdn-state-fp16] [--rope-yarn] [--wddm-evictable-budget] "
            "[--mlp-a8-decode] [--no-prefill-a8] "
            "[--prefill-cublas [--no-prefill-cublas-projections]] [--lookup-ngram N] "
            "[--no-thinking] [--preserve-thinking] [--cors] "
@@ -406,6 +406,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.gdn_state_fp16 = true;
         } else if (arg == "--rope-yarn") {
             options.rope_yarn = true;
+        } else if (arg == "--wddm-evictable-budget") {
+            options.wddm_evictable_budget = true;
         } else if (arg == "--mlp-a8-decode") {
             options.mlp_a8_decode = true;
         } else if (arg == "--no-prefill-a8") {

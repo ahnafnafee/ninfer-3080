@@ -43,6 +43,7 @@ struct Options {
     bool mtp_experts_q4 = false;
     bool gdn_state_fp16 = false;
     bool rope_yarn      = false;
+    bool wddm_evictable_budget = false;
     bool mlp_a8_decode  = false;
     bool prefill_a8     = true;
     bool prefill_cublas = false;

@@ -126,6 +126,9 @@ int main() {
                       "serve help omits --kv-dtype rk2v4-e8");
     const ServeOptions yarn = parse({"ninfer-serve", "model.ninfer", "--rope-yarn"});
     failures += check(yarn.rope_yarn && !defaults.rope_yarn, "--rope-yarn did not select YaRN");
+    const ServeOptions wddm = parse({"ninfer-serve", "model.ninfer", "--wddm-evictable-budget"});
+    failures += check(wddm.wddm_evictable_budget && !defaults.wddm_evictable_budget,
+                      "--wddm-evictable-budget did not select the WDDM budget");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});
