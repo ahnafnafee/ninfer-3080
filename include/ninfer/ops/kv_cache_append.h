@@ -60,6 +60,25 @@ struct KVCacheAppendPrefixExecutionEnvelope {
  *   code[i]    = s == 0 ? 0 : I4(clamp(RNE_even(FP32(x[i]) * inv), -7, 7))
  *   decode[i]  = FP32(code[i]) * s.
  *
+ * A cache whose key plane is also DType::U8 (RotatedLloyd4KeyInt4Value, rk4v4) keeps the rk8v4
+ * value plane and stores each key dimension as a 4-bit index, packed with the same nibble order,
+ * over the INT8-G64 key scale plane. Index = sign << 3 | m, with m in 0..7 selecting the Lloyd-Max
+ * level for N(0,1) {0.1284, 0.3881, 0.6568, 0.9424, 1.2562, 1.6181, 2.0690, 2.7326}, represented
+ * by the fixed INT8 code C[m] = {6, 18, 31, 44, 58, 75, 96, 127}. For one G64 group, with lane l
+ * holding x[l] and x[l+32] and every sum formed by single-rounded FP32 additions of those per-lane
+ * partials in xor-butterfly order (offsets 16, 8, 4, 2, 1):
+ *
+ *   r          = FP32_SQRT_RN(sum(x0*x0 + x1*x1) * (1/64))
+ *   inv        = r > 0 ? FP32(1 / r) : 0
+ *   m[i]       = count of boundaries {0.25825, 0.52245, 0.79960, 1.09930, 1.43715, 1.84355,
+ *                2.40080} <= abs(FP32(x[i]) * inv)
+ *   index[i]   = (x[i] < 0 ? 8 : 0) | m[i],  c[i] = (x[i] < 0 ? -1 : 1) * C[m[i]]
+ *   scale_bits = FP16_RNE(r > 0 ? sum(x0*c0 + x1*c1) / sum(c0*c0 + c1*c1) : 0)
+ *   decode[i]  = FP32(c[i]) * FP32(scale_bits).
+ *
+ * The indices are chosen against the group RMS and the scale is the least-squares fit of the
+ * chosen codes, so the decoded key is an ordinary INT8-G64 key and the INT8 QK path consumes it.
+ *
  * V uses represented BF16 source values directly as x under every profile, including rk8v4: values
  * are never rotated, so no inverse preparation is applied to the attention output. For every
  * quantized profile, K is a paired physical representation for causal Attention: its

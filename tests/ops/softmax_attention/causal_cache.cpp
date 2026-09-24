@@ -3,6 +3,7 @@
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/softmax_attention.h"
 #include "ops/kv_cache/d256_profile.h"
+#include "ops/kv_cache_lloyd4_oracle.h"
 #include "ops/op_tester.h"
 #include "ops/softmax_attention/oracle.h"
 
@@ -49,11 +50,16 @@ struct CachePlan {
     // rk8v4 is the one plan whose value plane is a packed code stream rather than one code per
     // stored element, and it is the only plan whose value code dtype differs from its key dtype.
     [[nodiscard]] constexpr bool packed_values() const { return value_code_dtype == DType::U8; }
+
+    // rk4v4 stores its rotated keys as packed 4-bit Lloyd-Max indices over the INT8 family's G64
+    // scale plane, and pairs them with rk8v4's packed value plane.
+    bool packed_keys = false;
 };
 
 constexpr CachePlan kPlanBf16{DType::BF16, DType::BF16};
 constexpr CachePlan kPlanInt8{DType::I8, DType::I8};
 constexpr CachePlan kPlanRk8v4{DType::I8, DType::U8};
+constexpr CachePlan kPlanRk4v4{DType::I8, DType::U8, true};
 constexpr CachePlan kPlanFp8{DType::FP8_E4M3FN, DType::FP8_E4M3FN};
 
 // The public KvCacheStorage selection a CachePlan corresponds to, for call sites (workspace
@@ -61,6 +67,7 @@ constexpr CachePlan kPlanFp8{DType::FP8_E4M3FN, DType::FP8_E4M3FN};
 KvCacheStorage cache_plan_storage(const CachePlan& plan) {
     if (plan.dtype == DType::BF16) return KvCacheStorage::BFloat16;
     if (plan.dtype == DType::FP8_E4M3FN) return KvCacheStorage::Fp8E4M3Row256;
+    if (plan.packed_keys) return KvCacheStorage::RotatedLloyd4KeyInt4Value;
     return plan.packed_values() ? KvCacheStorage::RotatedInt8KeyInt4ValueGroup64
                                 : KvCacheStorage::Int8Group64;
 }
@@ -104,6 +111,10 @@ constexpr ReductionCriterion kAttentionRk8v4Criterion{
     /*gross_relative_to_max_reference*/ kBf16GrossRelativeFloor,
 };
 
+// rk4v4 decodes its keys exactly to INT8 codes before the same s8 QK path rk8v4 uses, and the
+// oracle consumes those decoded keys, so every remaining error term is rk8v4's.
+constexpr ReductionCriterion kAttentionRk4v4Criterion = kAttentionRk8v4Criterion;
+
 constexpr ReductionCriterion kAttentionFp8Criterion{
     /*relative_l2*/ 1.2e-2,
     /*gross_absolute*/ 4.0e-3,
@@ -145,6 +156,10 @@ TestCacheLayout test_cache_layout(KvCacheStorage storage) {
         // rk8v4: the value plane packs two signed 4-bit codes per byte (U8, half the head
         // dimension) over a finer 32-value group, so its scale plane is twice as wide.
         return {{DType::I8, kHeadDim, DType::FP16, kQuantGroups},
+                {DType::U8, kHeadDim / 2, DType::FP16, kRk8ValueGroups}};
+    case KvCacheStorage::RotatedLloyd4KeyInt4Value:
+        // rk4v4: packed 4-bit key indices over the G64 key scale plane, rk8v4's value plane.
+        return {{DType::U8, kHeadDim / 2, DType::FP16, kQuantGroups},
                 {DType::U8, kHeadDim / 2, DType::FP16, kRk8ValueGroups}};
     case KvCacheStorage::Fp8E4M3Row256:
         return {{DType::FP8_E4M3FN, kHeadDim, DType::FP16, kFp8QuantGroups},
@@ -568,6 +583,8 @@ struct HostCache {
     std::vector<std::uint16_t> k_bf16;
     std::vector<std::uint16_t> v_fp16;
     std::vector<std::int8_t> k_i8;
+    // rk4v4 packed key indices: one byte holds the dimension pair (2p, 2p+1).
+    std::vector<std::uint8_t> k_packed;
     std::vector<std::int8_t> v_i8;
     // rk8v4 packed signed int4 value codes: one byte holds the dimension pair (2p, 2p+1).
     std::vector<std::uint8_t> v_packed;
@@ -586,6 +603,7 @@ struct HostCache {
     std::vector<float> rotated_v_quantized;
 
     [[nodiscard]] bool packed_values() const { return profile.packed_int4_values(); }
+    [[nodiscard]] bool packed_keys() const { return storage == KvCacheStorage::RotatedLloyd4KeyInt4Value; }
     [[nodiscard]] std::int32_t value_extent() const { return profile.value_leading_extent; }
     [[nodiscard]] std::int32_t k_scale_extent() const { return profile.scale_leading_extent; }
     [[nodiscard]] std::int32_t v_scale_extent() const { return profile.value_scale_leading_extent; }
@@ -858,6 +876,44 @@ void encode_rotated_key_row(std::span<const float> source, std::size_t source_ba
     }
 }
 
+// rk4v4 key coding: rotate, encode each G64 group with the shared independent oracle
+// (ops/kv_cache_lloyd4_oracle.h), and decode the represented codes back to original coordinates
+// for the attention oracle.
+void encode_rotated_lloyd4_key_row(std::span<const float> source, std::size_t source_base,
+                                   std::vector<std::uint8_t>& packed, std::size_t packed_base,
+                                   std::vector<std::uint16_t>& scales, std::size_t scale_base,
+                                   std::vector<float>& logical, std::size_t logical_base) {
+    std::array<float, kHeadDim> rotated{};
+    for (std::int32_t d = 0; d < kHeadDim; ++d) {
+        rotated[static_cast<std::size_t>(d)] = source[source_base + static_cast<std::size_t>(d)];
+    }
+    normalized_hadamard_d256(rotated);
+
+    std::array<std::uint8_t, kHeadDim> indices{};
+    std::array<float, kHeadDim> decoded{};
+    for (std::int32_t group = 0; group < kQuantGroups; ++group) {
+        const Lloyd4Group encoded =
+            lloyd4_encode_group(&rotated[static_cast<std::size_t>(group * kQuantGroup)]);
+        const std::uint16_t scale_bits = f32_to_f16_bits(encoded.scale);
+        scales[scale_base + static_cast<std::size_t>(group)] = scale_bits;
+        const float represented = f16_bits_to_f32(scale_bits);
+        for (std::int32_t i = 0; i < kQuantGroup; ++i) {
+            const std::size_t d = static_cast<std::size_t>(group * kQuantGroup + i);
+            indices[d]          = encoded.index[static_cast<std::size_t>(i)];
+            decoded[d]          = static_cast<float>(lloyd4_code(indices[d])) * represented;
+        }
+    }
+    for (std::int32_t byte = 0; byte < kHeadDim / 2; ++byte) {
+        packed[packed_base + static_cast<std::size_t>(byte)] = static_cast<std::uint8_t>(
+            indices[static_cast<std::size_t>(2 * byte)] |
+            (indices[static_cast<std::size_t>(2 * byte + 1)] << 4));
+    }
+    normalized_hadamard_d256(decoded);
+    for (std::int32_t d = 0; d < kHeadDim; ++d) {
+        logical[logical_base + static_cast<std::size_t>(d)] = decoded[static_cast<std::size_t>(d)];
+    }
+}
+
 // CachePlan overload: covers this fork's four originally-registered profiles, including rk8v4
 // (kPlanRk8v4), which the public KvCacheStorage enum did not distinguish from plain INT8 before
 // this fork added RotatedInt8KeyInt4ValueGroup64. cache.storage is still populated here (from
@@ -866,7 +922,8 @@ void encode_rotated_key_row(std::span<const float> source, std::size_t source_ba
 HostCache make_cache(const Geometry& geometry, const CachePlan& plan, std::int32_t max_context,
                      std::uint32_t seed) {
     const ops::D256KVCacheProfile profile =
-        ops::d256_kv_cache_profile(plan.dtype, plan.value_code_dtype);
+        plan.packed_keys ? ops::d256_kv_cache_profile(KvCacheStorage::RotatedLloyd4KeyInt4Value)
+                         : ops::d256_kv_cache_profile(plan.dtype, plan.value_code_dtype);
     const std::int32_t logical_capacity = align_up_page(max_context);
     const std::size_t elements          = cache_elements(geometry, logical_capacity);
     std::vector<float> logical_k        = make_bf16_values(elements, seed, -0.25f, 0.25f);
@@ -914,7 +971,11 @@ HostCache make_cache(const Geometry& geometry, const CachePlan& plan, std::int32
         return cache;
     }
 
-    cache.k_i8.assign(elements, 0);
+    if (plan.packed_keys) {
+        cache.k_packed.assign(elements / 2, 0);
+    } else {
+        cache.k_i8.assign(elements, 0);
+    }
     if (profile.packed_int4_values()) {
         cache.v_packed.assign(elements / 2, 0);
     } else {
@@ -924,8 +985,15 @@ HostCache make_cache(const Geometry& geometry, const CachePlan& plan, std::int32
         for (std::int32_t position = 0; position < logical_capacity; ++position) {
             const std::size_t code  = cache_index(geometry, logical_capacity, head, position, 0);
             const std::size_t scale = scale_index(geometry, logical_capacity, head, position, 0);
-            encode_rotated_key_row(logical_k, code, cache.k_i8, code, cache.k_scale, scale,
-                                   cache.logical_k_quantized, code);
+            if (plan.packed_keys) {
+                encode_rotated_lloyd4_key_row(
+                    logical_k, code, cache.k_packed,
+                    packed_cache_index(geometry, logical_capacity, head, position, 0),
+                    cache.k_scale, scale, cache.logical_k_quantized, code);
+            } else {
+                encode_rotated_key_row(logical_k, code, cache.k_i8, code, cache.k_scale, scale,
+                                       cache.logical_k_quantized, code);
+            }
             if (profile.packed_int4_values()) {
                 for (std::int32_t group = 0; group < kRk8ValueGroups; ++group) {
                     const std::int32_t d = group * kRk8ValueGroup;
@@ -1161,8 +1229,15 @@ void append_cache(HostCache& cache, const std::vector<float>& k, const std::vect
             }
             const std::size_t scale =
                 scale_index(geometry, cache.logical_capacity, head, position, 0);
-            encode_rotated_key_row(k, source, cache.k_i8, target, cache.k_scale, scale,
-                                   cache.logical_k_quantized, target);
+            if (cache.packed_keys()) {
+                encode_rotated_lloyd4_key_row(
+                    k, source, cache.k_packed,
+                    packed_cache_index(geometry, cache.logical_capacity, head, position, 0),
+                    cache.k_scale, scale, cache.logical_k_quantized, target);
+            } else {
+                encode_rotated_key_row(k, source, cache.k_i8, target, cache.k_scale, scale,
+                                       cache.logical_k_quantized, target);
+            }
             if (cache.packed_values()) {
                 for (std::int32_t group = 0; group < kRk8ValueGroups; ++group) {
                     const std::int32_t d = group * kRk8ValueGroup;
@@ -1375,6 +1450,23 @@ public:
                               block_table_host_, physical_pages_);
             v_.copy_from_host(v_physical.data(), v_physical.size());
             v_scale_.copy_from_host(vs_physical.data(), vs_physical.size() * sizeof(std::uint16_t));
+        } else if (storage_ == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
+            const auto k_physical =
+                scatter_paged(cache.k_packed, layout_.key.code_extent, geometry_,
+                              logical_capacity_, block_table_host_, physical_pages_);
+            const auto ks_physical =
+                scatter_paged(cache.k_scale, k_scale_extent_, geometry_, logical_capacity_,
+                              block_table_host_, physical_pages_);
+            k_.copy_from_host(k_physical.data(), k_physical.size());
+            k_scale_.copy_from_host(ks_physical.data(), ks_physical.size() * sizeof(std::uint16_t));
+            const auto v_physical =
+                scatter_paged(cache.v_packed, layout_.value.code_extent, geometry_,
+                              logical_capacity_, block_table_host_, physical_pages_);
+            const auto vs_physical =
+                scatter_paged(cache.v_scale, v_scale_extent_, geometry_, logical_capacity_,
+                              block_table_host_, physical_pages_);
+            v_.copy_from_host(v_physical.data(), v_physical.size());
+            v_scale_.copy_from_host(vs_physical.data(), vs_physical.size() * sizeof(std::uint16_t));
         } else if (storage_ == KvCacheStorage::Fp8E4M3Row256) {
             const auto k_physical =
                 scatter_paged(cache.k_fp8, kHeadDim, geometry_, logical_capacity_,
@@ -1510,6 +1602,21 @@ public:
                                                         logical_capacity_, block_table_host_);
             const auto v_physical  = copy_from_guarded<std::uint8_t>(v_, v_code_elements_);
             const auto vs_physical = copy_from_guarded<std::uint16_t>(v_scale_, v_scale_elements_);
+            cache.v_packed = gather_paged<std::uint8_t>(v_physical, layout_.value.code_extent,
+                                                        geometry_, logical_capacity_,
+                                                        block_table_host_);
+            cache.v_scale  = gather_paged<std::uint16_t>(vs_physical, v_scale_extent_, geometry_,
+                                                         logical_capacity_, block_table_host_);
+        } else if (storage_ == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
+            const auto k_physical  = copy_from_guarded<std::uint8_t>(k_, k_code_elements_);
+            const auto ks_physical = copy_from_guarded<std::uint16_t>(k_scale_, k_scale_elements_);
+            const auto v_physical  = copy_from_guarded<std::uint8_t>(v_, v_code_elements_);
+            const auto vs_physical = copy_from_guarded<std::uint16_t>(v_scale_, v_scale_elements_);
+            cache.k_packed = gather_paged<std::uint8_t>(k_physical, layout_.key.code_extent,
+                                                        geometry_, logical_capacity_,
+                                                        block_table_host_);
+            cache.k_scale  = gather_paged<std::uint16_t>(ks_physical, k_scale_extent_, geometry_,
+                                                         logical_capacity_, block_table_host_);
             cache.v_packed = gather_paged<std::uint8_t>(v_physical, layout_.value.code_extent,
                                                         geometry_, logical_capacity_,
                                                         block_table_host_);
@@ -1704,7 +1811,8 @@ public:
             failures += verify_exact((label + " cache-v-scale").c_str(),
                                      copy_from_guarded<std::uint16_t>(v_scale_, v_scale_elements_),
                                      expected_vs);
-        } else if (storage_ == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
+        } else if (storage_ == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
+                   storage_ == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
             std::vector<std::uint8_t> expected_v(v_code_elements_, 0);
             std::vector<std::uint16_t> expected_vs(v_scale_elements_, 0);
             for (std::size_t row = 0; row < rows_; ++row) {
@@ -1890,6 +1998,28 @@ private:
             v_scale_.copy_from_host(physical_vs.data(), physical_vs.size() * sizeof(std::uint16_t));
             return;
         }
+        if (storage_ == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
+            std::vector<std::uint8_t> physical_k(k_code_elements_, 0);
+            std::vector<std::uint8_t> physical_v(v_code_elements_, 0);
+            std::vector<std::uint16_t> physical_ks(k_scale_elements_, 0);
+            std::vector<std::uint16_t> physical_vs(v_scale_elements_, 0);
+            for (std::size_t row = 0; row < rows_; ++row) {
+                const std::span<const std::int32_t> table = row_table(row);
+                scatter_paged_into(rows[row].k_packed, layout_.key.code_extent, geometry_,
+                                   logical_capacity_, table, physical_k);
+                scatter_paged_into(rows[row].v_packed, layout_.value.code_extent, geometry_,
+                                   logical_capacity_, table, physical_v);
+                scatter_paged_into(rows[row].k_scale, k_scale_extent_, geometry_,
+                                   logical_capacity_, table, physical_ks);
+                scatter_paged_into(rows[row].v_scale, v_scale_extent_, geometry_,
+                                   logical_capacity_, table, physical_vs);
+            }
+            k_.copy_from_host(physical_k.data(), physical_k.size());
+            v_.copy_from_host(physical_v.data(), physical_v.size());
+            k_scale_.copy_from_host(physical_ks.data(), physical_ks.size() * sizeof(std::uint16_t));
+            v_scale_.copy_from_host(physical_vs.data(), physical_vs.size() * sizeof(std::uint16_t));
+            return;
+        }
         if (storage_ == KvCacheStorage::Fp8E4M3Row256) {
             std::vector<std::uint8_t> physical_k(k_code_elements_, 0);
             std::vector<std::uint8_t> physical_v(v_code_elements_, 0);
@@ -1983,8 +2113,14 @@ int verify_cache(const std::string& label, const HostCache& got, const HostCache
         failures += verify_exact((label + " cache-k").c_str(), got.k_bf16, expected.k_bf16);
         failures += verify_exact((label + " cache-v").c_str(), got.v_fp16, expected.v_fp16);
     } else if (expected.storage == KvCacheStorage::Int8Group64 ||
-              expected.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
-        if (verify_private_key_representation) {
+               expected.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
+               expected.storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
+        if (verify_private_key_representation && expected.packed_keys()) {
+            failures +=
+                verify_exact((label + " cache-k-code").c_str(), got.k_packed, expected.k_packed);
+            failures +=
+                verify_exact((label + " cache-k-scale").c_str(), got.k_scale, expected.k_scale);
+        } else if (verify_private_key_representation) {
             failures += verify_exact((label + " cache-k-code").c_str(), got.k_i8, expected.k_i8);
             failures +=
                 verify_exact((label + " cache-k-scale").c_str(), got.k_scale, expected.k_scale);
@@ -2045,12 +2181,14 @@ int verify_positions(const std::string& label, const GuardedDeviceBuffer& device
 
 const char* cache_name(const CachePlan& plan) {
     if (plan.dtype == DType::BF16) return "bf16";
+    if (plan.packed_keys) return "rk4v4";
     if (plan.dtype == DType::I8) return plan.packed_values() ? "rk8v4" : "int8-g64";
     return "fp8-e4m3fn-row256";
 }
 
 ReductionCriterion attention_criterion(const CachePlan& plan) {
     if (plan.dtype == DType::BF16) return kAttentionBf16Criterion;
+    if (plan.packed_keys) return kAttentionRk4v4Criterion;
     if (plan.dtype == DType::I8) {
         return plan.packed_values() ? kAttentionRk8v4Criterion : kAttentionInt8Criterion;
     }
@@ -2065,6 +2203,8 @@ const char* cache_name(KvCacheStorage storage) {
         return "int8-g64";
     case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
         return "rk8v4";
+    case KvCacheStorage::RotatedLloyd4KeyInt4Value:
+        return "rk4v4";
     case KvCacheStorage::Fp8E4M3Row256:
         return "fp8-e4m3fn-row256";
     case KvCacheStorage::Nvfp4Group16:
@@ -2079,6 +2219,7 @@ ReductionCriterion attention_criterion(KvCacheStorage storage) {
     if (storage == KvCacheStorage::BFloat16) return kAttentionBf16Criterion;
     if (storage == KvCacheStorage::Int8Group64) return kAttentionInt8Criterion;
     if (storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) return kAttentionRk8v4Criterion;
+    if (storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) return kAttentionRk4v4Criterion;
     if (storage == KvCacheStorage::Fp8E4M3Row256) return kAttentionFp8Criterion;
     if (storage == KvCacheStorage::Nvfp4Group16) return kAttentionNvfp4Criterion;
     if (storage == KvCacheStorage::Fp8KeyNvfp4Value) return kAttentionK8V4Criterion;
@@ -2992,6 +3133,14 @@ int run_batch_cases() {
         kGeometries[1], kPlanRk8v4, {1, {0, 31, 63, 127, 511, 1023, 2047, 4095},
                                      {1, 1, 1, 1, 1, 1, 1, 1}, {7, 0, 5, 2, 6, 1, 4, 3},
                                      MappingPattern::Identity, 507u});
+    // rk4v4 packed keys through the same batched routes.
+    failures += run_batch_case(
+        kGeometries[0], kPlanRk4v4, {6, {61, 127, 511}, {6, 3, 0}, {2, 0, 1},
+                                     MappingPattern::Fragmented, 508u});
+    failures += run_batch_case(
+        kGeometries[1], kPlanRk4v4, {1, {0, 31, 63, 127, 511, 1023, 2047, 4095},
+                                     {1, 1, 1, 1, 1, 1, 1, 1}, {7, 0, 5, 2, 6, 1, 4, 3},
+                                     MappingPattern::Identity, 509u});
     failures += run_case_allowing_arch_skip(
         "causal_softmax_attention FP8 KV cache batched", [&] {
             return run_batch_case(kGeometries[0], kPlanFp8,
@@ -3103,6 +3252,56 @@ int run_rk8v4_cases() {
     failures += run_a3_case(kGeometries[0], kPlanRk8v4, {3, 63, 192, 616u},
                             MappingPattern::Identity);
     failures += run_a1_case(kGeometries[0], kPlanRk8v4, {1, 16384, 16385, 617u},
+                            MappingPattern::Fragmented);
+    return failures;
+}
+
+// rk4v4: rotated 4-bit Lloyd-Max key indices over a G64 FP16 scale plus rk8v4's packed INT4 G32
+// values. Both attention kernels load the packed keys into registers and expand them to INT8 codes
+// in the shared K tile, so this covers each kernel's staging at its tile shapes: the prompt kernel
+// (T >= 7, one 64-key tile per page), every small-T warp/key-block schedule (the window tiers
+// select 32- and 64-key blocks and 6- to 32-warp CTAs), the fused append, graph replay, and a
+// long split-KV window.
+int run_rk4v4_cases() {
+    std::cout << "  rk4v4 (Lloyd-Max 4-bit rotated keys + packed INT4 G32 values):\n";
+    int failures = 0;
+    for (const Geometry& geometry : kGeometries) {
+        for (const MappingPattern mapping :
+             {MappingPattern::Identity, MappingPattern::Offset, MappingPattern::Fragmented}) {
+            failures += run_a1_case(geometry, kPlanRk4v4, {6, 61, 67, 190u}, mapping);
+            failures += run_a3_case(geometry, kPlanRk4v4, {1, 128, 129, 191u}, mapping);
+        }
+        failures += run_a1_case(geometry, kPlanRk4v4, {65, 63, 192, 621u},
+                                MappingPattern::Fragmented);
+        failures += run_a3_case(geometry, kPlanRk4v4, {65, 63, 192, 622u},
+                                MappingPattern::Fragmented);
+        failures += run_a1_case(geometry, kPlanRk4v4, {1, 0, 1, 623u}, MappingPattern::Identity);
+        failures += run_a1_case(geometry, kPlanRk4v4, {1, 128, 192, 624u},
+                                MappingPattern::Fragmented);
+        failures +=
+            run_a3_case(geometry, kPlanRk4v4, {1, 128, 192, 625u}, MappingPattern::Offset);
+        failures += run_a1_case(geometry, kPlanRk4v4, {6, 61, 192, 626u},
+                                MappingPattern::Fragmented);
+        failures += run_a1_case(geometry, kPlanRk4v4, {7, 17, 512, 627u},
+                                MappingPattern::Identity);
+        failures += run_a3_case(geometry, kPlanRk4v4, {17, 31, 48, 628u},
+                                MappingPattern::Identity);
+        // Window tiers of the small-T schedule: <= 1029/2054, <= 4096/8198 (64-key blocks under
+        // T >= 6), and the long split-KV tier.
+        for (const std::int32_t depth : {1000, 2000, 6000, 20000}) {
+            failures += run_a1_case(geometry, kPlanRk4v4,
+                                    {1, depth, static_cast<std::uint32_t>(depth + 1), 629u},
+                                    MappingPattern::Fragmented);
+            failures += run_a1_case(geometry, kPlanRk4v4,
+                                    {6, depth, static_cast<std::uint32_t>(depth + 6), 630u},
+                                    MappingPattern::Fragmented);
+        }
+        failures += run_a1_case(geometry, kPlanRk4v4, {4, 3000, 3004, 631u, false, true},
+                                MappingPattern::Fragmented);
+    }
+    failures += run_a3_case(kGeometries[0], kPlanRk4v4, {3, 63, 192, 632u},
+                            MappingPattern::Identity);
+    failures += run_a1_case(kGeometries[0], kPlanRk4v4, {8, 5000, 5008, 633u},
                             MappingPattern::Fragmented);
     return failures;
 }
@@ -3355,6 +3554,7 @@ int run_dflash2_cases() {
         failures += sweep(storage);
     }
     failures += sweep(kPlanRk8v4);
+    failures += sweep(kPlanRk4v4);
     return failures;
 }
 
@@ -3465,6 +3665,7 @@ int run_softmax_attention_causal_cache_tests() {
     failures += run_case_allowing_arch_skip("causal_softmax_attention FP8 KV cache (prompt)",
                                             [&] { return run_fp8_prompt_cases(); });
     failures += run_rk8v4_cases();
+    failures += run_rk4v4_cases();
     failures += run_batch_cases();
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention public-contract correctness\n";

@@ -111,6 +111,9 @@ int main() {
                       "--kv-dtype rk8v4 did not select rotated K8/V4 storage");
     failures += check(defaults.kv_cache == ninfer::KvCacheStorage::BFloat16,
                       "rk8v4 unexpectedly changed the default KV storage");
+    const ServeOptions lloyd = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4"});
+    failures += check(lloyd.kv_cache == ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value,
+                      "--kv-dtype rk4v4 did not select rotated Lloyd-Max K4/V4 storage");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});

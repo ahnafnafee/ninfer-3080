@@ -8,8 +8,12 @@ run.sh <model> [profile]
 
 | model | profiles | default profile on Linux | on Windows |
 |---|---|---|---|
-| `qwen38-27b` | `tuned`, `int8`, `c8` | DFlash2, one lane, 131,072 tokens | DFlash2, one lane, 131,072 tokens |
-| `qwen36-35b-a3b` | `tuned` | MTP3, two lanes, 262,144 tokens | MTP3, one lane, 147,456 tokens |
+| `qwen38-27b` | `tuned`, `int8`, `c8` | DFlash2, one lane, 262,144 tokens | DFlash2, one lane, 172,032 tokens |
+| `qwen36-35b-a3b` | `tuned` | MTP3, three lanes, 262,144-token pool | MTP3, two lanes, 262,144-token pool |
+
+Lanes share one KV pool: `--kv-capacity` is the pool and `--max-context` the per-request cap, and
+the `tuned` profiles set both to the same value. Any one request can use the whole context, but the
+lanes' requests together hold at most that many tokens at a time.
 
 `tuned` is the recommended profile. `int8` (one user, 64K of INT8 KV, the quality default) and `c8`
 (eight lanes at 8K) are the older reference profiles, with every serving flag fixed. The former
@@ -21,12 +25,37 @@ carries the context, lane count and prefill chunk that fit it:
 
 | `NINFER_SPEC` | flags | context (Linux / Windows) | lanes (Linux / Windows) |
 |---|---|---|---|
-| `dflash2` (default) | `--spec dflash2 --draft-tokens 7 --lm-head-draft --prefill-cublas --prefill-chunk 4096 --kv-dtype rk8v4 --embedding-q4 --gdn-state-fp16 --vision --vision-residency overlay` | 131,072 / 131,072 | 1 / 1 |
-| `mtp` | `--spec mtp --draft-tokens 3 --lm-head-draft --prefill-cublas --prefill-chunk 2048 --kv-dtype rk8v4 --embedding-q4 --lm-head-q6 --gdn-state-fp16 --vision --vision-residency overlay` | 212,992 / 163,840 | 2 / 1 |
-| `none` | the `mtp` set without speculation or `--lm-head-q6` | 212,992 / 163,840 | 2 / 1 |
+| `dflash2` (default) | `--spec dflash2 --draft-tokens 7 --lm-head-draft --prefill-cublas --prefill-chunk 4096 --kv-dtype rk4v4 --embedding-q4 --gdn-state-fp16 --vision --vision-residency overlay` | 262,144 / 172,032 | 1 / 1 |
+| `mtp` | `--spec mtp --draft-tokens 3 --lm-head-draft --prefill-cublas --prefill-chunk 2048 --kv-dtype rk4v4 --embedding-q4 --lm-head-q6 --gdn-state-fp16 --vision --vision-residency overlay` | 262,144 / 262,144 | 2 / 2 |
+| `none` | the `mtp` set without speculation or `--lm-head-q6` | 262,144 / 262,144 | 2 / 2 |
 
 The first is the fastest at one stream (prefill about 1.7x and decode about 1.39x the previous
-defaults) and the second is the longest context, still fast. Both are measured in
+defaults) and the second is the full context with a second lane, still fast. The Qwen3.6-35B-A3B
+`tuned` profile runs MTP3 + draft head at 262,144 tokens with three lanes on Linux and two on
+Windows.
+
+RK4V4 DEFAULTS, 2026-09-24. Every `tuned` profile moved from `rk8v4` to `rk4v4` KV (Lloyd-Max 4-bit
+keys, 31% smaller than `rk8v4` at the same decode speed, +0.10% perplexity over it; see the
+README's `rk4v4` section). Measured by starting `ninfer-serve` with each profile's exact flags on
+the desktop RTX 3090 (1.35 GiB held by the desktop):
+
+```
+  profile                      lanes  context    result
+  --------------------------------------------------------------------------------------------
+  27B dflash2 (rk8v4, before)  1      131,072    starts; 150K refused
+  27B dflash2                  1      180,224    starts; 184,320 refused (needs ~1.45 GB more
+                                                  for 262,144: 6.45 GB against 5.00 available)
+  27B mtp                      2      262,144    starts, 23.4 of 24.5 GiB used
+  35B mtp                      3      262,144    starts, 24.0 of 24.5 GiB used
+  35B mtp                      4      262,144    refused, 48 MB short
+```
+
+The Windows defaults keep one rung of margin below the DFlash2 edge (172,032) and one lane below
+the 35B edge (two). The Linux defaults are the headless extrapolation -- the full context for
+DFlash2 and three 35B lanes -- and the step-down ladder catches a card that falls short. DFlash2 and
+MTP generation on `rk4v4` were checked end to end through the server at these settings.
+
+The sections below record the measurements behind the earlier `rk8v4` defaults. Both are measured in
 [performance](../performance.md#recommended-configurations-rtx-3090-qwen38-27b). The
 `qwen3_8_27b.ninfer` that `download-model` fetches is the DFlash2 bundle and carries the MTP weights
 too, so one file serves all three.

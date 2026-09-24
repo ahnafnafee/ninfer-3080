@@ -40,10 +40,17 @@ namespace ninfer::ops {
 // dequantize V while producers execute QK. After both consume the code tile, the
 // next K/V tile is prefetched into the same arena while the current PV runs.
 // PackedValues selects the rk8v4 half-width value plane, for both the fused append this kernel
-// performs and the value staging it consumes. The key path is unchanged in both instantiations.
+// performs and the value staging it consumes.
+//
+// PackedKeys selects the rk4v4 key plane: 4-bit Lloyd-Max indices, half the INT8 key bytes. The
+// shared K tile and the whole QK path are unchanged. Packed keys for the next tile are loaded into
+// registers at the top of each key-loop iteration (load_k_tile), stay in flight across QK, the V
+// dequant and PV, are expanded to their INT8 codes (kv_cache_lloyd4_expand16), and are stored into
+// the tile just before the tile barrier; which warps expand them, and when, depends on the row-tile
+// count (see LoaderKeys). The K tile is idle during PV, so this adds no shared memory and no barrier.
 template <typename Geometry, int TokenTile, int WarpsPerCta, int MinBlocksPerSm, int KeyBlock,
           bool DynamicArena, bool MultiBatch, bool Masked, typename CacheInput,
-          bool PackedValues = false>
+          bool PackedValues = false, bool PackedKeys = false>
 __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     void causal_attention_small_t_i8_tiled_kernel(
         const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, std::int8_t* cache_k_i8,
@@ -260,9 +267,9 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             const float kv1    = k_out[1];
             const float vv0    = __bfloat162float(input.v[src0]);
             const float vv1    = __bfloat162float(input.v[src1]);
-            float kamax        = fmaxf(fabsf(kv0), fabsf(kv1));
-            kamax              = warp_max(kamax, FullMask);
-            const auto k_quant = kv_cache_int8_quant_params(kamax);
+            kv_cache_i8_family_store_key_group<Geometry, PackedKeys>(
+                cache_k_i8, cache_k_scale, physical_page, kv_head, grp, page_offset, lane, kv0,
+                kv1);
             // The vv0 lanes span dimensions [64g, 64g+32) and the vv1 lanes the next 32, so the
             // packed coding's two G32 groups fall out of the lane assignment directly.
             const float vamax_lo = warp_max(fabsf(vv0), FullMask);
@@ -272,12 +279,6 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                                        : kv_cache_int8_quant_params(fmaxf(vamax_lo, vamax_hi));
             const auto v_quant_hi =
                 PackedValues ? kv_cache_int4_quant_params(vamax_hi) : v_quant;
-            cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0,
-                                                                page_offset)] =
-                kv_cache_int8_quant_code(kv0, k_quant.inverse_scale);
-            cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1,
-                                                                page_offset)] =
-                kv_cache_int8_quant_code(kv1, k_quant.inverse_scale);
             if constexpr (PackedValues) {
                 // A packed byte holds the adjacent dimension pair, which spans lanes l and l^1.
                 const std::int8_t c0 = kv_cache_int4_quant_code(vv0, v_quant.inverse_scale);
@@ -302,16 +303,14 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     kv_cache_int8_quant_code(vv1, v_quant.inverse_scale);
             }
             if (lane == 0) {
-                const std::int64_t so = kv_cache_int8_quant_scale_index<Geometry>(
-                    physical_page, kv_head, grp, page_offset);
-                cache_k_scale[so] = k_quant.scale;
                 if constexpr (PackedValues) {
                     cache_v_scale[kv_cache_int4_value_scale_index<Geometry>(
                         physical_page, kv_head, 2 * grp, page_offset)] = v_quant.scale;
                     cache_v_scale[kv_cache_int4_value_scale_index<Geometry>(
                         physical_page, kv_head, 2 * grp + 1, page_offset)] = v_quant_hi.scale;
                 } else {
-                    cache_v_scale[so] = v_quant.scale;
+                    cache_v_scale[kv_cache_int8_quant_scale_index<Geometry>(
+                        physical_page, kv_head, grp, page_offset)] = v_quant.scale;
                 }
             }
         }
@@ -391,6 +390,80 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     float m0 = -CUDART_INF_F, m1 = -CUDART_INF_F;
     float l0 = 0.0f, l1 = 0.0f;
 
+    // Packed keys are loaded into registers at the top of each iteration for the next tile, so the
+    // loads are in flight across QK, the V dequant and PV. Who expands them depends on the shape.
+    //
+    // With two row tiles the producers' QK is the long phase and at least half the CTA are
+    // V-loader warps, so the loaders own the keys: they expand them to INT8 codes right after their
+    // V dequant, inside the producers' shadow, and after PV only store them. That took MTP3 decode
+    // on the 27B from 1.5% behind rk8v4 at 32K to 0.5%. With one row tile QK is short and the
+    // loaders become the critical path, and with three the loaders are too few (three of six warps);
+    // both measured 6-12% slower in the attention op that way, so every warp instead expands and
+    // stores its share after PV.
+    constexpr int KChunks     = Bc * (D / 16);
+    constexpr bool LoaderKeys = PackedKeys && RowTiles == 2 && 2 * VLoaderThreads >= Threads;
+    constexpr int KeyThreads  = LoaderKeys ? VLoaderThreads : Threads;
+    constexpr int KChunksPerKeyThread = (KChunks + KeyThreads - 1) / KeyThreads;
+    uint2 k_packed[PackedKeys ? KChunksPerKeyThread : 1];
+    int4 k_codes[LoaderKeys ? KChunksPerKeyThread : 1];
+    const bool key_thread = LoaderKeys ? tid >= ProducerThreads : true;
+    const int key_tid     = LoaderKeys ? tid - ProducerThreads : tid;
+    const int loader_tid  = tid - ProducerThreads;
+    auto load_k_tile = [&](int tile_k0, int physical_page) {
+        if constexpr (PackedKeys) {
+            if (!key_thread) { return; }
+#pragma unroll
+            for (int i = 0; i < KChunksPerKeyThread; ++i) {
+                const int chunk = key_tid + i * KeyThreads;
+                k_packed[i]     = make_uint2(0u, 0u);
+                if (chunk < KChunks) {
+                    const int key_l = chunk / (D / 16);
+                    const int d     = (chunk - key_l * (D / 16)) * 16;
+                    const int key   = tile_k0 + key_l;
+                    if (key >= split_start && key < split_end) {
+                        const std::int64_t off = kv_cache_int4_value_code_index<Geometry>(
+                            physical_page, kv_head, d >> 1, key & kPagedKVPageMask);
+                        // A plain load: the fused append above may have written these bytes in
+                        // this launch, so the read-only path is not an option.
+                        k_packed[i] = *reinterpret_cast<const uint2*>(
+                            reinterpret_cast<const std::uint8_t*>(cache_k_i8) + off);
+                    }
+                }
+            }
+        }
+    };
+    // Loader-owned keys only: expand into registers ahead of the store.
+    auto expand_k_tile = [&]() {
+        if constexpr (LoaderKeys) {
+#pragma unroll
+            for (int i = 0; i < KChunksPerKeyThread; ++i) {
+                k_codes[i] = kv_cache_lloyd4_expand16(k_packed[i]);
+            }
+        }
+    };
+    // Chunks outside the split keep whatever code their placeholder expands to: their scales are
+    // staged as zero and their scores masked, exactly as the zero-filled INT8 chunks are.
+    auto commit_k_tile = [&]() {
+        if constexpr (PackedKeys) {
+            if (!key_thread) { return; }
+#pragma unroll
+            for (int i = 0; i < KChunksPerKeyThread; ++i) {
+                const int chunk = key_tid + i * KeyThreads;
+                if (chunk < KChunks) {
+                    const int key_l = chunk / (D / 16);
+                    const int dc    = chunk - key_l * (D / 16);
+                    int4 codes;
+                    if constexpr (LoaderKeys) {
+                        codes = k_codes[i];
+                    } else {
+                        codes = kv_cache_lloyd4_expand16(k_packed[i]);
+                    }
+                    store_vec(&k_i8[key_l * D + causal_small_t_tc_swz(key_l, dc * 8) * 2], codes);
+                }
+            }
+        }
+    };
+
     auto issue_kv_tile = [&](int tile_k0, int physical_page) {
         for (int key_l = tid; key_l < Bc; key_l += Threads) {
             const int key = tile_k0 + key_l;
@@ -413,6 +486,27 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     store_vec(value_scale_row(key_l), make_int2(0, 0));
                 }
             }
+        }
+        if constexpr (PackedKeys) {
+            // Keys arrive through load_k_tile; this stages only the packed value plane.
+            static_assert(PackedValues, "rk4v4 pairs packed keys with packed values");
+#pragma unroll 1
+            for (int chunk = tid; chunk < KChunks; chunk += Threads) {
+                const int key_l = chunk / (D / 16);
+                const int d     = (chunk - key_l * (D / 16)) * 16;
+                const int key   = tile_k0 + key_l;
+                if (key >= split_start && key < split_end) {
+                    const std::int64_t off = kv_cache_int4_value_code_index<Geometry>(
+                        physical_page, kv_head, d >> 1, key & kPagedKVPageMask);
+                    ninfer::ops::cp_async<8>(
+                        &v_i8[key_l * D + (d >> 1)],
+                        reinterpret_cast<const std::uint8_t*>(cache_v_i8) + off);
+                } else {
+                    store_vec(&v_i8[key_l * D + (d >> 1)], make_int2(0, 0));
+                }
+            }
+            ninfer::ops::cp_commit();
+            return;
         }
 #pragma unroll 1
         for (int chunk = tid; chunk < Bc * (D / 16); chunk += Threads) {
@@ -450,12 +544,25 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     };
 
     int physical_page = physical_pages_s[0];
+    load_k_tile(first_tile, physical_page);
     issue_kv_tile(first_tile, physical_page);
+    if (key_thread) { expand_k_tile(); }
+    commit_k_tile();
     ninfer::ops::cp_wait<0>();
     __syncthreads();
 
     for (int kb = 0; kb < key_blocks; ++kb) {
         const int k0 = first_tile + kb * Bc;
+        if constexpr (PackedKeys) {
+            // Prefetch the next tile's packed keys now; see load_k_tile.
+            if (kb + 1 < key_blocks) {
+                const int next_k0 = k0 + Bc;
+                load_k_tile(next_k0, (next_k0 & kPagedKVPageMask) == 0
+                                         ? physical_pages_s[(next_k0 >> kPagedKVPageShift) -
+                                                            first_page]
+                                         : physical_page);
+            }
+        }
 
         // One warp per row tile produces P and alpha while the remaining warps
         // stream/dequant V.
@@ -596,7 +703,6 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 alpha_s[row1] = alpha1;
             }
         } else {
-            const int loader_tid = tid - ProducerThreads;
 #pragma unroll 1
             for (int chunk = loader_tid; chunk < Bc * (D / 8); chunk += VLoaderThreads) {
                 const int key_l = chunk / (D / 8);
@@ -629,6 +735,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     store_vec(dst, make_int4(0, 0, 0, 0));
                 }
             }
+            if (kb + 1 < key_blocks) { expand_k_tile(); }
         }
         __syncthreads();
 
@@ -675,7 +782,10 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                         vf[0], vf[1]);
             }
         }
-        if (has_next) { ninfer::ops::cp_wait<0>(); }
+        if (has_next) {
+            commit_k_tile();
+            ninfer::ops::cp_wait<0>();
+        }
         __syncthreads();
     }
 

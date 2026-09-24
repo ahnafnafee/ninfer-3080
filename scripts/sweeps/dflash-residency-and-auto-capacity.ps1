@@ -62,7 +62,7 @@ foreach ($a in @(@{k='v1-no-dflash'; p=$v1},
 "model,kv,kv_capacity_line"
 foreach ($m in @(@{k='27b-dense'; p="$mdir\qwen3_8_27b.ninfer"},
                  @{k='35b-moe';   p="$mdir\qwen3_6_35b_a3b.ninfer"})) {
-  foreach ($d in @('bf16','int8','fp8','rk8v4','k8v4','nvfp4')) {
+  foreach ($d in @('bf16','int8','fp8','rk8v4','rk4v4','k8v4','nvfp4')) {
     $log = "$out\cap_$($m.k)_$d.log"
     & .\build-ninja\apps\ninfer.exe $m.p --prompt hi --max-new 1 --greedy `
         --kv-dtype $d --max-context 262144 --kv-capacity auto > $log 2>&1

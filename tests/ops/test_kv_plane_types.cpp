@@ -33,6 +33,7 @@ constexpr KvCacheStorage kStorages[] = {
     KvCacheStorage::BFloat16,      KvCacheStorage::Int8Group64,
     KvCacheStorage::Fp8E4M3Row256, KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
     KvCacheStorage::Nvfp4Group16,  KvCacheStorage::Fp8KeyNvfp4Value,
+    KvCacheStorage::RotatedLloyd4KeyInt4Value,
 };
 
 // The profile must be evaluable at compile time for every storage; this also proves each one has
@@ -48,6 +49,7 @@ static_assert(profile_is_constexpr<KvCacheStorage::Fp8E4M3Row256>());
 static_assert(profile_is_constexpr<KvCacheStorage::RotatedInt8KeyInt4ValueGroup64>());
 static_assert(profile_is_constexpr<KvCacheStorage::Nvfp4Group16>());
 static_assert(profile_is_constexpr<KvCacheStorage::Fp8KeyNvfp4Value>());
+static_assert(profile_is_constexpr<KvCacheStorage::RotatedLloyd4KeyInt4Value>());
 
 // This fork's defining invariant: the BF16 cache is symmetric. Upstream stores V as FP16, the two
 // are the same width, and every catch-up merge has tried to reintroduce that.
@@ -77,6 +79,18 @@ static_assert(d256_kv_cache_profile(KvCacheStorage::RotatedInt8KeyInt4ValueGroup
                   .key_leading_extent,
               "a packed int4 value plane is half the width of its key plane");
 
+// rk4v4 packs both planes two 4-bit codes per byte, and keeps the INT8 family's G64 key scale.
+static_assert(std::is_same_v<KvKeyCodeT<KvCacheStorage::RotatedLloyd4KeyInt4Value>, std::uint8_t>);
+static_assert(std::is_same_v<KvValueCodeT<KvCacheStorage::RotatedLloyd4KeyInt4Value>, std::uint8_t>);
+static_assert(std::is_same_v<KvKeyScaleT<KvCacheStorage::RotatedLloyd4KeyInt4Value>, __half>);
+static_assert(d256_kv_cache_profile(KvCacheStorage::RotatedLloyd4KeyInt4Value).key_leading_extent * 2 ==
+                  ninfer::ops::kD256KVCacheHeadDim,
+              "rk4v4 packs two key indices per byte");
+static_assert(d256_kv_cache_profile(KvCacheStorage::RotatedLloyd4KeyInt4Value).scale_leading_extent ==
+                  d256_kv_cache_profile(KvCacheStorage::Int8Group64).scale_leading_extent,
+              "rk4v4 keeps the INT8 family's G64 key scale plane");
+static_assert(ninfer::ops::kv_cache_is_int8_family(KvCacheStorage::RotatedLloyd4KeyInt4Value));
+
 // k8v4 pairs an FP8 key plane with an NVFP4 value plane, so its two scale planes differ in dtype.
 static_assert(std::is_same_v<KvKeyScaleT<KvCacheStorage::Fp8KeyNvfp4Value>, __half>);
 static_assert(std::is_same_v<KvValueScaleT<KvCacheStorage::Fp8KeyNvfp4Value>, std::uint8_t>);
@@ -91,6 +105,7 @@ constexpr bool packed_extents_agree() {
 static_assert(packed_extents_agree<KvCacheStorage::Nvfp4Group16>());
 static_assert(packed_extents_agree<KvCacheStorage::Fp8KeyNvfp4Value>());
 static_assert(packed_extents_agree<KvCacheStorage::RotatedInt8KeyInt4ValueGroup64>());
+static_assert(packed_extents_agree<KvCacheStorage::RotatedLloyd4KeyInt4Value>());
 
 } // namespace
 

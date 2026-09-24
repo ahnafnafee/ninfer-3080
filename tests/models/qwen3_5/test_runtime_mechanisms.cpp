@@ -107,6 +107,19 @@ void test_decoder_layout() {
                rk8v4.text_kv.payload_bytes() + rk8v4.mtp_kv->payload_bytes(),
            "rk8v4 Text/MTP KV payload accounting");
 
+    ninfer::LayoutBuilder rk4v4_builder;
+    const q36::DecoderStateLayout rk4v4 =
+        q36::plan_decoder_state(rk4v4_builder, decoder_spec(ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value, true));
+    (void)rk4v4_builder.finish(256);
+    expect(rk4v4.text_kv.pages.planes.size() == 8 &&
+               rk4v4.text_kv.pages.planes[0].geometry.dtype == ninfer::DType::U8 &&
+               rk4v4.text_kv.pages.planes[0].geometry.leading_extent == 128 &&
+               rk4v4.text_kv.pages.planes[1].geometry.dtype == ninfer::DType::U8 &&
+               rk4v4.text_kv.pages.planes[1].geometry.leading_extent == 128,
+           "rk4v4 Text KV has packed Lloyd-Max key and packed int4 value planes");
+    expect(rk4v4.kv_payload_bytes() * 1000 < rk8v4.kv_payload_bytes() * 700,
+           "rk4v4 KV is at least 30% smaller than rk8v4");
+
     ninfer::LayoutBuilder nvfp4_builder;
     const q36::DecoderStateLayout nvfp4 = q36::plan_decoder_state(
         nvfp4_builder, decoder_spec(ninfer::KvCacheStorage::Nvfp4Group16, true));

@@ -79,6 +79,16 @@ struct PagedKVStorageLayout {
                     {DType::U8, head_dim / 2, DType::FP16, 8}};
         }
         break;
+    case KvCacheStorage::RotatedLloyd4KeyInt4Value:
+        // rk4v4: both code planes pack two 4-bit codes per byte. Keys keep the INT8 coding's G64
+        // scale plane; values are rk8v4's G32 plane.
+        if (head_dim == kD256KVCacheHeadDim) {
+            return {storage,
+                    head_dim,
+                    {DType::U8, head_dim / 2, DType::FP16, 4},
+                    {DType::U8, head_dim / 2, DType::FP16, 8}};
+        }
+        break;
     case KvCacheStorage::Fp8E4M3Row256:
         if (head_dim == kD256KVCacheHeadDim) {
             return symmetric({DType::FP8_E4M3FN, 256, DType::FP16, 1});

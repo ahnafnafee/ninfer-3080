@@ -4,6 +4,7 @@
 
 #include "core/paged_kv_storage.h"
 #include "ops/common/math.h"
+#include "ops/kv_cache/d256_profile.h"
 #include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t_bf16.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t_i8.cuh"
@@ -69,8 +70,7 @@ std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens
     // A 64-key default split just above a 32-key boundary makes the partial kernel execute a
     // nearly empty second tile. T=5 uses one 32-key tile per split; the short T>=6 profile keeps
     // all newly appended rows in one tail split while retaining a useful B=8 grid.
-    const bool i8_family = storage == KvCacheStorage::Int8Group64 ||
-                           storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64;
+    const bool i8_family = kv_cache_is_int8_family(storage);
     if (i8_family && tokens == 5 && window > 128 && window <= 512) {
         return div_up(window, 32 / Geometry::SmallTSplitScale);
     }
@@ -149,25 +149,28 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
     Tensor& cache_v       = cache.v_pages;
     Tensor& cache_k_scale = cache.k_scale_pages;
     Tensor& cache_v_scale = cache.v_scale_pages;
-    // A U8 value plane is the rk8v4 packed signed int4 coding.
+    // A U8 value plane is the packed signed int4 coding (rk8v4, rk4v4); a U8 key plane is the
+    // rk4v4 Lloyd-Max coding.
     const bool packed_values = cache_v.dtype == DType::U8;
+    const bool packed_keys   = cache_k.dtype == DType::U8;
     auto launch = [&]<int WarpsPerCta, int MinBlocksPerSm, int KeyBlock, bool DynamicArena>() {
         const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
         constexpr std::size_t kDynamicBytes =
             DynamicArena ? static_cast<std::size_t>(4 * KeyBlock * kCausalHeadDim) : 0u;
-        auto issue = [&]<bool PackedValues>() {
+        auto issue = [&]<bool PackedValues, bool PackedKeys>() {
             if constexpr (DynamicArena) {
                 configure_cuda_device_once([&] {
                     return cudaFuncSetAttribute(
                         causal_attention_small_t_i8_tiled_kernel<
                             Geometry, TokenTile, WarpsPerCta, MinBlocksPerSm, KeyBlock, DynamicArena,
-                            MultiBatch, Masked, CacheInput, PackedValues>,
+                            MultiBatch, Masked, CacheInput, PackedValues, PackedKeys>,
                         cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kDynamicBytes));
                 });
             }
             causal_attention_small_t_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta,
                                                      MinBlocksPerSm, KeyBlock, DynamicArena,
-                                                     MultiBatch, Masked, CacheInput, PackedValues>
+                                                     MultiBatch, Masked, CacheInput, PackedValues,
+                                                     PackedKeys>
             <<<grid, WarpsPerCta * 32, kDynamicBytes, stream>>>(
                 static_cast<const __nv_bfloat16*>(q.data), input,
                 static_cast<const std::int32_t*>(pos.data), static_cast<std::int8_t*>(cache_k.data),
@@ -184,10 +187,12 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 logical_capacity, scale, static_cast<float*>(partial_acc.data),
                 static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
         };
-        if (packed_values) {
-            issue.template operator()<true>();
+        if (packed_keys) {
+            issue.template operator()<true, true>();
+        } else if (packed_values) {
+            issue.template operator()<true, false>();
         } else {
-            issue.template operator()<false>();
+            issue.template operator()<false, false>();
         }
     };
     if constexpr (TokenTile >= 6) {
@@ -296,8 +301,7 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
 #define NINFER_CAUSAL_SMALL_T_DISPATCH(TOKENS, WARPS)                                              \
     do {                                                                                           \
         const auto launch_profile = [&]<bool MultiBatch, bool Masked>() {                          \
-            if (cache.storage == KvCacheStorage::Int8Group64 ||                                    \
-                cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {                  \
+            if (kv_cache_is_int8_family(cache.storage)) {                                          \
                 launch_tc_partial_i8<Geometry, (TOKENS), MultiBatch, Masked>(                      \
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
@@ -389,9 +393,8 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
         else
             launch_profile.template operator()<Int8, true, false>();
     };
-    // rk8v4 is an int8-family cache on this fork and takes the same path.
-    if (cache.storage == KvCacheStorage::Int8Group64 ||
-        cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64)
+    // rk8v4 and rk4v4 are int8-family caches on this fork and take the same path.
+    if (kv_cache_is_int8_family(cache.storage))
         launch_for_storage.template operator()<true>();
     else
         launch_for_storage.template operator()<false>();

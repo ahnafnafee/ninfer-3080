@@ -102,7 +102,7 @@ top-level field `"reasoning_effort": "xhigh"`; Responses uses
 `"reasoning": {"effort": "xhigh"}`. The CLI accepts
 `--reasoning-effort low|medium|xhigh`.
 
-The paged cache supports six KV formats — `bf16`, `int8`, `fp8`, `rk8v4`, `k8v4` and `nvfp4`.
+The paged cache supports seven KV formats — `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `k8v4` and `nvfp4`.
 INT8 remains the
 recommended default. On the development RTX 3090, `rk8v4` raises the measured automatic-sizing
 boundary from 171,648 to 226,560 tokens at 1 GiB headroom, for 5.51 GiB of KV against INT8's

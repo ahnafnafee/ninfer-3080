@@ -528,6 +528,8 @@ const char* storage_name(KvCacheStorage storage) {
         return "fp8";
     case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
         return "rk8v4";
+    case KvCacheStorage::RotatedLloyd4KeyInt4Value:
+        return "rk4v4";
     case KvCacheStorage::Nvfp4Group16:
         return "nvfp4";
     case KvCacheStorage::Fp8KeyNvfp4Value:

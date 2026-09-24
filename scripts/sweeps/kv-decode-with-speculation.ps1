@@ -27,7 +27,7 @@ $models = @(
   @{ key='27b-dense'; path="$modelDir\qwen3_8_27b.ninfer" },
   @{ key='35b-moe';   path="$modelDir\qwen3_6_35b_a3b.ninfer" }
 )
-$dtypes = @('bf16','int8','fp8','rk8v4','k8v4','nvfp4')
+$dtypes = @('bf16','int8','fp8','rk8v4','rk4v4','k8v4','nvfp4')
 
 "model,kv,depth,decode_tok_s,stddev,spec_acceptance,kv_payload_bytes"
 foreach ($m in $models) {

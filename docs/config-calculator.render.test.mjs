@@ -7,7 +7,7 @@
 // only show up as a blank page in a browser. Adding per-mode speculative memory touched render()
 // in four places, so this exists to catch that class of mistake without a browser.
 //
-// It asserts two things: that nothing throws across all 360 combinations, and that the reported
+// It asserts two things: that nothing throws across all 420 combinations, and that the reported
 // largest-fitting context actually responds to the speculation mode. The second one matters --
 // before per-mode terms the page reported 262,144 tokens for every mode on the 35B, including
 // DFlash-3, which really tops out at 240,192.

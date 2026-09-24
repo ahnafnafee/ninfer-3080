@@ -35,13 +35,11 @@ The downloader writes into `models/` beside these files, which is where the laun
 `NINFER_MODEL_DIR` to keep artifacts elsewhere, or `NINFER_MODEL` to point the launcher at a single
 file.
 
-That is the headless profile: two lanes, `rk8v4` KV, MTP3 speculation plus the draft head, and
-vision in overlay residency, with `NINFER_CONTEXT` defaulting to 262,144.
-
-Do not assume that context holds. Speculation is not free context — the MTP head is 856 MiB and the
-draft head another 136 MiB, roughly 130,000 rk8v4 tokens of KV — so `NINFER_SPEC=none` is what
-actually reaches the native 262,144 maximum, at about 183 tok/s instead of 240–280. Drop a rung
-(196608 / 131072 / 114688 / 98304 / 81920) if startup refuses. For the dense 27B instead:
+That is the headless profile: three lanes, `rk4v4` KV, MTP3 speculation plus the draft head, and
+vision in overlay residency, with the lanes sharing one 262,144-token pool (any one request can
+use all of it). Three lanes start even beside a
+desktop, so a headless card has room to spare (`NINFER_CONCURRENCY=4` should fit there). Drop a lane
+or a context rung (196608 / 131072 / 114688 / 98304 / 81920) if startup refuses. For the dense 27B instead:
 
 ```bash
 ./download-model.sh qwen38-27b         # ~19 GB, the DFlash2 bundle; it also carries the MTP weights
@@ -87,7 +85,7 @@ Nothing here needs editing. `NINFER_SERVER`, `NINFER_MODEL_DIR`, `NINFER_MODEL`,
 
 **The default profile handles this for you.** If `run.sh` is refused at startup for lack of GPU
 memory (a desktop, or another job, is holding VRAM), it steps down by itself -- an eighth of the
-context at a time, up to five times, with a 2048 prefill chunk and fewer host state slots -- says what
+context at a time, up to five times, and from the second step with a 2048 prefill chunk and fewer host state slots -- says what
 it did, and starts. It only does this for the defaults: a `NINFER_CONTEXT`, `NINFER_PREFILL_CHUNK`,
 `NINFER_HOST_STATE_SLOTS` or `NINFER_KV_CAPACITY` you set is honoured as given, and
 `NINFER_FALLBACK=off` turns it off.

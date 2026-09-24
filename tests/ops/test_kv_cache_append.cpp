@@ -1,4 +1,5 @@
 #include "ninfer/ops/kv_cache_append.h"
+#include "ops/kv_cache_lloyd4_oracle.h"
 #include "ops/op_tester.h"
 #include "core/decode_graph.h"
 #include "core/device.h"
@@ -71,6 +72,8 @@ TestCacheLayout test_cache_layout(KvCacheStorage storage) {
         // rk8v4's value plane packs two signed 4-bit codes per byte over a 32-value group, which
         // this generic layout table does not model; full_append_case_rk8v4 covers it directly.
         throw std::invalid_argument("test_cache_layout: rk8v4 uses full_append_case_rk8v4");
+    case KvCacheStorage::RotatedLloyd4KeyInt4Value:
+        throw std::invalid_argument("test_cache_layout: rk4v4 uses full_append_case_rk4v4");
     }
     throw std::invalid_argument("unsupported test KV storage");
 }
@@ -508,6 +511,156 @@ int full_append_case_rk8v4(int kv_heads, int tokens = 3) {
                               " T=" + std::to_string(tokens) +
                               " P=" + std::to_string(first_position);
     int failures = 0;
+    failures += verify_exact((label + " v codes").c_str(),
+                             from_device<std::uint8_t>(cache_v.data(), packed_count), expected_v);
+    failures += verify_exact((label + " v scales").c_str(),
+                             from_device<std::uint16_t>(scale_v.data(), value_scale_count),
+                             expected_scale_v);
+    failures += cache_k.verify_guards((label + " k guards").c_str());
+    failures += cache_v.verify_guards((label + " v guards").c_str());
+    failures += scale_k.verify_guards((label + " k scale guards").c_str());
+    failures += scale_v.verify_guards((label + " v scale guards").c_str());
+    return failures;
+}
+
+// rk4v4 key oracle: the row is rotated with the device's H256 stage order and each G64 group is
+// encoded by the shared independent oracle (ops/kv_cache_lloyd4_oracle.h).
+void encode_full_lloyd4_key_row(std::array<float, kFullHeadDim> rotated,
+                                std::vector<std::uint8_t>& packed, int head, int position,
+                                int physical_page, int kv_heads,
+                                std::vector<std::uint16_t>& scales) {
+    std::array<std::uint8_t, kFullHeadDim> indices{};
+    for (int group = 0; group < kFullGroups; ++group) {
+        const Lloyd4Group encoded = lloyd4_encode_group(&rotated[static_cast<std::size_t>(group) *
+                                                                 kFullGroup]);
+        for (int i = 0; i < kFullGroup; ++i) {
+            indices[static_cast<std::size_t>(group * kFullGroup + i)] =
+                encoded.index[static_cast<std::size_t>(i)];
+        }
+        scales[full_cache_index(kFullGroups, group, head, position, physical_page, kv_heads)] =
+            f32_to_f16_bits(encoded.scale);
+    }
+    for (int byte = 0; byte < kFullHeadDim / 2; ++byte) {
+        packed[full_cache_index(kFullHeadDim / 2, byte, head, position, physical_page, kv_heads)] =
+            static_cast<std::uint8_t>(indices[static_cast<std::size_t>(2 * byte)] |
+                                      (indices[static_cast<std::size_t>(2 * byte + 1)] << 4));
+    }
+}
+
+// rk4v4: rotated Lloyd-Max 4-bit key indices over a G64 FP16 scale plus rk8v4's packed value
+// plane. Both planes are checked exactly against the independent oracles.
+int full_append_case_rk4v4(int kv_heads, int tokens = 3) {
+    const int first_position = tokens >= 128 ? 61 : 63;
+    const int logical_pages  = (first_position + tokens + kPage - 1) / kPage;
+    const int physical_pages = 2 * logical_pages + 1;
+    std::vector<std::int32_t> mapping(static_cast<std::size_t>(logical_pages));
+    for (int page = 0; page < logical_pages; ++page) {
+        mapping[static_cast<std::size_t>(page)] = logical_pages - page;
+    }
+    std::vector<std::int32_t> positions(static_cast<std::size_t>(tokens));
+    for (int token = 0; token < tokens; ++token) {
+        positions[static_cast<std::size_t>(token)] = first_position + token;
+    }
+
+    const std::size_t elements = static_cast<std::size_t>(kFullHeadDim) *
+                                 static_cast<std::size_t>(kv_heads) *
+                                 static_cast<std::size_t>(tokens);
+    std::vector<float> host_k(elements);
+    std::vector<float> host_v(elements);
+    fill_uniform(host_k, 0x61u, -6.0f, 6.0f);
+    fill_uniform(host_v, 0x62u, -6.0f, 6.0f);
+    // An all-zero key row exercises the zero-RMS group and zero scale.
+    for (int d = 0; d < kFullHeadDim; ++d) host_k[full_input_index(d, 0, 0, kv_heads)] = 0.0f;
+    round_to_bf16(host_k);
+    round_to_bf16(host_v);
+    std::vector<std::uint16_t> input_k(elements);
+    std::vector<std::uint16_t> input_v(elements);
+    for (std::size_t i = 0; i < elements; ++i) {
+        input_k[i] = f32_to_bf16(host_k[i]);
+        input_v[i] = f32_to_bf16(host_v[i]);
+    }
+
+    const std::size_t packed_count = static_cast<std::size_t>(kFullHeadDim / 2) * kPage *
+                                     static_cast<std::size_t>(kv_heads) *
+                                     static_cast<std::size_t>(physical_pages);
+    const std::size_t scale_count = static_cast<std::size_t>(kFullGroups) * kPage *
+                                    static_cast<std::size_t>(kv_heads) *
+                                    static_cast<std::size_t>(physical_pages);
+    const std::size_t value_scale_count = static_cast<std::size_t>(kFullValueGroups) * kPage *
+                                          static_cast<std::size_t>(kv_heads) *
+                                          static_cast<std::size_t>(physical_pages);
+
+    DeviceBuffer d_k         = to_device(input_k);
+    DeviceBuffer d_v         = to_device(input_v);
+    DeviceBuffer d_positions = to_device(positions);
+    DeviceBuffer d_mapping   = to_device(mapping);
+    Tensor k(d_k.p, DType::BF16, {kFullHeadDim, kv_heads, tokens});
+    Tensor v(d_v.p, DType::BF16, {kFullHeadDim, kv_heads, tokens});
+    Tensor position_tensor(d_positions.p, DType::I32, {tokens});
+
+    GuardedDeviceBuffer cache_k(packed_count);
+    GuardedDeviceBuffer cache_v(packed_count);
+    GuardedDeviceBuffer scale_k(scale_count * sizeof(std::uint16_t));
+    GuardedDeviceBuffer scale_v(value_scale_count * sizeof(std::uint16_t));
+
+    std::vector<std::uint8_t> expected_k(packed_count, 0x5aU);
+    std::vector<std::uint8_t> expected_v(packed_count, 0xa5U);
+    auto expected_scale_k = patterned_bits(scale_count, 0x01234567u);
+    auto expected_scale_v = patterned_bits(value_scale_count, 0x89abcdefu);
+    cache_k.copy_from_host(expected_k.data(), expected_k.size());
+    cache_v.copy_from_host(expected_v.data(), expected_v.size());
+    scale_k.copy_from_host(expected_scale_k.data(),
+                           expected_scale_k.size() * sizeof(std::uint16_t));
+    scale_v.copy_from_host(expected_scale_v.data(),
+                           expected_scale_v.size() * sizeof(std::uint16_t));
+
+    PagedKVLayerView cache{
+        .k_pages = Tensor(cache_k.data(), DType::U8,
+                          {kFullHeadDim / 2, kPage, kv_heads, physical_pages}),
+        .v_pages = Tensor(cache_v.data(), DType::U8,
+                          {kFullHeadDim / 2, kPage, kv_heads, physical_pages}),
+        .k_scale_pages =
+            Tensor(scale_k.data(), DType::FP16, {kFullGroups, kPage, kv_heads, physical_pages}),
+        .v_scale_pages = Tensor(scale_v.data(), DType::FP16,
+                                {kFullValueGroups, kPage, kv_heads, physical_pages}),
+        .block_table  = Tensor(d_mapping.p, DType::I32, {logical_pages}),
+        .head_dim     = kFullHeadDim,
+        .num_kv_heads = kv_heads,
+        .storage      = KvCacheStorage::RotatedLloyd4KeyInt4Value,
+    };
+
+    for (int token = 0; token < tokens; ++token) {
+        const int position = positions[static_cast<std::size_t>(token)];
+        const int page     = mapping[static_cast<std::size_t>(position / kPage)];
+        for (int head = 0; head < kv_heads; ++head) {
+            std::array<float, kFullHeadDim> row{};
+            for (int d = 0; d < kFullHeadDim; ++d) {
+                row[static_cast<std::size_t>(d)] = host_k[full_input_index(d, head, token, kv_heads)];
+            }
+            normalized_hadamard_d256_host(row);
+            encode_full_lloyd4_key_row(row, expected_k, head, position, page, kv_heads,
+                                       expected_scale_k);
+            for (int group = 0; group < kFullValueGroups; ++group) {
+                const auto source =
+                    full_input_index(group * kFullValueGroup, head, token, kv_heads);
+                encode_full_group_i4(host_v, source, expected_v, head, position, page, group,
+                                     kv_heads, expected_scale_v);
+            }
+        }
+    }
+
+    ops::kv_cache_append(k, v, position_tensor, cache, nullptr);
+    cuda_synchronize();
+
+    const std::string label = "kv_cache_append full rk4v4 Hkv=" + std::to_string(kv_heads) +
+                              " T=" + std::to_string(tokens) +
+                              " P=" + std::to_string(first_position);
+    int failures = 0;
+    failures += verify_exact((label + " k codes").c_str(),
+                             from_device<std::uint8_t>(cache_k.data(), packed_count), expected_k);
+    failures += verify_exact((label + " k scales").c_str(),
+                             from_device<std::uint16_t>(scale_k.data(), scale_count),
+                             expected_scale_k);
     failures += verify_exact((label + " v codes").c_str(),
                              from_device<std::uint8_t>(cache_v.data(), packed_count), expected_v);
     failures += verify_exact((label + " v scales").c_str(),
@@ -1570,6 +1723,10 @@ int main(int argc, char** argv) {
         failures += full_append_case_rk8v4(kv_heads);
     }
     failures += full_append_case_rk8v4(2, 129);
+    for (const int kv_heads : {2, 4}) {
+        failures += full_append_case_rk4v4(kv_heads);
+    }
+    failures += full_append_case_rk4v4(2, 129);
     failures += full_append_case(2, KvCacheStorage::Int8Group64, 129);
     failures += full_append_case(2, KvCacheStorage::Fp8E4M3Row256, 129);
     failures += full_append_case(2, KvCacheStorage::Nvfp4Group16, 129);

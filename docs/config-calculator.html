@@ -487,7 +487,7 @@ const DATA = {
          it is a fixed block plus 1/16 byte per token, not a per-token cost. Solved exactly from
          8k/16k/32k/64k, which reproduce all four measurements to the byte. */
       /* KV payload bytes per token, = kv_payload_bytes / max_context. */
-      kv: { bf16: 65536, int8: 33792, fp8: 33024, rk8v4: 26112, k8v4: 25728, nvfp4: 18432 },
+      kv: { bf16: 65536, int8: 33792, fp8: 33024, rk8v4: 26112, rk4v4: 17920, k8v4: 25728, nvfp4: 18432 },
       /* decode tok/s, no speculation, at these cache depths */
       depths: [4096, 16384, 32768],
       /* Mean of two independent runs each, September 2026. Two runs because this card is
@@ -499,6 +499,10 @@ const DATA = {
         int8:  [35.31, 34.34, 33.63],
         fp8:   [35.05, 33.09, 30.34],
         rk8v4: [35.65, 34.73, 33.17],
+        /* rk4v4 was measured on a later build (2026-09-23), interleaved with rk8v4 twice: within
+           +-1% of rk8v4 at every depth against the card's thermal drift, so it carries rk8v4's row
+           rather than numbers from a build these columns do not describe. */
+        rk4v4: [35.65, 34.73, 33.17],
         k8v4:  [34.22, 31.83, 28.90],
         nvfp4: [35.37, 32.78, 29.86]
       },
@@ -517,7 +521,7 @@ const DATA = {
       weightsBytes: 21038469632,
       workspaceBytes: 109453312,
       nativeMaxContext: 262144,
-      kv: { bf16: 20480, int8: 10560, fp8: 10320, rk8v4: 8160, k8v4: 8040, nvfp4: 5760 },
+      kv: { bf16: 20480, int8: 10560, fp8: 10320, rk8v4: 8160, rk4v4: 5600, k8v4: 8040, nvfp4: 5760 },
       depths: [4096, 16384, 32768],
       /* Mean of two independent runs each, September 2026; see the note on the 27B rows. On this
          model rk8v4 is the fastest format at every depth measured, ahead of int8. */
@@ -526,6 +530,9 @@ const DATA = {
         int8:  [171.76, 165.02, 154.88],
         fp8:   [166.01, 148.82, 132.00],
         rk8v4: [175.15, 168.50, 158.47],
+        /* rk4v4: rk8v4's row scaled by their interleaved ratio on the 2026-09-23 build; see the
+           27B note. */
+        rk4v4: [174.76, 168.30, 157.70],
         k8v4:  [165.66, 143.58, 122.78],
         nvfp4: [169.04, 151.81, 131.75]
       },
@@ -551,6 +558,9 @@ const DATA = {
     int8:  4.342425,
     fp8:   4.344724,
     rk8v4: 4.346413,
+    /* Measured 4.352432 on 2026-09-23 in a session where int8 measured 4.343155; stated here
+       against this table's int8 anchor (+0.2136%) so the column stays one comparison. */
+    rk4v4: 4.351701,
     k8v4:  4.347258,
     nvfp4: 4.352201
   },
@@ -559,6 +569,7 @@ const DATA = {
     int8:  "int8 — rotated INT8, group-64",
     fp8:   "fp8 — row-scaled E4M3",
     rk8v4: "rk8v4 — RotorQuant, INT8 keys + 4-bit values",
+    rk4v4: "rk4v4 — Lloyd-Max 4-bit keys + 4-bit values",
     k8v4:  "k8v4 — INT8 keys + 4-bit values",
     nvfp4: "nvfp4 — NVFP4 keys and values"
   },
@@ -573,6 +584,10 @@ const DATA = {
            "a strict loss.",
     rk8v4: "The best all-round choice. 23% smaller than int8, the flattest decode curve of any " +
            "format measured, and +0.08% perplexity.",
+    rk4v4: "The context choice. 31% smaller than rk8v4 and within 3% of nvfp4, with better " +
+           "perplexity than nvfp4 (+0.21% against int8) and rk8v4's decode and prefill speed. " +
+           "Measured on a newer build than the other rows, so its speed and perplexity here are " +
+           "that session's ratios to rk8v4 and int8 applied to their rows, not a direct reading.",
     k8v4:  "Within 1.5% of rk8v4's size but the worst decode falloff measured (-25% by 32k) and " +
            "slightly worse quality. Prefer rk8v4.",
     nvfp4: "Maximum context: 45% smaller than int8. You pay about 15% of decode speed at a 32k " +
@@ -582,7 +597,7 @@ const DATA = {
 
 const GIB = 1024 * 1024 * 1024;
 const MIB = 1024 * 1024;
-const KV_ORDER = ["bf16", "int8", "fp8", "rk8v4", "k8v4", "nvfp4"];
+const KV_ORDER = ["bf16", "int8", "fp8", "rk8v4", "rk4v4", "k8v4", "nvfp4"];
 /* The paged KV allocator reserves whole 64-token pages (src/core/paged_kv_cache.h,
    kPagedKVPageSize), rounding a requested capacity up to the next page boundary
    (layouts_impl.h's page_count). Charging KV bytes as pure ctx * bytes-per-token, as this page did

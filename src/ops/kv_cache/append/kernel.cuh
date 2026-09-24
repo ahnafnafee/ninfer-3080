@@ -164,7 +164,7 @@ __launch_bounds__(256) __global__
                                            physical_page, position & kPagedKVPageMask, lane);
 }
 
-template <typename Geometry, typename Metadata, bool PackedValues = false>
+template <typename Geometry, typename Metadata, bool PackedValues = false, bool PackedKeys = false>
 __launch_bounds__(256) __global__
     void kv_cache_append_full_i8_kernel(const __nv_bfloat16* __restrict__ k,
                                         const __nv_bfloat16* __restrict__ v,
@@ -209,8 +209,8 @@ __launch_bounds__(256) __global__
         const std::int64_t src1      = kv_cache_int8_quant_src_index<Geometry>(kv_head, d1, token);
         const float v0               = __bfloat162float(v[src0]);
         const float v1               = __bfloat162float(v[src1]);
-        const float k_abs            = warp_max(fmaxf(fabsf(k0), fabsf(k1)), FullMask);
-        const auto k_quant           = kv_cache_int8_quant_params(k_abs);
+        kv_cache_i8_family_store_key_group<Geometry, PackedKeys>(cache_k, scale_k, page, kv_head,
+                                                                  group, page_off, lane, k0, k1);
         // See the tiled page kernel: v0 and v1 lanes are the packed coding's two 32-value groups.
         const float v_abs_lo = warp_max(fabsf(v0), FullMask);
         const float v_abs_hi = warp_max(fabsf(v1), FullMask);
@@ -220,8 +220,6 @@ __launch_bounds__(256) __global__
             PackedValues ? kv_cache_int4_quant_params(v_abs_hi) : v_quant;
         const std::int64_t code_base = kv_cache_int8_quant_code_index<Geometry>(
             page, kv_head, group * kKVCacheInt8Group, page_off);
-        cache_k[code_base + lane]      = kv_cache_int8_quant_code(k0, k_quant.inverse_scale);
-        cache_k[code_base + lane + 32] = kv_cache_int8_quant_code(k1, k_quant.inverse_scale);
         if constexpr (PackedValues) {
             // See the tiled page kernel: a packed byte spans lanes l and l^1.
             const std::int8_t c0 = kv_cache_int4_quant_code(v0, v_quant.inverse_scale);
@@ -242,16 +240,14 @@ __launch_bounds__(256) __global__
             cache_v[code_base + lane + 32] = kv_cache_int8_quant_code(v1, v_quant.inverse_scale);
         }
         if (lane == 0) {
-            const std::int64_t scale_off =
-                kv_cache_int8_quant_scale_index<Geometry>(page, kv_head, group, page_off);
-            scale_k[scale_off] = k_quant.scale;
             if constexpr (PackedValues) {
                 scale_v[kv_cache_int4_value_scale_index<Geometry>(page, kv_head, 2 * group,
                                                                  page_off)] = v_quant.scale;
                 scale_v[kv_cache_int4_value_scale_index<Geometry>(page, kv_head, 2 * group + 1,
                                                                  page_off)] = v_quant_hi.scale;
             } else {
-                scale_v[scale_off] = v_quant.scale;
+                scale_v[kv_cache_int8_quant_scale_index<Geometry>(page, kv_head, group,
+                                                                 page_off)] = v_quant.scale;
             }
         }
     }
@@ -259,8 +255,9 @@ __launch_bounds__(256) __global__
 
 // PackedValues selects the rk8v4 value coding: two signed 4-bit codes per byte in a half-width V
 // plane. The key path is identical in both instantiations, so a cache written by either is
-// consumable by the same rotated-INT8 key reader.
-template <typename Geometry, typename Metadata, bool PackedValues = false>
+// consumable by the same rotated-INT8 key reader. PackedKeys selects the rk4v4 Lloyd-Max key
+// coding instead (see kv_cache_i8_family_store_key_group).
+template <typename Geometry, typename Metadata, bool PackedValues = false, bool PackedKeys = false>
 __launch_bounds__(256) __global__
     void kv_cache_append_full_i8_page_kernel(const __nv_bfloat16* __restrict__ k,
                                              const __nv_bfloat16* __restrict__ v,
@@ -312,8 +309,8 @@ __launch_bounds__(256) __global__
         const std::int64_t src1      = kv_cache_int8_quant_src_index<Geometry>(kv_head, d1, token);
         const float v0               = __bfloat162float(v[src0]);
         const float v1               = __bfloat162float(v[src1]);
-        const float k_abs            = warp_max(fmaxf(fabsf(k0), fabsf(k1)), FullMask);
-        const auto k_quant           = kv_cache_int8_quant_params(k_abs);
+        kv_cache_i8_family_store_key_group<Geometry, PackedKeys>(
+            cache_k, scale_k, physical_page, kv_head, group, page_off, lane, k0, k1);
         // The v0 lanes span dimensions [64g, 64g+32) and the v1 lanes [64g+32, 64g+64), so the
         // packed coding's two 32-value groups fall out of the existing lane assignment with one
         // warp reduction each. The INT8 coding reduces across both halves for its single G64.
@@ -325,8 +322,6 @@ __launch_bounds__(256) __global__
             PackedValues ? kv_cache_int4_quant_params(v_abs_hi) : v_quant;
         const std::int64_t code_base = kv_cache_int8_quant_code_index<Geometry>(
             physical_page, kv_head, group * kKVCacheInt8Group, page_off);
-        cache_k[code_base + lane]      = kv_cache_int8_quant_code(k0, k_quant.inverse_scale);
-        cache_k[code_base + lane + 32] = kv_cache_int8_quant_code(k1, k_quant.inverse_scale);
         if constexpr (PackedValues) {
             // A packed byte holds the adjacent pair (2p, 2p+1), but this lane owns d0 = 64g+lane
             // and d1 = d0+32, so each byte spans lanes l and l^1. Exchange the partner's codes and
@@ -349,9 +344,6 @@ __launch_bounds__(256) __global__
             cache_v[code_base + lane + 32] = kv_cache_int8_quant_code(v1, v_quant.inverse_scale);
         }
         if (lane == 0) {
-            const std::int64_t scale_offset =
-                kv_cache_int8_quant_scale_index<Geometry>(physical_page, kv_head, group, page_off);
-            scale_k[scale_offset] = k_quant.scale;
             if constexpr (PackedValues) {
                 scale_v[kv_cache_int4_value_scale_index<Geometry>(physical_page, kv_head,
                                                                  2 * group, page_off)] =
@@ -360,7 +352,8 @@ __launch_bounds__(256) __global__
                                                                  2 * group + 1, page_off)] =
                     v_quant_hi.scale;
             } else {
-                scale_v[scale_offset] = v_quant.scale;
+                scale_v[kv_cache_int8_quant_scale_index<Geometry>(physical_page, kv_head, group,
+                                                                 page_off)] = v_quant.scale;
             }
         }
     }
