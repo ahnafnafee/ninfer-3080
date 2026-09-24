@@ -194,7 +194,7 @@ int main() {
                pool.dflash_local()->lane_capacity() == 4,
            "StateImage DFlash local geometry");
     const q36::StateImageDeviceSlotView complete = pool.slot_view(0);
-    expect(complete.linear.layers == 2 && complete.continuation_hidden.ne[0] == 7 &&
+    expect(complete.linear.size() == 1 && complete.linear.front().layers == 2 && complete.continuation_hidden.ne[0] == 7 &&
                complete.dflash_local && complete.dflash_local->layers == 2,
            "StateImage slot view exposes every fixed component");
 

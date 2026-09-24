@@ -18,6 +18,14 @@ set_target_properties(ninfer-multi-gpu-probe PROPERTIES
   CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools")
 
+# Go/no-go probe for tensor-parallel all-reduce transports (peer push, mapped host, staged host,
+# optionally NCCL): per-collective latency in graphs, a correctness soak, and the pinned-memory
+# portability check. Standalone like the probe above, so it can be uploaded to rented hardware.
+add_executable(ninfer-tp-probe tp_probe.cu)
+set_target_properties(ninfer-tp-probe PROPERTIES
+  CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools")
+
 # Measures what the dequantise-to-int8 prefill route would cost on the weight side: the group-scale
 # spread within a row, and the relative L2 of reconstructing a weight as int8 with one scale per
 # row. Reads the real artifact, because the answer depends on the actual scale distribution.

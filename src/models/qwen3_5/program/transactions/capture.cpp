@@ -697,12 +697,12 @@ void ProgramImpl::enqueue_active_capture_transfers(ActiveCaptureTransaction& tra
         transaction.transfer_submitted) {
         throw std::logic_error("active capture transfer batch is not enqueueable");
     }
-    context_source_ready_.record(device.stream);
-    context_source_ready_.wait(device.transfer_stream);
+    context_source_ready_.record(compute_streams);
+    context_source_ready_.wait(transfer_streams);
     if (transaction.state_placement == qwen3_5::CaptureStatePlacement::HostSnapshot) {
         start_context_transfer_timer(runtime::ContextResourceClass::State);
         std::optional<StateImageTransfer> snapshot =
-            state_store->begin_device_to_host(transaction.source_state, device.transfer_stream);
+            state_store->begin_device_to_host(transaction.source_state, transfer_streams);
         if (!snapshot) {
             throw std::logic_error("selected Host capture has no prepared State target");
         }
@@ -715,7 +715,7 @@ void ProgramImpl::enqueue_active_capture_transfers(ActiveCaptureTransaction& tra
             state_store->selectors(transaction.source_state, transaction.destination_state);
         start_context_transfer_timer(runtime::ContextResourceClass::State);
         state_images->copy_dflash_local(state_fork.source, state_fork.destination,
-                                        device.transfer_stream);
+                                        transfer_streams);
         stop_context_transfer_timer(runtime::ContextResourceClass::State);
         transaction.transfer_timer_mask |=
             1U << context_resource_index(runtime::ContextResourceClass::State);
@@ -725,7 +725,7 @@ void ProgramImpl::enqueue_active_capture_transfers(ActiveCaptureTransaction& tra
         decoder->text_kv.page_pool().copy_page(
             text_kv_addresses->active_snapshot_tail_source(*transaction.text_snapshot),
             text_kv_addresses->active_snapshot_tail_destination(*transaction.text_snapshot),
-            device.transfer_stream);
+            transfer_streams);
         stop_context_transfer_timer(runtime::ContextResourceClass::MainKV);
         transaction.transfer_timer_mask |=
             1U << context_resource_index(runtime::ContextResourceClass::MainKV);
@@ -736,13 +736,13 @@ void ProgramImpl::enqueue_active_capture_transfers(ActiveCaptureTransaction& tra
         backend_kv_cache()->page_pool().copy_page(
             backend_kv_addresses->active_snapshot_tail_source(*transaction.backend_snapshot),
             backend_kv_addresses->active_snapshot_tail_destination(*transaction.backend_snapshot),
-            device.transfer_stream);
+            transfer_streams);
         stop_context_transfer_timer(runtime::ContextResourceClass::BackendKV);
         transaction.transfer_timer_mask |=
             1U << context_resource_index(runtime::ContextResourceClass::BackendKV);
         ++transaction.operations.partial_tail_cow_pages;
     }
-    context_completion_.record(device.transfer_stream);
+    context_completion_.record(transfer_streams);
     transaction.transfer_enqueue_pending = false;
     transaction.transfer_submitted       = true;
 }
@@ -847,13 +847,13 @@ ActiveCaptureResult ProgramImpl::publish_active_capture(ActiveCaptureTransaction
     if (transaction.publish_shared) {
         shared_bundle = *sequence.kv;
         text_kv_addresses->commit_active_snapshot(std::move(*transaction.text_snapshot),
-                                                  device.stream);
+                                                  compute_streams);
         transaction.text_snapshot.reset();
         SequenceKVBundle active_bundle{.text = *transaction.active_text_destination};
         transaction.active_text_destination.reset();
         if (transaction.backend_snapshot) {
             backend_kv_addresses->commit_active_snapshot(std::move(*transaction.backend_snapshot),
-                                                         device.stream);
+                                                         compute_streams);
             transaction.backend_snapshot.reset();
             active_bundle.backend = *transaction.active_backend_destination;
             transaction.active_backend_destination.reset();
@@ -1119,8 +1119,8 @@ ProgramImpl::progress_active_capture_transaction(runtime::CancellationFlagView c
             runtime::ContextResourceClass::MainKV,
             runtime::ContextResourceClass::BackendKV,
         };
-        context_source_ready_.record(device.stream);
-        context_source_ready_.wait(device.transfer_stream);
+        context_source_ready_.record(compute_streams);
+        context_source_ready_.wait(transfer_streams);
         try {
             for (const runtime::ContextResourceClass resource : resources) {
                 bool has_copy = false;
@@ -1181,7 +1181,7 @@ ProgramImpl::progress_active_capture_transaction(runtime::CancellationFlagView c
                 });
             }
         } catch (...) {
-            (void)cudaStreamSynchronize(device.transfer_stream);
+            synchronize_transfer_streams();
             for_each_pending_pressure([&](auto& work) { abort_pressure_work(work); });
             throw;
         }
@@ -1191,7 +1191,7 @@ ProgramImpl::progress_active_capture_transaction(runtime::CancellationFlagView c
         pressure_transition.phase = copies_submitted ? PressureTransitionPhase::CopiesInFlight
                                                      : PressureTransitionPhase::CopyPublication;
         if (copies_submitted) {
-            context_completion_.record(device.transfer_stream);
+            context_completion_.record(transfer_streams);
             return ActiveCaptureResult{.status = runtime::ContextTransactionStatus::InProgress};
         }
     }
@@ -1266,9 +1266,7 @@ ProgramImpl::progress_active_capture_transaction(runtime::CancellationFlagView c
         try {
             enqueue_active_capture_transfers(transaction);
         } catch (...) {
-            if (device.transfer_stream != nullptr) {
-                (void)cudaStreamSynchronize(device.transfer_stream);
-            }
+            synchronize_transfer_streams();
             abort_active_capture(transaction);
             transaction.published = true;
             throw;

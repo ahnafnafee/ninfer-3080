@@ -374,8 +374,13 @@ PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
     // first. Without this, a failure here can be somebody else's error wearing this message.
     const cudaError_t pending = cudaGetLastError();
 
+    // Portable, so the buffer counts as pinned in every device's context rather than only the one
+    // that was current when it was allocated. With several ranks, ingress frames are copied to each
+    // stage's device from one host buffer, and a copy that treats it as pageable is neither fast nor
+    // capturable. (The error text below keeps its `cudaMallocHost` wording: launcher docs and the
+    // test guard match on it.)
     void* ptr             = nullptr;
-    const cudaError_t err = cudaMallocHost(&ptr, size_bytes);
+    const cudaError_t err = cudaHostAlloc(&ptr, size_bytes, cudaHostAllocPortable);
     if (err != cudaSuccess) {
         // Say the size, and say which memory. `cudaErrorMemoryAllocation: out of memory` reads as
         // a VRAM shortfall and sends people to nvidia-smi when the shortfall is pinned system RAM.

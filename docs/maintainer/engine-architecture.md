@@ -527,7 +527,12 @@ ResourceManager 与完成所有 request response。内部不变量错误不能�
 - CUDA Graph 按合法 exact-`B` topology 建立，request identity 和 page IDs 是稳定输入数据，不是 graph key；
 - ordinary decode 不运行 catalog scan、pressure search 或后台 replica scan；
 - workspace 是 Program 启动时统一规划的 backing，Vision、Text 和 speculative schedule 按互斥 lifetime
-  使用其内部区域。
+  使用其内部区域；
+- 多 GPU 时（`--devices A,B,...`，Linux）模型按层切成 pipeline stage，每个 stage 整层拥有自己的权重、
+  KV plane、GDN state、replay records 和 workspace，位于各自设备上；仍然是一个 Program、一个 KV page
+  allocator（每个 plane 绑定一个 rank）、一个 Scheduler 和一个 commit 序列。embedding、head、round state、
+  sampling 和 MTP 留在 rank 0，residual 经 `StageLink` 逐 stage 传递并由最后一个 stage 送回。KV 容量取各设备
+  可承载页数的最小值。设计与限制见 [pipeline-parallel-plan.md](pipeline-parallel-plan.md)。
 
 容量查询消费与执行同源的逐层参数和 Use。Allocation scope 同时用于布局计算与实际执行；
 顺序互斥的 scratch 取峰值，跨阶段仍活跃的数据计入完整存活期。Vision handoff 保留至 Text

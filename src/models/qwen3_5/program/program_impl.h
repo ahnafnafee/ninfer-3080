@@ -596,10 +596,13 @@ public:
     // lent to a Vision window. Null otherwise, where `persistent` owns a plain allocation.
     std::unique_ptr<EvictableKVPool> kv_arena;
     DeviceArena persistent;
+    // Pipeline stages only: the persistent state of each further device -- its layers' KV planes,
+    // block-table copy and recurrent state -- allocated in that device's own memory.
+    std::vector<DeviceArena> persistent_by_rank;
     DeviceArena workspace_storage;
-    // Expert-offload split only: scratch for the ranks past the primary device, each allocated in
-    // its own card's memory. `work` borrows a slice of each and switches between them as the layer
-    // loop walks ranks, so every existing workspace call site keeps using one arena object.
+    // Pipeline stages only: scratch for the ranks past the primary device, each allocated in its
+    // own card's memory. `work` borrows a slice of each and switches between them as the layer
+    // loop walks stages, so every existing workspace call site keeps using one arena object.
     std::vector<DeviceArena> workspace_storage_by_rank;
     WorkspaceArena work;
     std::unique_ptr<qwen3_5::DecoderState> decoder;
@@ -612,10 +615,17 @@ public:
     std::size_t text_host_kv_page_stride    = 0;
     std::size_t backend_host_kv_page_stride = 0;
     std::unique_ptr<qwen3_5::StateImageDevicePool> state_images;
+    // Only when the model is split over several devices: the state shards and the links between
+    // stages that a forward pass crosses.
+    std::unique_ptr<execution::StageRuntime> stage_runtime;
     std::unique_ptr<qwen3_5::HostStatePool> host_state_images;
     std::unique_ptr<StateImageStore> state_store;
+    // ReplaySSM records and their fold, for the first state shard; the rest, on other devices, are
+    // in the `extra_` vectors.
     std::optional<GdnReplayRecords> replay_records;
     std::optional<ops::GdnReplayFoldPlan> replay_fold;
+    std::vector<std::unique_ptr<GdnReplayRecords>> extra_replay_records;
+    std::vector<std::unique_ptr<ops::GdnReplayFoldPlan>> extra_replay_fold;
     std::optional<DFlashPersistentState> dflash;
     qwen3_5::RoundState io;
     Tensor prefill_hidden;
@@ -851,8 +861,12 @@ private:
     };
 
     std::uint64_t next_materialization_id_ = 1;
-    CudaCompletionEvent context_source_ready_;
-    CudaCompletionEvent context_completion_;
+    // Every rank's compute and transfer stream. Context transactions fan their copies out across
+    // ranks and fence on all of them.
+    RankStreams compute_streams;
+    RankStreams transfer_streams;
+    RankFenceSet context_source_ready_;
+    RankFenceSet context_completion_;
     std::vector<TokenId> materialization_ledger_;
     qwen3_5::detail::ResidentPrefixIdentity materialization_identity_;
     qwen3_5::detail::PrefixShortlistDigests materialization_prefix_digests_;
@@ -939,6 +953,7 @@ private:
                                runtime::ContextResourceClass resource);
     void publish_pressure_host_releases(MaterializationTransaction::PressureWork& work);
     void publish_pressure_work(MaterializationTransaction::PressureWork& work) noexcept;
+    void synchronize_transfer_streams() const;
     void abort_pressure_work(MaterializationTransaction::PressureWork& work) noexcept;
     void start_context_transfer_timer(runtime::ContextResourceClass resource);
     void stop_context_transfer_timer(runtime::ContextResourceClass resource);

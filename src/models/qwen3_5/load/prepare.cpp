@@ -88,7 +88,8 @@ void Bindings::evict(WeightId id, std::uint32_t rank) {
 }
 
 void Bindings::place(WeightId id, std::size_t rank) {
-    if (rank == 0) { return; }
+    // Rank 0 is recorded too, so an object shared between a rank-0 layer and a later stage's layer
+    // is refused as a conflicting placement instead of silently living on one of them.
     const auto& parameter = at(id);
     if (parameter.reference.residency != artifact::Residency::Device) {
         throw artifact::ArtifactError(parameter.reference.name +

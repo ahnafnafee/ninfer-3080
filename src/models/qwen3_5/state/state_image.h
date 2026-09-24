@@ -2,6 +2,7 @@
 
 #include "core/arena.h"
 #include "core/cyclic_kv_cache.h"
+#include "core/device.h"
 #include "core/layout.h"
 #include "core/linear_attention_state.h"
 #include "core/tensor.h"
@@ -11,7 +12,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace ninfer::models::qwen3_5 {
@@ -42,8 +45,19 @@ struct StateImageHostLayout {
     std::size_t image_bytes              = 0;
 };
 
+// A run of consecutive Linear Attention layers whose state one rank holds. The host image keeps the
+// whole model's layers at their global offsets, so where a layer sits on a device is invisible to it.
+struct StateImageShard {
+    std::size_t rank          = 0;
+    std::uint32_t first_layer = 0;
+    std::uint32_t layers      = 0;
+};
+
 struct StateImageDeviceLayout {
-    LinearAttentionStatePoolLayout linear;
+    // One shard per rank that holds Linear Attention layers, in layer order, and each shard's pool.
+    // The continuation hidden and the DFlash local state stay on rank 0.
+    std::vector<StateImageShard> shards;
+    std::vector<LinearAttentionStatePoolLayout> linear;
     TensorRegion continuation_hidden;
     std::optional<CyclicKVCacheLayout> dflash_local;
     StateImageHostLayout host;
@@ -52,8 +66,13 @@ struct StateImageDeviceLayout {
 [[nodiscard]] TransferWork state_image_transfer_work(const StateImageHostLayout& layout);
 [[nodiscard]] TransferWork dflash_local_transfer_work(const StateImageHostLayout& layout);
 
+// Every Linear Attention layer in one shard on rank 0.
 [[nodiscard]] StateImageDeviceLayout plan_state_image_device_pool(LayoutBuilder& builder,
                                                                   const StateImageSpec& spec);
+// `shards` must cover spec.linear.layers exactly, in order; each is laid out in its rank's builder.
+[[nodiscard]] StateImageDeviceLayout
+plan_state_image_device_pool(std::span<LayoutBuilder* const> builders,
+                             std::span<const StateImageShard> shards, const StateImageSpec& spec);
 
 struct HostStateImageView {
     std::byte* data                    = nullptr;
@@ -111,7 +130,8 @@ private:
 };
 
 struct StateImageDeviceSlotView {
-    LinearAttentionStateSlotView linear;
+    // One view per shard, in layer order.
+    std::vector<LinearAttentionStateSlotView> linear;
     Tensor continuation_hidden;
     std::optional<CyclicKVCacheSlotView> dflash_local;
 };
@@ -124,6 +144,9 @@ struct StateImageDeviceSlotView {
  */
 class StateImageDevicePool {
 public:
+    // `backings[r]` is rank r's persistent device memory.
+    StateImageDevicePool(std::span<const DeviceSpan> backings, const StateImageDeviceLayout& layout);
+    // Everything on rank 0.
     StateImageDevicePool(DeviceSpan backing, const StateImageDeviceLayout& layout);
 
     StateImageDevicePool(const StateImageDevicePool&)            = delete;
@@ -131,14 +154,23 @@ public:
     StateImageDevicePool(StateImageDevicePool&&)                 = delete;
     StateImageDevicePool& operator=(StateImageDevicePool&&)      = delete;
 
-    [[nodiscard]] std::int32_t slot_count() const noexcept { return linear_.slot_count(); }
+    [[nodiscard]] std::int32_t slot_count() const noexcept { return linear_.front()->slot_count(); }
 
     [[nodiscard]] StateImageDeviceSlotView slot_view(std::int32_t slot) const;
     [[nodiscard]] Tensor continuation_hidden_slot(std::int32_t slot) const;
 
-    [[nodiscard]] LinearAttentionStatePool& linear() noexcept { return linear_; }
-
-    [[nodiscard]] const LinearAttentionStatePool& linear() const noexcept { return linear_; }
+    // The Linear Attention state pools, one per shard. `linear()` is for the single-shard case and
+    // refuses a sharded pool rather than quietly answering for only its first layers.
+    [[nodiscard]] std::size_t shard_count() const noexcept { return linear_.size(); }
+    [[nodiscard]] const StateImageShard& shard(std::size_t index) const { return shards_.at(index); }
+    [[nodiscard]] LinearAttentionStatePool& linear(std::size_t shard_index) {
+        return *linear_.at(shard_index);
+    }
+    [[nodiscard]] const LinearAttentionStatePool& linear(std::size_t shard_index) const {
+        return *linear_.at(shard_index);
+    }
+    [[nodiscard]] LinearAttentionStatePool& linear() { return *single_shard(); }
+    [[nodiscard]] const LinearAttentionStatePool& linear() const { return *single_shard(); }
 
     [[nodiscard]] Tensor& continuation_hidden_store() noexcept { return continuation_hidden_; }
 
@@ -151,20 +183,24 @@ public:
 
     [[nodiscard]] const StateImageHostLayout& host_layout() const noexcept { return host_layout_; }
 
-    void zero_slot(std::int32_t slot, cudaStream_t stream = nullptr);
-    void zero_all(cudaStream_t stream = nullptr);
-    void copy_slot(std::int32_t source, std::int32_t destination, cudaStream_t stream = nullptr);
+    // Each shard's copies go on the stream of the rank that holds it; the continuation hidden and
+    // the DFlash local state are rank 0's.
+    void zero_slot(std::int32_t slot, RankStreams streams = {});
+    void zero_all(RankStreams streams = {});
+    void copy_slot(std::int32_t source, std::int32_t destination, RankStreams streams = {});
     void copy_dflash_local(std::int32_t source, std::int32_t destination,
-                           cudaStream_t stream = nullptr);
+                           RankStreams streams = {});
     void copy_to_host(std::int32_t source, HostStateImageView destination,
-                      cudaStream_t stream = nullptr) const;
+                      RankStreams streams = {}) const;
     void copy_from_host(HostStateImageConstView source, std::int32_t destination,
-                        cudaStream_t stream = nullptr);
+                        RankStreams streams = {});
 
 private:
     void validate_host_layout(const StateImageHostLayout* layout, const std::byte* data) const;
+    [[nodiscard]] LinearAttentionStatePool* single_shard() const;
 
-    LinearAttentionStatePool linear_;
+    std::vector<StateImageShard> shards_;
+    std::vector<std::unique_ptr<LinearAttentionStatePool>> linear_;
     Tensor continuation_hidden_;
     std::optional<CyclicKVCache> dflash_local_;
     StateImageHostLayout host_layout_;

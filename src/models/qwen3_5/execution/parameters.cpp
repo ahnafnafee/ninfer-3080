@@ -332,13 +332,16 @@ Parameters::Parameters(const Model& source) : model(source) {
     text.token_embedding = native_weight(model.weight(w.text.token_embedding).view);
     text.output_head     = prepare.linear(w.text.output_head_use);
     text.final_norm      = prepare.tensor(w.text.final_norm);
-    text.rank_count = w.text.split.ranks();
+    text.rank_count = w.text.stages.stages();
+    text.stage_begin.clear();
+    for (std::size_t stage = 0; stage < w.text.stages.stages(); ++stage) {
+        text.stage_begin.push_back(w.text.stages.stage_begin(stage));
+    }
     text.layers.reserve(w.text.layers.size());
     for (std::size_t i = 0; i < w.text.layers.size(); ++i) {
         text.layers.push_back(with_context("text/layers/" + std::to_string(i),
                                            [&] { return prepare.block(w.text.layers[i]); }));
-        text.layers.back().expert_rank =
-            w.text.split.placement(static_cast<std::uint32_t>(i)).rank;
+        text.layers.back().rank = w.text.stages.placement(static_cast<std::uint32_t>(i)).stage;
     }
     if (w.mtp) {
         mtp = with_context("mtp", [&] { return prepare.mtp(*w.mtp); });

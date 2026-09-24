@@ -137,5 +137,22 @@ int main() {
     failures += check(same_card.devices.size() == 2 && same_card.devices[0] == 0 &&
                            same_card.devices[1] == 0,
                       "--devices 0,0 was not accepted for single-card split coverage");
+    const ninfer::cli::Options three = parse(
+        {"ninfer-cli", "model.ninfer", "--prompt", "hello", "--devices", "0,1,2"});
+    failures += check(three.devices.size() == 3, "--devices did not accept more than two stages");
+    const ninfer::cli::Options staged = parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                               "--devices", "0,0", "--stage-layers", "20,44"});
+    failures += check(staged.stage_layers == std::vector<std::uint32_t>({20, 44}),
+                      "--stage-layers did not reach the options");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--stage-layers", "20,44"});
+                      }),
+                      "--stage-layers without a multi-device split was accepted");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--devices", "0,0", "--stage-layers", "0,64"});
+                      }),
+                      "a stage with no layers was accepted");
     return failures == 0 ? 0 : 1;
 }

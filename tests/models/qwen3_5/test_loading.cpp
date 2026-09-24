@@ -232,37 +232,24 @@ void logical_data_and_instances() {
     require(expanded.materialization().device_capacity(0) == capacity,
             "cross-layer sharing duplicated parent storage");
 
-    // --devices: every layer's post-mixer tail moves to the second device, and nothing else does.
-    // Attention, GDN, the norms feeding the mixer and the head stay on the primary card, because
-    // each is tied to state -- KV, recurrent state, round state -- that cannot move with it.
-    auto offloaded          = qwen::plan_load(changed, {.ranks = 2});
-    const auto& split       = offloaded.weights().text.split;
-    const auto& offload_plan = offloaded.materialization();
-    require(split.ranks() == 2 && split.rank_layers(0) == 0 && split.rank_layers(1) == 2 &&
-                offload_plan.device_rank_count() == 2 && offload_plan.device_capacity(1) > 0 &&
-                offload_plan.device_capacity(0) < capacity,
-            "--devices did not move any layer's expert block off the primary device");
-    const auto rank_of = [&](qwen::WeightId id) {
-        const auto object = offloaded.parameter(id).binding.parts.at(0).object;
-        for (const auto& placement : offload_plan.device_objects) {
-            if (placement.object.index == object.index) { return placement.rank; }
-        }
-        throw std::runtime_error("bound parameter has no device placement");
-    };
-    const auto& offload_block = offloaded.weights().text.layers.at(1);
-    const auto& offload_mlp   = std::get<qwen::DenseWeights>(offload_block.ffn);
-    require(rank_of(offload_mlp.gate) == 1 && rank_of(offload_mlp.up) == 1 &&
-                rank_of(offload_mlp.down) == 1 && rank_of(offload_block.post_attention_norm) == 1,
-            "the post-mixer tail did not follow its layer's expert rank");
-    require(rank_of(offload_block.input_norm) == 0 &&
-                rank_of(std::get<qwen::AttentionWeights>(offload_block.mixer).query) == 0 &&
-                rank_of(offloaded.weights().text.token_embedding) == 0 &&
-                rank_of(offloaded.weights().text.output_head) == 0 &&
-                rank_of(offloaded.weights().text.final_norm) == 0,
-            "the split moved something other than the post-mixer tail");
+    // --devices: each stage owns whole layers. The two layers of this fixture share every parent
+    // object, so putting them on different stages cannot be satisfied and must be refused rather
+    // than left living on one of the two devices.
+    rejects<artifact::ArtifactError>(
+        [&] { (void)qwen::plan_load(changed, {.ranks = 2}); },
+        "layers that share parent storage were split across stages");
     rejects<std::invalid_argument>(
         [&] { (void)qwen::plan_load(changed, {.ranks = 5}); },
         "a split with more devices than layers was accepted");
+    rejects<std::invalid_argument>(
+        [&] { (void)qwen::plan_load(changed, {.ranks = 2, .stage_layers = {1}}); },
+        "--stage-layers with the wrong number of counts was accepted");
+    rejects<std::invalid_argument>(
+        [&] { (void)qwen::plan_load(changed, {.ranks = 2, .stage_layers = {2, 1}}); },
+        "--stage-layers that overshoot the model were accepted");
+    rejects<std::invalid_argument>(
+        [&] { (void)qwen::plan_load(changed, {.stage_layers = {2}}); },
+        "--stage-layers without a multi-device split was accepted");
 }
 
 void native_uses() {

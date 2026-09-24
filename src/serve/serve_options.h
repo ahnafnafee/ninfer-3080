@@ -47,9 +47,12 @@ struct ServeOptions {
     std::size_t response_store_max_records = kDefaultResponseStoreRecords;
     std::size_t response_store_max_bytes   = kDefaultResponseStoreBytes;
     int device                             = 0;
-    // Ordered CUDA devices for model-parallel execution: primary first. Empty keeps the
-    // single-device route selected by `device`. Mutually exclusive with --device.
+    // Ordered CUDA devices, one pipeline stage each: primary first, also holding the embedding,
+    // head and round state. Empty keeps the single-device route selected by `device`. Mutually
+    // exclusive with --device.
     std::vector<int> devices;
+    // Layers per stage, one count per entry of `devices`. Empty lets the engine choose.
+    std::vector<std::uint32_t> stage_layers;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;

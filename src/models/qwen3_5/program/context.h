@@ -9,6 +9,7 @@
 #include "ninfer/ops/sliding_window_attention.h"
 #include "ninfer/ops/softmax_attention.h"
 #include "models/qwen3_5/program/storage/draft_context.h"
+#include "models/qwen3_5/execution/stage_runtime.h"
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
 #include "models/qwen3_5/program/vision_prefill.h"
@@ -38,6 +39,8 @@ struct ExecutionCore {
     Tensor& prefill_hidden;
     std::uint32_t prefill_chunk;
     ProposalHead proposal_head;
+    // Null on one device; see StageRuntime.
+    StageRuntime* stages = nullptr;
 };
 
 struct PrefillContext {

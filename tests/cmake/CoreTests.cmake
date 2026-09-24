@@ -8,8 +8,11 @@ ninfer_add_test(ninfer_wide_math_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_wide_math.cpp"
   LIBRARIES ninfer_core)
 
-ninfer_add_test(ninfer_pipeline_split_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_pipeline_split.cpp"
+ninfer_add_test(ninfer_multi_gpu_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_multi_gpu.cpp"
+          "${CMAKE_CURRENT_LIST_DIR}/../test_stage_plan.cpp"
+          "${CMAKE_CURRENT_LIST_DIR}/../test_kv_cache_ranks.cpp"
+          "${CMAKE_CURRENT_LIST_DIR}/../test_stage_link.cu"
   LIBRARIES ninfer_core)
 
 ninfer_add_test(ninfer_arena_ranks_test
@@ -36,13 +39,8 @@ ninfer_add_test(ninfer_evictable_weight_pool_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_evictable_weight_pool.cu"
   LIBRARIES ninfer_core)
 
-ninfer_add_test(ninfer_cross_rank_staging_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_cross_rank_staging.cu"
-  LIBRARIES ninfer_core)
-
 set_tests_properties(
   ninfer_arena_ranks_test
-  ninfer_cross_rank_staging_test
   ninfer_device_buffer_visibility_test
   PROPERTIES SKIP_RETURN_CODE 77)
 

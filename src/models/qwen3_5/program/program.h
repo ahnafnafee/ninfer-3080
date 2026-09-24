@@ -152,6 +152,8 @@ public:
     [[nodiscard]] std::uint32_t kv_capacity() const noexcept;
     [[nodiscard]] std::uint32_t max_concurrency() const noexcept;
     [[nodiscard]] std::size_t device_reservation_bytes() const noexcept;
+    // What each further device reserves (device 1 first). Empty on one device.
+    [[nodiscard]] std::span<const std::size_t> extra_rank_reservation_bytes() const noexcept;
     [[nodiscard]] std::size_t workspace_capacity_bytes() const noexcept;
 
 public:

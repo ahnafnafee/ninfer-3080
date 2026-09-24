@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/pipeline_split.h"
+#include "core/stage_plan.h"
 #include "core/weight_view.h"
 #include "ninfer/ops/linear.h"
 
@@ -85,9 +85,9 @@ struct TextWeights {
     WeightId token_embedding, output_head, final_norm;
     WeightUseId output_head_use;
     std::vector<BlockWeights> layers;
-    // Which device holds each layer's expert/MLP block. The identity mapping for one device, which
-    // is what keeps every consumer a no-op there; `--devices` gives it a second rank.
-    PipelineSplit split{0};
+    // Which stage's device holds each whole layer. The identity mapping for one device, which is
+    // what keeps every consumer a no-op there; `--devices` adds stages.
+    StagePlan stages{1};
 };
 
 struct MtpWeights {

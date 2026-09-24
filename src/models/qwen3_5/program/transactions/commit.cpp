@@ -348,9 +348,9 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
                 const std::uint32_t count           = std::min(prefill_chunk, end - cursor);
                 const StateImageSelectors selectors = state_selectors(sequence);
                 execution::PrefillContext schedule_state{
-                    {device, parameters, work, state_images->linear(),
+                    {device, parameters, work, state_images->linear(0),
                      replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-                     proposal_head},
+                     proposal_head, stage_runtime.get()},
                     text_kv_view(sequence),
                     mtp_kv_view(sequence),
                     decoder->text_kv,
@@ -770,15 +770,11 @@ ReleaseResult ProgramImpl::release_shared_prefix(SharedPrefixHandle&& handle) no
 void ProgramImpl::fail_all_cleanup() noexcept {
     pending_transaction_.reset();
     if (auto* transaction = std::get_if<ActiveCaptureTransaction>(&context_transaction_)) {
-        if (transaction->transfer_submitted && device.transfer_stream != nullptr) {
-            (void)cudaStreamSynchronize(device.transfer_stream);
-        }
+        if (transaction->transfer_submitted) { synchronize_transfer_streams(); }
         abort_active_capture(*transaction);
     }
     if (auto* transaction = std::get_if<MaterializationTransaction>(&context_transaction_)) {
-        if (transaction->transfer_submitted && device.transfer_stream != nullptr) {
-            (void)cudaStreamSynchronize(device.transfer_stream);
-        }
+        if (transaction->transfer_submitted) { synchronize_transfer_streams(); }
         release_materialization_staging(*transaction);
     }
     context_transaction_.emplace<std::monostate>();

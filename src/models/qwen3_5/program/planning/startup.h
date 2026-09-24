@@ -11,10 +11,12 @@
 #include "models/qwen3_5/state/state_image.h"
 #include "models/load_options.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace ninfer::models::qwen3_5::detail {
 
@@ -35,7 +37,9 @@ struct DFlashPersistentLayout {
 struct PersistentLayout {
     qwen3_5::DecoderStateLayout decoder;
     qwen3_5::StateImageDeviceLayout state_images;
+    // ReplaySSM records, one layout per state shard: the first here, the rest in `extra`.
     std::optional<GdnReplayRecordLayout> replay_records;
+    std::vector<GdnReplayRecordLayout> extra_replay_records;
     std::optional<DFlashPersistentLayout> dflash;
     qwen3_5::RoundStateLayout round;
     TensorLayout prefill_hidden;
@@ -43,6 +47,9 @@ struct PersistentLayout {
     std::optional<TensorLayout> token_counts;
     std::optional<TensorLayout> sampling_config;
     std::size_t bytes            = 0;
+    // Persistent bytes on each further device (device 1 first): the KV planes, block-table copy and
+    // recurrent state of the layers that stage owns. Empty on one device.
+    std::vector<std::size_t> extra_rank_bytes;
     std::size_t kv_payload_bytes = 0;
     // Arena offset just past the last page-major KV plane. Everything an overlay Vision window may
     // borrow from free KV lies below it; stores interleaved there are simply never selected.
@@ -120,7 +127,18 @@ struct SequencePlanImpl {
     WorkspacePlan workspace;
     std::size_t graph_allowance_bytes    = 0;
     std::size_t device_reservation_bytes = 0;
+    // What each further device reserves (device 1 first): its persistent state, the scratch its
+    // stage runs in, and its share of the graph allowance.
+    std::vector<std::size_t> extra_rank_reservation_bytes;
 };
+
+// The widest forward pass a pipeline stage boundary carries: prefill columns, or every lane's
+// verification columns. Sizes the boundary links and the scratch each stage needs around its layers.
+[[nodiscard]] inline std::uint64_t stage_boundary_columns(const SequencePlanImpl& plan) noexcept {
+    return std::max<std::uint64_t>(
+        std::min(plan.prefill_chunk, plan.capacity),
+        static_cast<std::uint64_t>(plan.max_concurrency) * (plan.draft_window + 1U));
+}
 
 struct SequencePlannerImpl {
     SequencePlanningInputs inputs;

@@ -51,10 +51,9 @@ struct BlockParameters {
     std::variant<AttentionParameters, GdnParameters> mixer;
     FfnParameters ffn;
     ops::SparseMoeHints projection_prefetch;
-    // Which device holds post_attention_norm and the FFN. Always 0 on one GPU; with `--devices` the
-    // mixer half still runs on rank 0, where the KV cache and the GDN recurrent state live, and only
-    // this tail crosses.
-    std::size_t expert_rank = 0;
+    // Which stage's device holds this layer: its weights, its KV cache or recurrent state, and the
+    // scratch it runs in. Always 0 on one GPU.
+    std::size_t rank = 0;
 };
 
 struct TextParameters {
@@ -62,10 +61,16 @@ struct TextParameters {
     LinearParameters output_head;
     Tensor final_norm;
     std::vector<BlockParameters> layers;
-    // How many devices the layer loop spans. One is the identity split and the fast path.
+    // How many stages the layer loop spans. One is the identity plan and the fast path.
     std::size_t rank_count = 1;
+    // Stage s owns layers [stage_begin[s], stage_end(s)).
+    std::vector<std::uint32_t> stage_begin{0};
 
     [[nodiscard]] bool split_execution() const noexcept { return rank_count > 1; }
+    [[nodiscard]] std::uint32_t stage_end(std::size_t stage) const {
+        return stage + 1 < stage_begin.size() ? stage_begin[stage + 1]
+                                              : static_cast<std::uint32_t>(layers.size());
+    }
 };
 
 struct MtpProjectionParameters {

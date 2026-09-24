@@ -230,6 +230,30 @@ int main(int argc, char** argv) {
             artifact::Reader reader(path);
             auto plan = qwen::plan_load(reader, options);
             check_selection(plan, options);
+            {
+                // The default pipeline split follows each device's free memory, and the first stage
+                // also holds the embedding and head.
+                const std::uint32_t layers = plan.config().text.num_hidden_layers;
+                const auto sum = [](const std::vector<std::uint32_t>& counts) {
+                    std::uint32_t total = 0;
+                    for (const std::uint32_t count : counts) { total += count; }
+                    return total;
+                };
+                const std::array<std::uint64_t, 2> equal{40ULL << 30, 40ULL << 30};
+                const qwen::StageSizing sizing{.kv_storage = KvCacheStorage::BFloat16,
+                                               .state_slots = 2};
+                const auto even = qwen::default_stage_layers(reader, options, sizing, equal);
+                require(even.size() == 2 && sum(even) == layers && even[0] >= 1 && even[1] >= 1,
+                        "default split does not cover the model");
+                require(even[0] <= even[1], "the stage holding the head took more layers");
+                const std::array<std::uint64_t, 2> lopsided{40ULL << 30, 80ULL << 30};
+                const auto skewed =
+                    qwen::default_stage_layers(reader, options, sizing, lopsided);
+                require(sum(skewed) == layers && skewed[1] > skewed[0],
+                        "the device with twice the memory did not take more layers");
+                std::cout << "default stage layers: equal devices " << even[0] << '/' << even[1]
+                          << ", 40/80 GiB " << skewed[0] << '/' << skewed[1] << '\n';
+            }
             if (host_only) {
                 std::cout << path.filename().string() << ": Host binding passed, architecture="
                           << architecture_name(plan.config().text.architecture)

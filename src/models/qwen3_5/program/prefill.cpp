@@ -67,6 +67,7 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
                      state.text_kv, state.execution.linear_attention, state.execution.io,
                      state.execution.prefill_hidden, state.execution.prefill_chunk,
                      state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache);
+    card.set_stage_runtime(state.execution.stages);
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
@@ -90,6 +91,7 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
                      state.text_kv, state.execution.linear_attention, state.execution.io,
                      state.execution.prefill_hidden, state.execution.prefill_chunk,
                      state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache);
+    card.set_stage_runtime(state.execution.stages);
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
@@ -397,7 +399,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         }
         if (text_prefix_fork) {
             text_kv_addresses->commit_prefix_fork(std::move(*transaction.text_prefix_fork),
-                                                  device.stream);
+                                                  compute_streams);
             transaction.text_prefix_fork.reset();
             if (!preserving_source) {
                 const KVAddressSpaceHandle source_address = sequence.kv->text;
@@ -409,12 +411,12 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
             }
         } else {
             text_kv_addresses->commit_activation(std::move(*transaction.text_activation),
-                                                 device.stream);
+                                                 compute_streams);
             transaction.text_activation.reset();
         }
         if (backend_prefix_fork) {
             backend_kv_addresses->commit_prefix_fork(std::move(*transaction.backend_prefix_fork),
-                                                     device.stream);
+                                                     compute_streams);
             transaction.backend_prefix_fork.reset();
             if (!preserving_source) {
                 const KVAddressSpaceHandle source_address = *sequence.kv->backend;
@@ -426,7 +428,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
             }
         } else if (transaction.backend_activation) {
             backend_kv_addresses->commit_activation(std::move(*transaction.backend_activation),
-                                                    device.stream);
+                                                    compute_streams);
             transaction.backend_activation.reset();
         }
         transaction.prefix_forks_ready = false;
@@ -801,8 +803,17 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     const auto tail_started = Clock::now();
     try {
         timing.resume_submit();
-        replay_fold->execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
-                             device.stream);
+        const std::span<const ops::GdnReplayFoldRow> fold_span(fold_rows.data(), lanes.size());
+        {
+            // Each state shard folds its own layers on its own device's stream.
+            RankBinding bind(device, state_images->shard(0).rank);
+            replay_fold->execute(fold_span, compute_streams[state_images->shard(0).rank]);
+        }
+        for (std::size_t shard = 1; shard < state_images->shard_count(); ++shard) {
+            RankBinding bind(device, state_images->shard(shard).rank);
+            extra_replay_fold[shard - 1]->execute(
+                fold_span, compute_streams[state_images->shard(shard).rank]);
+        }
 
         // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
         if (speculative_backend == SpeculativeBackend::DFlash2) {
@@ -1002,9 +1013,9 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             rewrite_capture_hidden_ptr = &rewrite_capture_hidden;
         }
         execution::PrefillContext schedule_state{
-            {device, parameters, work, state_images->linear(),
+            {device, parameters, work, state_images->linear(0),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, stage_runtime.get()},
             text_kv_view(sequence),
             mtp_kv_view(sequence),
             decoder->text_kv,
