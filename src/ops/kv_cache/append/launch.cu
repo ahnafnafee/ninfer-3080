@@ -55,17 +55,16 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
     if (kv_cache_is_int8_family(cache.storage)) {
         Tensor& cache_k_scale = cache.k_scale_pages;
         Tensor& cache_v_scale = cache.v_scale_pages;
-        // A U8 value plane is the packed signed int4 coding (rk8v4, rk4v4); a U8 key plane is the
-        // rk4v4 Lloyd-Max coding. Otherwise the plane is plain INT8.
+        // A U8 value plane is the packed signed int4 coding (rk8v4, rk4v4, rk4v4-e8); a U8 key
+        // plane is a packed key coding, told apart by storage. Otherwise the plane is plain INT8.
         const bool packed_values = cache.v_pages.dtype == DType::U8;
-        const bool packed_keys   = cache.k_pages.dtype == DType::U8;
-        const auto issue         = [&]<bool PackedValues, bool PackedKeys>() {
+        const auto issue         = [&]<bool PackedValues, KvKeyCoding Keys>() {
             if (tokens >= 128 && Geometry::KVHeads == 2) {
                 constexpr int TokensPerTile = 8;
                 const int max_tiles         = div_up(tokens + TokensPerTile - 1, TokensPerTile);
                 const dim3 fill_grid(static_cast<unsigned>(max_tiles),
                                      static_cast<unsigned>(Geometry::KVHeads));
-                kv_cache_append_full_i8_page_kernel<Geometry, Metadata, PackedValues, PackedKeys>
+                kv_cache_append_full_i8_page_kernel<Geometry, Metadata, PackedValues, Keys>
                     <<<fill_grid, kBlock, 0, stream>>>(
                         static_cast<const __nv_bfloat16*>(k.data),
                         static_cast<const __nv_bfloat16*>(v.data),
@@ -80,7 +79,7 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
                     static_cast<std::int64_t>(tokens) * Geometry::KVHeads;
                 const int fill_grid =
                     static_cast<int>(div_up(fill_units, static_cast<std::int64_t>(FillWarps)));
-                kv_cache_append_full_i8_kernel<Geometry, Metadata, PackedValues, PackedKeys>
+                kv_cache_append_full_i8_kernel<Geometry, Metadata, PackedValues, Keys>
                     <<<fill_grid, kBlock, 0, stream>>>(
                         static_cast<const __nv_bfloat16*>(k.data),
                         static_cast<const __nv_bfloat16*>(v.data),
@@ -91,12 +90,14 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
                         static_cast<__half*>(cache_v_scale.data), tokens);
             }
         };
-        if (packed_keys) {
-            issue.template operator()<true, true>();
+        if (cache.storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
+            issue.template operator()<true, KvKeyCoding::Lloyd4>();
+        } else if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8) {
+            issue.template operator()<true, KvKeyCoding::Int4E8>();
         } else if (packed_values) {
-            issue.template operator()<true, false>();
+            issue.template operator()<true, KvKeyCoding::Int8>();
         } else {
-            issue.template operator()<false, false>();
+            issue.template operator()<false, KvKeyCoding::Int8>();
         }
         CUDA_CHECK(cudaGetLastError());
         return;

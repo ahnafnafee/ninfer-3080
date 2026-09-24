@@ -47,7 +47,8 @@ struct ContextAttentionExecutionEnvelope {
  * nibble - plus one stored FP16 scale per 32-value group, and each code c is decoded as
  * FP32(c) * FP32(scale_bits). An rk4v4 V row is the rk8v4 one; its K row stores 4-bit Lloyd-Max
  * indices (kv_cache_append.h) that each attention route expands to their fixed INT8 codes before
- * the INT8-G64 QK path. A causal FP8-E4M3FN V row has one stored FP16 scale for D256;
+ * the INT8-G64 QK path. rk4v4-e8 stores V exactly as rk8v4 and K as packed signed 4-bit codes in
+ * the same nibble order, one FP16 scale per 64-value group, expanded to INT8 codes the same way. A causal FP8-E4M3FN V row has one stored FP16 scale for D256;
  * each finite code e is decoded as FP32(e) * FP32(scale_bits). Quantized K uses the paired physical
  * representation written by kv_cache_append; its original-coordinate logical row is consumed
  * through the matching private Q/K profile. The fixed orthogonal preparation and transient Q

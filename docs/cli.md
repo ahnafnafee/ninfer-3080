@@ -235,7 +235,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--device N` | CUDA device index | `0` |
 | `--devices A,B,...` | one pipeline stage per listed CUDA device (2 to 8, Linux; see the [README](../README.md#several-gpus-pipeline-stages---devices-ab)); overrides `--device` | none |
 | `--stage-layers A,B,...` | layers per stage, in `--devices` order; omitted means a split chosen from each device's free memory | memory-balanced |
-| `--kv-dtype bf16\|int8\|fp8\|rk8v4\|rk4v4\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant and `rk4v4` opt-in Lloyd-Max 4-bit keys; all seven are accepted on this fork's sm_86/sm_89 targets | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|rk8v4\|rk4v4\|rk4v4-e8\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant, `rk4v4` opt-in Lloyd-Max 4-bit keys and `rk4v4-e8` opt-in E8-lattice INT4 keys; all eight are accepted on this fork's sm_86/sm_89 targets | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -286,8 +286,8 @@ The registered model IDs have a native context limit of 262,144 tokens. The prac
 on one RTX 3090 depends on the selected artifact, media workload, output budget, and KV-cache type.
 Use `--kv-dtype int8` for the recommended large-context quality profile; BF16 is also available.
 The artifact describes its model configuration and weight representations; `--kv-dtype`
-independently selects runtime KV storage. All seven
-formats — `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `k8v4`, `nvfp4` — are accepted on SM86; measured size,
+independently selects runtime KV storage. All eight
+formats — `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `rk4v4-e8`, `k8v4`, `nvfp4` — are accepted on SM86; measured size,
 decode speed and perplexity for each are in
 [`docs/config-calculator.html`](config-calculator.html). The Blackwell-only
 `mma.sync...kind::f8f6f4` restriction applies to FP8/NVFP4 *weights and activations*, not to KV
@@ -299,8 +299,10 @@ format measured. `nvfp4` buys the most context — 45% smaller than INT8 — at 
 speed at a 32K cache depth. `rk4v4` keeps `rk8v4`'s values and stores keys as 4-bit Lloyd-Max
 indices: 31% smaller than `rk8v4`, within 3% of `nvfp4`'s size, better perplexity than `nvfp4`
 (+0.21% against INT8) and `rk8v4`'s decode speed, so it is the choice when context is the limit.
-`fp8` and `k8v4` are each beaten by `rk8v4` on size, speed and quality together, so neither has a
-niche. The prepared prompt must fit
+`rk4v4-e8` has `rk4v4`'s size but snaps each octet of a scaled G64 key group to the nearest E8
+lattice point before the codes are clamped to [-8, 7]; the coset bit is not stored, so per-value
+error is no better than plain INT4. `fp8` and `k8v4` are each beaten by `rk8v4` on size, speed and
+quality together, so neither has a niche. The prepared prompt must fit
 `--max-context`; generation stops at the remaining context capacity when necessary.
 `--kv-capacity N` controls the shared physical Main Text KV pool independently and is rounded up to
 the 64-token page size. `--kv-capacity auto` loads the selected weights, measures the remaining GPU

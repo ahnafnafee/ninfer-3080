@@ -65,12 +65,14 @@ inline constexpr D256KVCacheProfile d256_kv_cache_profile(DType dtype, DType val
 }
 
 // The storages the INT8-family kernels serve: keys reach QK as rotated INT8 codes with a G64 FP16
-// scale (stored directly, or as rk4v4 Lloyd-Max indices expanded on load), and values are INT8 or
-// packed int4. Their plane dtypes select the coding inside each kernel.
+// scale (stored directly, or as rk4v4 Lloyd-Max indices or rk4v4-e8 int4 codes expanded on load),
+// and values are INT8 or packed int4. The value plane's dtype and, for packed keys, the storage
+// select the coding inside each kernel.
 inline constexpr bool kv_cache_is_int8_family(ninfer::KvCacheStorage storage) {
     return storage == ninfer::KvCacheStorage::Int8Group64 ||
            storage == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
-           storage == ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value;
+           storage == ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value ||
+           storage == ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueE8;
 }
 
 // Overload for call sites that describe a cache whose two planes share one coding.
@@ -91,8 +93,9 @@ inline constexpr D256KVCacheProfile d256_kv_cache_profile(ninfer::KvCacheStorage
     case ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
         return d256_kv_cache_profile(DType::I8, DType::U8);
     case ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value:
-        // Both planes pack two 4-bit codes per byte (Lloyd-Max key indices, signed int4 values),
-        // with rk8v4's scale planes: G64 FP16 for keys, G32 FP16 for values.
+    case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueE8:
+        // Both planes pack two 4-bit codes per byte (Lloyd-Max indices or E8 int4 key codes, signed
+        // int4 values), with rk8v4's scale planes: G64 FP16 for keys, G32 FP16 for values.
         return {DType::U8, DType::U8,   kD256KVCacheHeadDim / 2, kD256KVCacheHeadDim / 2,
                 64,        DType::FP16, 4,                       DType::FP16,
                 8};

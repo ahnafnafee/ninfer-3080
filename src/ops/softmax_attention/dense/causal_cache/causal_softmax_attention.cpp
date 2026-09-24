@@ -345,8 +345,9 @@ CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::i
             case KvCacheStorage::Int8Group64:
             case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
             case KvCacheStorage::RotatedLloyd4KeyInt4Value:
-                // The INT8 family shares one prompt and one small-T kernel, so the three codings
-                // share INT8's cutoff; rk8v4 and rk4v4 used to fall through to small-T. On the 27B
+            case KvCacheStorage::RotatedInt4KeyInt4ValueE8:
+                // The INT8 family shares one prompt and one small-T kernel, so its codings share
+                // INT8's cutoff; rk8v4 and rk4v4 used to fall through to small-T. On the 27B
                 // (2026-09-24) that made 9-16 columns over 64-224 keys 1.1-1.9x faster, except
                 // rk8v4 at 9 columns over 224 keys (12% slower), the same trade INT8 makes there.
                 prompt_limit = width <= 8 ? 0 : 256;

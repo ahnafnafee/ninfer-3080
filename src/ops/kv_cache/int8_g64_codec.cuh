@@ -154,6 +154,93 @@ __device__ __forceinline__ int4 kv_cache_int4_dequant_i4x8_from(const std::uint8
 // to its code therefore reproduces an ordinary rotated-INT8 key, and every INT8-family attention
 // kernel consumes it through its unchanged m16n8k32.s8 QK path. The encoder picks each index
 // against the group's RMS and then takes the least-squares scale for the chosen codes.
+// --- packed signed int4 E8 key codec (rk4v4-e8) ------------------------------------------------
+// The rk4v4-e8 key plane stores the rotated key as two signed 4-bit codes per byte under the INT8
+// family's G64 FP16 scale, FP16-RNE(absmax/7). Before rounding, each block of eight consecutive
+// scaled dimensions is snapped to the nearest point of the E8 lattice (D8 or its half-integer
+// coset D8+1/2); the stored code is then that point rounded to an integer and clamped to
+// [-8, 7]. No coset bit is kept, so a coset point loses its half on the way into the code. The
+// read side is therefore exactly the plain packed int4 decode.
+//
+// Every helper below takes one coordinate per lane with the block held by an aligned lane octet
+// (lanes 8j..8j+7), and must be called by the whole warp.
+inline constexpr int kKVCacheInt4KeyMin = -8;
+
+// Nearest D8 point to the octet's vector y: round every coordinate, and when the rounded sum is
+// odd move the coordinate with the largest rounding error (lowest lane on a tie) to its other
+// neighbour, upwards when it rounded exactly.
+__device__ __forceinline__ float kv_cache_e8_nearest_d8(float y, int lane) {
+    constexpr unsigned FullMask = 0xffffffffu;
+    float r = rintf(y);
+    int odd = static_cast<int>(r) & 1;
+#pragma unroll
+    for (int step = 1; step < 8; step <<= 1) { odd ^= __shfl_xor_sync(FullMask, odd, step); }
+    // The parity differs between octets, so the reduction runs unconditionally: a full-mask
+    // shuffle under a branch only some octets take would be undefined.
+    float worst    = fabsf(y - r);
+    int worst_lane = lane;
+#pragma unroll
+    for (int step = 1; step < 8; step <<= 1) {
+        const float other    = __shfl_xor_sync(FullMask, worst, step);
+        const int other_lane = __shfl_xor_sync(FullMask, worst_lane, step);
+        if (other > worst || (other == worst && other_lane < worst_lane)) {
+            worst      = other;
+            worst_lane = other_lane;
+        }
+    }
+    if (odd != 0 && worst_lane == lane) { r += y >= r ? 1.0f : -1.0f; }
+    return r;
+}
+
+// Octet sum in butterfly order. Every lane ends with the same bits because each step adds the
+// same two operands, only commuted; the product is rounded explicitly so the compiler cannot
+// contract it into a lane-asymmetric FMA.
+__device__ __forceinline__ float kv_cache_e8_octet_sq_distance(float x, float p) {
+    constexpr unsigned FullMask = 0xffffffffu;
+    const float d = x - p;
+    float sum     = __fmul_rn(d, d);
+#pragma unroll
+    for (int step = 1; step < 8; step <<= 1) {
+        sum = __fadd_rn(sum, __shfl_xor_sync(FullMask, sum, step));
+    }
+    return sum;
+}
+
+// Nearest E8 point: the closer of the D8 and D8+1/2 candidates, D8 on a tie.
+__device__ __forceinline__ float kv_cache_e8_nearest(float x, int lane) {
+    const float integer_point = kv_cache_e8_nearest_d8(x, lane);
+    const float coset_point   = kv_cache_e8_nearest_d8(x - 0.5f, lane) + 0.5f;
+    const float integer_dist  = kv_cache_e8_octet_sq_distance(x, integer_point);
+    const float coset_dist    = kv_cache_e8_octet_sq_distance(x, coset_point);
+    return coset_dist < integer_dist ? coset_point : integer_point;
+}
+
+__device__ __forceinline__ std::int8_t kv_cache_int4_e8_key_code(float x, float inv_scale,
+                                                                 int lane) {
+    const float scaled = inv_scale == 0.0f ? 0.0f : __fmul_rn(x, inv_scale);
+    const float point  = kv_cache_e8_nearest(scaled, lane);
+    int q              = __float2int_rn(point);
+    q                  = max(kKVCacheInt4KeyMin, min(kKVCacheInt4Max, q));
+    return static_cast<std::int8_t>(q);
+}
+
+// Expand the eight packed bytes holding dimensions [d, d+16) into sixteen signed int8 codes in
+// dimension order, so an int4 key row can be staged into the same shared layout, and consumed by
+// the same s8 MMA, as an INT8 key row.
+__device__ __forceinline__ int4 kv_cache_int4_unpack_i8x16(uint2 packed) {
+    const auto expand = [](unsigned word, unsigned& first, unsigned& second) {
+        const unsigned low  = __vsub4((word & 0x0f0f0f0fu) ^ 0x08080808u, 0x08080808u);
+        const unsigned high = __vsub4(((word >> 4) & 0x0f0f0f0fu) ^ 0x08080808u, 0x08080808u);
+        first               = __byte_perm(low, high, 0x5140);
+        second              = __byte_perm(low, high, 0x7362);
+    };
+    unsigned out[4];
+    expand(packed.x, out[0], out[1]);
+    expand(packed.y, out[2], out[3]);
+    return make_int4(static_cast<int>(out[0]), static_cast<int>(out[1]), static_cast<int>(out[2]),
+                     static_cast<int>(out[3]));
+}
+
 inline constexpr int kKVCacheLloyd4Levels = 8;
 
 // Level boundaries in units of the group RMS: midpoints of the Lloyd-Max reconstruction points
@@ -293,18 +380,52 @@ __device__ __forceinline__ int4 kv_cache_int8_dequant_f16x8_from(const std::int8
                      static_cast<int>(packed[2]), static_cast<int>(packed[3]));
 }
 
+// The key coding of an INT8-family cache: INT8 G64 codes (int8, rk8v4), 4-bit Lloyd-Max indices
+// (rk4v4) or E8-snapped signed int4 codes (rk4v4-e8). The packed codings share a U8 key plane of
+// the same shape, so kernels are told which one they read by this and not by the plane's dtype.
+enum class KvKeyCoding : int { Int8, Lloyd4, Int4E8 };
+
+// Sixteen consecutive dimensions of a packed key row (eight bytes) as INT8 codes.
+template <KvKeyCoding Keys>
+__device__ __forceinline__ int4 kv_cache_packed_key_expand16(uint2 packed) {
+    static_assert(Keys != KvKeyCoding::Int8, "INT8 keys are stored expanded");
+    if constexpr (Keys == KvKeyCoding::Lloyd4) {
+        return kv_cache_lloyd4_expand16(packed);
+    } else {
+        return kv_cache_int4_unpack_i8x16(packed);
+    }
+}
+
 // Write one rotated G64 key group held by a full warp (lane owns d0 = 64g+lane and d1 = d0+32),
-// shared by the standalone append kernels and the small-T kernel's fused append. PackedKeys
-// selects the rk4v4 Lloyd-Max coding: two 4-bit indices per byte, low nibble = even dimension, so
-// a byte spans lanes l and l^1 exactly as the packed value plane does. Otherwise the key is INT8
-// G64. Both keep one FP16 scale per group in the same scale plane.
-template <typename Geometry, bool PackedKeys>
+// shared by the standalone append kernels and the small-T kernel's fused append. The packed
+// codings store two 4-bit codes per byte, low nibble = even dimension, so a byte spans lanes l and
+// l^1 exactly as the packed value plane does: rk4v4 its Lloyd-Max indices, rk4v4-e8 its E8-snapped
+// int4 codes over the absmax/7 scale. Otherwise the key is INT8 G64. All keep one FP16 scale per
+// group in the same scale plane.
+template <typename Geometry, KvKeyCoding Keys>
 __device__ __forceinline__ void
 kv_cache_i8_family_store_key_group(std::int8_t* cache_k, __half* scale_k, int page, int kv_head,
                                    int group, int page_off, int lane, float k0, float k1) {
     constexpr unsigned FullMask = 0xffffffffu;
     __half scale;
-    if constexpr (PackedKeys) {
+    if constexpr (Keys == KvKeyCoding::Int4E8) {
+        const float k_abs  = warp_max(fmaxf(fabsf(k0), fabsf(k1)), FullMask);
+        const auto k_quant = kv_cache_int4_quant_params(k_abs);
+        const std::int8_t c0 = kv_cache_int4_e8_key_code(k0, k_quant.inverse_scale, lane);
+        const std::int8_t c1 = kv_cache_int4_e8_key_code(k1, k_quant.inverse_scale, lane);
+        const int partner0   = __shfl_xor_sync(FullMask, static_cast<int>(c0), 1);
+        const int partner1   = __shfl_xor_sync(FullMask, static_cast<int>(c1), 1);
+        if ((lane & 1) == 0) {
+            auto* packed_k                 = reinterpret_cast<std::uint8_t*>(cache_k);
+            const std::int64_t packed_base = kv_cache_int4_value_code_index<Geometry>(
+                page, kv_head, group * (kKVCacheInt8Group / 2), page_off);
+            packed_k[packed_base + (lane >> 1)] =
+                kv_cache_int4_pack(c0, static_cast<std::int8_t>(partner0));
+            packed_k[packed_base + (lane >> 1) + 16] =
+                kv_cache_int4_pack(c1, static_cast<std::int8_t>(partner1));
+        }
+        scale = k_quant.scale;
+    } else if constexpr (Keys == KvKeyCoding::Lloyd4) {
         const auto encoded = kv_cache_lloyd4_encode_group(k0, k1);
         const int partner0 = __shfl_xor_sync(FullMask, encoded.index0, 1);
         const int partner1 = __shfl_xor_sync(FullMask, encoded.index1, 1);

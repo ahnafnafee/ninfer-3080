@@ -42,15 +42,16 @@ namespace ninfer::ops {
 // PackedValues selects the rk8v4 half-width value plane, for both the fused append this kernel
 // performs and the value staging it consumes.
 //
-// PackedKeys selects the rk4v4 key plane: 4-bit Lloyd-Max indices, half the INT8 key bytes. The
-// shared K tile and the whole QK path are unchanged. Packed keys for the next tile are loaded into
-// registers at the top of each key-loop iteration (load_k_tile), stay in flight across QK, the V
-// dequant and PV, are expanded to their INT8 codes (kv_cache_lloyd4_expand16), and are stored into
-// the tile just before the tile barrier; which warps expand them, and when, depends on the row-tile
-// count (see LoaderKeys). The K tile is idle during PV, so this adds no shared memory and no barrier.
+// Keys selects a packed key plane, half the INT8 key bytes: rk4v4's 4-bit Lloyd-Max indices or
+// rk4v4-e8's E8-snapped int4 codes. The shared K tile and the whole QK path are unchanged. Packed
+// keys for the next tile are loaded into registers at the top of each key-loop iteration
+// (load_k_tile), stay in flight across QK, the V dequant and PV, are expanded to their INT8 codes
+// (kv_cache_packed_key_expand16), and are stored into the tile just before the tile barrier; which
+// warps expand them, and when, depends on the row-tile count (see LoaderKeys). The K tile is idle
+// during PV, so this adds no shared memory and no barrier.
 template <typename Geometry, int TokenTile, int WarpsPerCta, int MinBlocksPerSm, int KeyBlock,
           bool DynamicArena, bool MultiBatch, bool Masked, typename CacheInput,
-          bool PackedValues = false, bool PackedKeys = false>
+          bool PackedValues = false, KvKeyCoding Keys = KvKeyCoding::Int8>
 __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     void causal_attention_small_t_i8_tiled_kernel(
         const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, std::int8_t* cache_k_i8,
@@ -59,6 +60,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t full_width,
         std::int32_t column_begin, std::int32_t logical_capacity, std::int32_t wave_splits,
         float scale, float* partial_acc, float* partial_m, float* partial_l) {
+    constexpr bool PackedKeys          = Keys != KvKeyCoding::Int8;
     constexpr int Wc                   = WarpsPerCta;
     constexpr int RowCount             = TokenTile * Geometry::GroupSize;
     constexpr int RowTiles             = (RowCount + 15) / 16;
@@ -267,7 +269,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             const float kv1    = k_out[1];
             const float vv0    = __bfloat162float(input.v[src0]);
             const float vv1    = __bfloat162float(input.v[src1]);
-            kv_cache_i8_family_store_key_group<Geometry, PackedKeys>(
+            kv_cache_i8_family_store_key_group<Geometry, Keys>(
                 cache_k_i8, cache_k_scale, physical_page, kv_head, grp, page_offset, lane, kv0,
                 kv1);
             // The vv0 lanes span dimensions [64g, 64g+32) and the vv1 lanes the next 32, so the
@@ -437,7 +439,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         if constexpr (LoaderKeys) {
 #pragma unroll
             for (int i = 0; i < KChunksPerKeyThread; ++i) {
-                k_codes[i] = kv_cache_lloyd4_expand16(k_packed[i]);
+                k_codes[i] = kv_cache_packed_key_expand16<Keys>(k_packed[i]);
             }
         }
     };
@@ -456,7 +458,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     if constexpr (LoaderKeys) {
                         codes = k_codes[i];
                     } else {
-                        codes = kv_cache_lloyd4_expand16(k_packed[i]);
+                        codes = kv_cache_packed_key_expand16<Keys>(k_packed[i]);
                     }
                     store_vec(&k_i8[key_l * D + causal_small_t_tc_swz(key_l, dc * 8) * 2], codes);
                 }
@@ -489,7 +491,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         }
         if constexpr (PackedKeys) {
             // Keys arrive through load_k_tile; this stages only the packed value plane.
-            static_assert(PackedValues, "rk4v4 pairs packed keys with packed values");
+            static_assert(PackedValues, "packed keys pair with packed values");
 #pragma unroll 1
             for (int chunk = tid; chunk < KChunks; chunk += Threads) {
                 const int key_l = chunk / (D / 16);

@@ -79,6 +79,15 @@ struct KVCacheAppendPrefixExecutionEnvelope {
  * The indices are chosen against the group RMS and the scale is the least-squares fit of the
  * chosen codes, so the decoded key is an ordinary INT8-G64 key and the INT8 QK path consumes it.
  *
+ * KvCacheStorage::RotatedInt4KeyInt4ValueE8 (rk4v4-e8) has the same U8 plane shapes as rk4v4 and
+ * is told apart by storage. Values are the rk8v4 packed coding above. Keys take the same rotation
+ * and G64 group as INT8-G64, with scale_bits = FP16_RNE(a / 7), and each block of eight
+ * consecutive dimensions y = FP32(x) * inv is snapped to the nearest E8 lattice point: the nearer,
+ * by squared distance summed in FP32, of D8(y) and D8(y - 1/2) + 1/2, D8 on ties. D8 rounds each
+ * coordinate to nearest-even and, when the rounded sum is odd, moves the coordinate with the
+ * largest rounding error (lowest index on ties) one step towards y. The stored key code is
+ * I4(clamp(RNE_even(point), -8, 7)), packed like values; the coset bit is not stored.
+ *
  * V uses represented BF16 source values directly as x under every profile, including rk8v4: values
  * are never rotated, so no inverse preparation is applied to the attention output. For every
  * quantized profile, K is a paired physical representation for causal Attention: its

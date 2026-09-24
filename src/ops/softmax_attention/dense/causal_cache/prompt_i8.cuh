@@ -139,17 +139,19 @@ static_assert(kCausalPromptI8SmemBytes == 93184);
 // half of the same V slot the INT8 coding uses, so the shared-memory footprint and therefore the
 // occupancy of both instantiations are identical; only the global traffic halves.
 //
-// PackedKeys selects the rk4v4 key plane (4-bit Lloyd-Max indices). As in the small-T kernel, the
-// next tile's packed keys are loaded into registers where the INT8 path issues its cp.async, stay
-// in flight across the PV MMAs, and are expanded into the unchanged INT8 K tile before the tile
-// barrier.
-template <typename Geometry, typename Metadata, bool PackedValues = false, bool PackedKeys = false>
+// Keys selects a packed key plane (rk4v4 Lloyd-Max indices or rk4v4-e8 int4 codes). As in the
+// small-T kernel, the next tile's packed keys are loaded into registers where the INT8 path issues
+// its cp.async, stay in flight across the PV MMAs, and are expanded into the unchanged INT8 K tile
+// before the tile barrier.
+template <typename Geometry, typename Metadata, bool PackedValues = false,
+          KvKeyCoding Keys = KvKeyCoding::Int8>
 __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8_kernel(
     const __nv_bfloat16* __restrict__ q, const std::int8_t* __restrict__ cache_k,
     const std::int8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
     const __half* __restrict__ cache_v_scale, Metadata metadata,
     const std::int32_t* __restrict__ positions, float scale, __nv_bfloat16* __restrict__ out,
     std::int32_t width) {
+    constexpr bool PackedKeys   = Keys != KvKeyCoding::Int8;
     constexpr int D             = kCausalPromptHeadDim;
     constexpr int Br            = kCausalPromptI8Br;
     constexpr int Bc            = kCausalPromptI8Bc;
@@ -252,7 +254,7 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
                     const int key_l = chunk / (D / 16);
                     const int dc    = chunk - key_l * (D / 16);
                     store_vec(&k_i8[(key_l * DB16 + causal_prompt_swz(key_l, dc * 8)) * 2],
-                              kv_cache_lloyd4_expand16(k_packed[i]));
+                              kv_cache_packed_key_expand16<Keys>(k_packed[i]));
                 }
             }
         }
@@ -285,7 +287,7 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
             }
         }
         if constexpr (PackedKeys) {
-            static_assert(PackedValues, "rk4v4 pairs packed keys with packed values");
+            static_assert(PackedValues, "packed keys pair with packed values");
 #pragma unroll
             for (int i = 0; i < KChunksPerThread; ++i) {
                 const int chunk = tid + i * kCausalPromptI8Threads;

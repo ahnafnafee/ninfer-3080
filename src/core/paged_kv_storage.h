@@ -80,8 +80,9 @@ struct PagedKVStorageLayout {
         }
         break;
     case KvCacheStorage::RotatedLloyd4KeyInt4Value:
-        // rk4v4: both code planes pack two 4-bit codes per byte. Keys keep the INT8 coding's G64
-        // scale plane; values are rk8v4's G32 plane.
+    case KvCacheStorage::RotatedInt4KeyInt4ValueE8:
+        // rk4v4 and rk4v4-e8: both code planes pack two 4-bit codes per byte. Keys keep the INT8
+        // coding's G64 scale plane; values are rk8v4's G32 plane.
         if (head_dim == kD256KVCacheHeadDim) {
             return {storage,
                     head_dim,

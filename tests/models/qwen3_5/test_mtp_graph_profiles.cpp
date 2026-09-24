@@ -31,6 +31,7 @@ constexpr KvCacheStorage kStorages[] = {
     KvCacheStorage::BFloat16,     KvCacheStorage::Int8Group64,      KvCacheStorage::Fp8E4M3Row256,
     KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value,
     KvCacheStorage::RotatedInt8KeyInt4ValueGroup64, KvCacheStorage::RotatedLloyd4KeyInt4Value,
+    KvCacheStorage::RotatedInt4KeyInt4ValueE8,
 };
 
 CausalAttentionRoute route_at(std::uint32_t capacity, std::uint32_t draft_window,

@@ -164,7 +164,8 @@ __launch_bounds__(256) __global__
                                            physical_page, position & kPagedKVPageMask, lane);
 }
 
-template <typename Geometry, typename Metadata, bool PackedValues = false, bool PackedKeys = false>
+template <typename Geometry, typename Metadata, bool PackedValues = false,
+          KvKeyCoding Keys = KvKeyCoding::Int8>
 __launch_bounds__(256) __global__
     void kv_cache_append_full_i8_kernel(const __nv_bfloat16* __restrict__ k,
                                         const __nv_bfloat16* __restrict__ v,
@@ -209,7 +210,7 @@ __launch_bounds__(256) __global__
         const std::int64_t src1      = kv_cache_int8_quant_src_index<Geometry>(kv_head, d1, token);
         const float v0               = __bfloat162float(v[src0]);
         const float v1               = __bfloat162float(v[src1]);
-        kv_cache_i8_family_store_key_group<Geometry, PackedKeys>(cache_k, scale_k, page, kv_head,
+        kv_cache_i8_family_store_key_group<Geometry, Keys>(cache_k, scale_k, page, kv_head,
                                                                   group, page_off, lane, k0, k1);
         // See the tiled page kernel: v0 and v1 lanes are the packed coding's two 32-value groups.
         const float v_abs_lo = warp_max(fabsf(v0), FullMask);
@@ -255,9 +256,10 @@ __launch_bounds__(256) __global__
 
 // PackedValues selects the rk8v4 value coding: two signed 4-bit codes per byte in a half-width V
 // plane. The key path is identical in both instantiations, so a cache written by either is
-// consumable by the same rotated-INT8 key reader. PackedKeys selects the rk4v4 Lloyd-Max key
-// coding instead (see kv_cache_i8_family_store_key_group).
-template <typename Geometry, typename Metadata, bool PackedValues = false, bool PackedKeys = false>
+// consumable by the same rotated-INT8 key reader. Keys selects a packed key coding instead, the
+// rk4v4 Lloyd-Max or the rk4v4-e8 one (see kv_cache_i8_family_store_key_group).
+template <typename Geometry, typename Metadata, bool PackedValues = false,
+          KvKeyCoding Keys = KvKeyCoding::Int8>
 __launch_bounds__(256) __global__
     void kv_cache_append_full_i8_page_kernel(const __nv_bfloat16* __restrict__ k,
                                              const __nv_bfloat16* __restrict__ v,
@@ -309,7 +311,7 @@ __launch_bounds__(256) __global__
         const std::int64_t src1      = kv_cache_int8_quant_src_index<Geometry>(kv_head, d1, token);
         const float v0               = __bfloat162float(v[src0]);
         const float v1               = __bfloat162float(v[src1]);
-        kv_cache_i8_family_store_key_group<Geometry, PackedKeys>(
+        kv_cache_i8_family_store_key_group<Geometry, Keys>(
             cache_k, scale_k, physical_page, kv_head, group, page_off, lane, k0, k1);
         // The v0 lanes span dimensions [64g, 64g+32) and the v1 lanes [64g+32, 64g+64), so the
         // packed coding's two 32-value groups fall out of the existing lane assignment with one

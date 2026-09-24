@@ -114,6 +114,11 @@ int main() {
     const ServeOptions lloyd = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4"});
     failures += check(lloyd.kv_cache == ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value,
                       "--kv-dtype rk4v4 did not select rotated Lloyd-Max K4/V4 storage");
+    const ServeOptions e8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4-e8"});
+    failures += check(e8.kv_cache == ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueE8,
+                      "--kv-dtype rk4v4-e8 did not select rotated K4/V4 E8 storage");
+    failures += check(kv_help.find("rk4v4-e8") != std::string::npos,
+                      "serve help omits --kv-dtype rk4v4-e8");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});

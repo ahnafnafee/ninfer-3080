@@ -55,6 +55,10 @@ enum class KvCacheStorage : std::uint8_t {
     // group-64 FP16 scale, paired with rk8v4's packed signed int4 group-32 value plane. Opt-in
     // through --kv-dtype rk4v4.
     RotatedLloyd4KeyInt4Value,
+    // rk4v4-e8: rotated keys snapped per 8-dimension block to the E8 lattice and stored as packed
+    // signed int4 over a group-64 scale, paired with the rk8v4 packed int4 value plane. Opt-in
+    // through --kv-dtype rk4v4-e8. Appended last so the existing values keep their numbering.
+    RotatedInt4KeyInt4ValueE8,
 };
 
 enum class EnginePurpose : std::uint8_t {
