@@ -454,10 +454,18 @@ type controls conversion of Qwen's untyped parameter text. String-admitting valu
 other explicitly typed values are decoded as JSON without coercion. NInfer does not validate
 generated arguments against the full JSON Schema.
 
-Generated prose can quote `<tool_call>` markup before the real call. Unless the first marker's region
+Tool calls are read in the Qwen form (`<tool_call>` around `<function=NAME>` with
+`<parameter=NAME>` values) and in the forms agent harnesses write: `<function name="NAME">`,
+`<invoke name="NAME">` and `<param name="NAME">`, bare or inside a `<function_calls>` container.
+Every opening tag must be closed by its own kind.
+
+Generated prose can quote tool-call markup before the real call. Unless the first marker's region
 opens with a complete call, each marker is tried in order, and the first complete region that
 consumes the rest of the response becomes the structured turn; quoted markup before it stays
-ordinary content.
+ordinary content. A region that opens a function but does not parse is recovered: complete calls
+before the failure are kept, a call that cannot be read is returned as a call to the reserved
+`malformed_tool_call` tool, whose arguments tell the model what went wrong so that it retries, and
+text after it is dropped.
 
 Messages enter the selected template in their input order. The maintained Qwen templates keep
 system/developer messages at their original positions.
@@ -899,8 +907,8 @@ complete raw mirror. A response with no reasoning Item emits no encrypted placeh
 Function arguments use `response.function_call_arguments.delta` and `.done`. IDs, output indices,
 and content indices remain stable, and concatenated deltas equal the terminal Item. Responses SSE
 does not emit the Chat Completions `[DONE]` sentinel. With tools enabled, ordinary answer text still
-streams immediately; only an ambiguous `<tool_call>` suffix or the structured tool region is held.
-Malformed tool markup is flushed back as ordinary text without losing bytes.
+streams immediately; only an ambiguous tool-call marker prefix or the structured tool region is
+held. Tool markup that never opens a function is flushed back as ordinary text without losing bytes.
 
 ### Local response state and resources
 

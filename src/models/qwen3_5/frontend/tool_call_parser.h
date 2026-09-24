@@ -100,7 +100,8 @@ private:
     std::shared_ptr<const ToolCallOutputContract> contract_;
     std::string trailing_whitespace_;
     std::string tool_region_;
-    std::size_t marker_prefix_bytes_ = 0;
+    // A '<' and what follows while it can still grow into a tool-call region opener.
+    std::string pending_marker_;
     // Bytes of tool_region_ that came from the prompt's opener rather than from the model. The
     // fallback path returns the region as ordinary content, and these must not appear there.
     std::size_t seeded_prefix_bytes_  = 0;
