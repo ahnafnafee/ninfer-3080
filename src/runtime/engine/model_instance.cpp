@@ -160,7 +160,8 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         cache.max_cache_markers_per_request     = cache.max_cache_markers_per_request.value_or(4U);
         // Without a catalog no continuation is ever evicted or restored.
         cache.disk_kv_path.clear();
-        cache.disk_kv_restore = false;
+        cache.disk_kv_restore   = false;
+        cache.rolling_retention = false;
         return options;
     }
 

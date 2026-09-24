@@ -1134,6 +1134,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--disk-kv-path DIR` | disk tier under the Host tier; see [Disk tier](#disk-tier) | off |
 | `--disk-kv-gib N` | disk tier budget in GiB | `64` |
 | `--disk-kv-restore` | seed a new request's matching prefix from the disk tier | write-only |
+| `--context-cache-policy default\|rolling` | `rolling`: within one cache session (a Responses `prompt_cache_key`), a capture that extends a resident checkpoint the request matched exactly inherits that resident's demand, so a conversation whose prompt only grows keeps rolling its frontier forward; with conversations sharing a prefix, one conversation's extension can evict the prefix the others use | `default` |
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
 | `--cors` | permissive browser CORS headers | off |

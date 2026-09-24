@@ -85,6 +85,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-private-continuations N] [--max-shared-prefixes N] "
            "[--max-long-anchors-per-continuation N] [--max-cache-markers-per-request N] "
            "[--disk-kv-path DIR] [--disk-kv-gib N] [--disk-kv-restore] "
+           "[--context-cache-policy default|rolling] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] "
@@ -149,6 +150,8 @@ std::string serve_usage_text(const char* argv0) {
            "       --disk-kv-path DIR adds a disk tier: evicted continuations write their KV and "
            "StateImages there (per artifact and profile, --disk-kv-gib total, default 64) and "
            "survive restarts; --disk-kv-restore seeds a new request's matching prefix from it\n"
+           "       --context-cache-policy rolling lets a capture that extends a resident "
+           "checkpoint inherit its demand, for one conversation whose prompt only grows\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
            "control tokens count toward the request output limit\n"
            "       --thinking-budget-message replaces the end-of-thinking notice a request gets "
@@ -350,6 +353,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.context_cache.disk_kv_capacity_bytes = gib << 30U;
         } else if (arg == "--disk-kv-restore") {
             options.context_cache.disk_kv_restore = true;
+        } else if (arg == "--context-cache-policy") {
+            const std::string policy = require_value("--context-cache-policy");
+            if (policy != "default" && policy != "rolling") {
+                throw std::invalid_argument("--context-cache-policy must be default or rolling");
+            }
+            options.context_cache.rolling_retention = policy == "rolling";
+            context_capacity_explicit               = true;
         } else if (arg == "--max-private-continuations") {
             options.context_cache.max_private_continuations =
                 static_cast<std::uint32_t>(parse_nonnegative_int(

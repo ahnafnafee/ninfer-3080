@@ -187,6 +187,12 @@ struct ContextCacheOptions {
     // those KV pages and the StateImage at E and prefills only [E, prompt). Off leaves the tier
     // write-only.
     bool disk_kv_restore = false;
+    // Retention for one long-lived conversation whose prompt only grows: a capture that extends a
+    // resident the request matched exactly at that resident's frontier inherits the resident's
+    // demand, so rolling the frontier forward is not valued against its own history. Off by
+    // default: when conversations share a prefix, one conversation's extension can evict the
+    // prefix the others depend on.
+    bool rolling_retention = false;
 };
 
 struct ContextCostOptions {

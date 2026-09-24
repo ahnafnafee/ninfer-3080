@@ -331,7 +331,17 @@ int main() {
     failures += check(defaults.context_cache.disk_kv_path.empty() &&
                           !defaults.context_cache.disk_kv_restore,
                       "the disk tier must be off by default");
+    failures += check(!defaults.context_cache.rolling_retention &&
+                          parse({"ninfer-serve", "model.ninfer", "--context-cache-policy",
+                                 "rolling"})
+                              .context_cache.rolling_retention &&
+                          !parse({"ninfer-serve", "model.ninfer", "--context-cache-policy",
+                                  "default"})
+                               .context_cache.rolling_retention,
+                      "the rolling retention policy did not reach serving options");
     for (const auto& invalid : std::vector<std::vector<std::string>>{
+             {"--context-cache-policy", "lru"},
+             {"--context-cache-policy", "rolling", "--no-prefix-reuse"},
              {"--disk-kv-restore"},
              {"--disk-kv-gib", "8"},
              {"--disk-kv-path", "/tmp/l3", "--disk-kv-gib", "0"},
