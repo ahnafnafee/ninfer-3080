@@ -584,9 +584,11 @@ public:
         // pressure planner and was skipped outright once the physical State pools filled.  The
         // catalogs are deliberately oversubscribed against those pools, so every publication
         // route needs a reclamation option or the first conversation owns the cache forever.
-        const bool private_only_pressure = !candidate.publishes_shared &&
-                                           private_baseline.publishes_private &&
-                                           !private_baseline.physically_feasible;
+        // A lane whose own admission had to degrade or evict owners is the exception: pressure
+        // has just decided which residents to keep, and an optional capture does not overturn it.
+        const bool private_only_pressure =
+            !candidate.publishes_shared && private_baseline.publishes_private &&
+            !private_baseline.physically_feasible && !active_[lane.value].admitted_under_pressure;
         if (candidate.publishes_shared || private_only_pressure) {
             const bool pressure_evidence =
                 private_only_pressure ||
@@ -1283,6 +1285,8 @@ private:
         RetentionClass retention        = RetentionClass::RecentPrivate;
         bool update_session_index       = true;
         std::uint64_t publication_order = 0;
+        // Admission degraded or evicted another owner to place this lane.
+        bool admitted_under_pressure = false;
         std::optional<ActiveOwnerEdge> retained_private_source;
         std::vector<ActiveOwnerEdge> shared_sources;
     };
@@ -1377,6 +1381,7 @@ private:
         active.publication_order    = 0;
         active.retained_private_source.reset();
         active.shared_sources.clear();
+        active.admitted_under_pressure = false;
     }
 
     [[nodiscard]] static std::size_t checked_prefix_index_capacity(std::uint32_t private_capacity,
@@ -2970,11 +2975,20 @@ private:
         }
 
         if (published) { observe_selected_hit(*record); }
+        bool admitted_under_pressure = false;
         for (const OwnerClaim& claim : record->private_claims) {
-            apply_private_action(claim, published, private_result_for(claim));
+            const auto& victim = private_result_for(claim);
+            admitted_under_pressure =
+                admitted_under_pressure ||
+                (claim.capability.slot != record->publication_slot &&
+                 (victim.pressure_committed || victim.disposition == VictimDisposition::Evicted));
+            apply_private_action(claim, published, victim);
         }
         for (const OwnerClaim& claim : record->shared_claims) {
-            apply_shared_action(claim, published, shared_result_for(claim));
+            const auto& victim      = shared_result_for(claim);
+            admitted_under_pressure = admitted_under_pressure || victim.pressure_committed ||
+                                      victim.disposition == VictimDisposition::Evicted;
+            apply_shared_action(claim, published, victim);
         }
 
         bool retained_private_source = false;
@@ -3050,6 +3064,7 @@ private:
             active.shared_sources.push_back(
                 active_edge(shared_capability(record->shared_source->slot)));
         }
+        active.admitted_under_pressure = admitted_under_pressure;
         StartResult start = std::move(*result.published);
         result.published.reset();
         commit_demand(std::move(record->demand));

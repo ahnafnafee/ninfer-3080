@@ -3377,6 +3377,40 @@ void test_stale_reclamation_does_not_run_when_the_capture_is_feasible() {
 
 }
 
+// An admission that had to degrade a resident is pressure deciding which residents to keep; the
+// optional capture of that same request must not reclaim one of them.
+void test_stale_reclamation_leaves_residents_kept_by_admission_pressure() {
+    FakeManager manager = make_manager(1, 4, 1);
+    FakeProgram program;
+    const ActiveRequest resident = start_active(manager, program, 381, make_base(381), 1);
+    (void)finish_active(manager, program, resident);
+
+    program.required_pressure_actions = 1;
+    const ActiveRequest active        = start_active(manager, program, 382, make_base(382), 2);
+    RuntimeStats admitted;
+    manager.populate_runtime_stats(program, admitted);
+    require(admitted.pressure_private_owners_degraded == 1 &&
+                admitted.pressure_private_owners_evicted == 0,
+            "admission did not keep the resident under pressure");
+
+    program.required_pressure_actions      = 0;
+    program.capture_feasible_after_release = true;
+    program.capture_assessment             = FakeCaptureAssessment{
+        .shortlist_key          = FakeShortlistKey{.digest = 382, .frontier = 64},
+        .protected_rebuild_work = PrefillWork{.tokens = 64},
+        .publishes_private      = true,
+        .publishes_shared       = false,
+        .physically_feasible    = false,
+    };
+    const auto reserved =
+        manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 75}, 0, {});
+    require(reserved == FakeManager::ActiveCaptureReserveResult::Skipped,
+            "a capture reclaimed a resident its own admission pressure had kept");
+    require(program.released_continuations.empty() &&
+                manager.catalog_state(0) == FakeManager::CatalogState::Catalogued,
+            "the resident kept by admission pressure was released");
+}
+
 void test_capture_result_is_validated_before_any_adoption() {
     FakeManager manager = make_manager(1, 4, 1);
     FakeProgram program;
@@ -3816,6 +3850,8 @@ int main() {
              test_stale_reclamation_never_takes_a_retained_active_source);
     run_test("stale reclamation is not run for a feasible capture",
              test_stale_reclamation_does_not_run_when_the_capture_is_feasible);
+    run_test("stale reclamation leaves residents kept by admission pressure",
+             test_stale_reclamation_leaves_residents_kept_by_admission_pressure);
     run_test("validate complete capture result before adoption",
              test_capture_result_is_validated_before_any_adoption);
     run_test("capture result owner identity", test_capture_result_is_adopted_by_owner_identity);
