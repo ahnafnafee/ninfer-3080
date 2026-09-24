@@ -152,6 +152,10 @@ int main() {
     } catch (const std::invalid_argument&) { zero_thinking_budget_rejected = true; }
     failures += check(zero_thinking_budget_rejected, "zero --default-thinking-budget was accepted");
 
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--default-max-tokens", "0"})
+                              .default_max_tokens == kUnboundedOutputTokens,
+                      "--default-max-tokens 0 does not leave the output bounded only by context");
+
     const ServeOptions reasoning_effort =
         parse({"ninfer-serve", "model.ninfer", "--default-reasoning-effort", "low"});
     failures += check(reasoning_effort.default_reasoning_effort == RequestedReasoningEffort::Low,

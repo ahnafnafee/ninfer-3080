@@ -888,8 +888,11 @@ void parse_output_limit(const Json& body, const RequestLimits& limits, OpenAICha
         param = "max_tokens";
     }
     if (limit) {
-        if (*limit < 0) { bad_request(std::string(param) + " must be nonnegative", param); }
-        output.generation.max_tokens  = *limit;
+        // -1 is llama.cpp's "no limit", which its WebUI sends by default.
+        if (*limit < -1) {
+            bad_request(std::string(param) + " must be nonnegative, or -1 for no limit", param);
+        }
+        output.generation.max_tokens  = *limit == -1 ? kUnboundedOutputTokens : *limit;
         output.output_tokens_explicit = true;
     } else {
         output.generation.max_tokens = limits.default_max_tokens;

@@ -608,7 +608,9 @@ void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) c
                                           : ninfer::SamplingMode::Thinking);
     const ninfer::SamplingOverrides& overrides = options_.sampling_overrides;
     nlohmann::json params = {
-        {"n_predict", options_.default_max_tokens},
+        {"n_predict", options_.default_max_tokens == kUnboundedOutputTokens
+                          ? -1
+                          : options_.default_max_tokens},
         {"temperature", options_.greedy ? 0.0F : overrides.temperature.value_or(preset.temperature)},
         {"top_k", overrides.top_k.value_or(preset.top_k)},
         {"top_p", overrides.top_p.value_or(preset.top_p)},

@@ -857,6 +857,13 @@ int test_stream_observations() {
 
 int test_common_objects() {
     int failures      = 0;
+    Json unbounded          = base_request();
+    unbounded["max_tokens"] = -1;
+    failures += check(parse(unbounded).generation.max_tokens == kUnboundedOutputTokens,
+                      "max_tokens -1 leaves the output bounded only by context");
+    unbounded["max_tokens"] = -2;
+    failures += check(api_error([&] { (void)parse(unbounded); }).param == "max_tokens",
+                      "a negative max_tokens other than -1 is rejected");
     Json without_model = base_request();
     without_model.erase("model");
     failures += check(parse(without_model).model.empty(),

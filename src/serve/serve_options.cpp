@@ -104,7 +104,7 @@ std::string serve_usage_text(const char* argv0) {
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --default-max-tokens defaults to " +
            std::to_string(kDefaultMaxTokens) +
-           " when omitted\n"
+           " when omitted; 0 generates until the context runs out\n"
            "       --max-request-mib defaults to 384 and is enforced before JSON parsing\n"
            "       --media-cache-mib defaults to 1024; 0 disables retained media reuse\n"
            "       --media-live-mib defaults to 2048 and bounds all live BF16 patch payloads\n"
@@ -362,6 +362,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--default-max-tokens") {
             options.default_max_tokens =
                 parse_nonnegative_int(require_value("--default-max-tokens"), "default-max-tokens");
+            if (options.default_max_tokens == 0) {
+                options.default_max_tokens = kUnboundedOutputTokens;
+            }
             default_max_tokens_explicit = true;
         } else if (arg == "--default-thinking-budget") {
             const std::uint64_t budget =

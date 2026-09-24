@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -41,6 +42,9 @@ public:
 private:
     ApiError error_;
 };
+
+// An output limit that only the context bounds: the Engine clamps every request to its capacity.
+inline constexpr int kUnboundedOutputTokens = std::numeric_limits<int>::max();
 
 // Server-side context needed while parsing/validating a request.
 struct RequestLimits {

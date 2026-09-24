@@ -245,7 +245,7 @@ The endpoint supports:
 - User `image_url` parts, tool-result `image_url` parts used by compatible clients, and the User
   `video_url` extension using HTTP(S) or data URIs; image detail is omitted or `auto`;
 - nonnegative `max_completion_tokens` and the legacy `max_tokens` spelling; zero performs prompt
-  processing without generation;
+  processing without generation, and llama.cpp's `-1` generates until the context runs out;
 - `temperature`, `top_p`, presence/frequency penalties, and signed integer `seed`;
 - the compatible `top_k` (`0..20`) and `min_p` (`0..1`) sampler extensions;
 - up to four non-empty stop strings, applied to both reasoning and answer output;
@@ -835,7 +835,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--lookup-ngram N` | context-lookup drafting alongside `--spec`: the last `N` tokens are matched against the sequence so far and what followed is proposed; exact, since verification rejects a wrong guess | `0` (off) |
 | `--prefill-cublas` | hand wide prefill GEMMs to cuBLAS: a large prefill speedup for a small perplexity cost, and it wants a larger `--prefill-chunk` to pay (see [performance](performance.md)) | off |
 | `--no-prefill-cublas-projections` | with `--prefill-cublas`, keep the attention and GDN input projections off that route | projections on |
-| `--default-max-tokens N` | output limit when omitted by a request | `8192` |
+| `--default-max-tokens N` | output limit when omitted by a request; `0` generates until the context runs out | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--no-webui` | stop serving a WebUI built in with `NINFER_WEBUI_DIR` | served when built in |
 | `--default-reasoning-effort E` | effort for requests that name none: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | unset |
