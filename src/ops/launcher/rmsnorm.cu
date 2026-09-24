@@ -4,6 +4,9 @@
 #include "ops/kernel/rmsnorm.cuh"
 #include "core/device.h"
 
+#include <array>
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -14,10 +17,30 @@ namespace {
 // Past this many blocks the gated epilogue gives up its hoisted loads. Below one block per SM the
 // prefetch is the only source of overlap and those kernels run at 0.83x to 0.96x; above it a
 // second resident block already supplies that overlap and only the register cost is left (35 -> 50
-// on the warp kernel), which measures 1.02x to 1.14x. Swept over grid size on both gated shapes
-// the crossing sits between 176 and 192 blocks; this is the 170 SMs of this part, a literal
-// because nothing in the tree queries the device, so it is not portable.
-constexpr std::int64_t kRmsPrefetchBlocks = 170;
+// on the warp kernel), which measures 1.02x to 1.14x. Swept over grid size on both gated shapes of
+// a 170-SM part the crossing sits between 176 and 192 blocks: one block per SM, so the cutoff is
+// the SM count of the current device, cached per device index because a model split over several
+// GPUs launches each stage on its own device. A failed query keeps the swept part's 170.
+std::int64_t rms_prefetch_blocks() noexcept {
+    constexpr std::int64_t kSweptPartSms = 170;
+    constexpr int kCachedDevices         = 64;
+    static std::array<std::atomic<std::int32_t>, kCachedDevices> cache{};
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess || device < 0 || device >= kCachedDevices) {
+        return kSweptPartSms;
+    }
+    const std::int32_t known =
+        cache[static_cast<std::size_t>(device)].load(std::memory_order_relaxed);
+    if (known > 0) { return known; }
+    int sms = 0;
+    if (cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device) != cudaSuccess ||
+        sms <= 0) {
+        return kSweptPartSms;
+    }
+    cache[static_cast<std::size_t>(device)].store(static_cast<std::int32_t>(sms),
+                                                  std::memory_order_relaxed);
+    return sms;
+}
 
 template <RmsEpilogue Epilogue>
 void launch_rmsnorm(const Tensor& x, const Tensor& weight, const Tensor* z, Tensor& out,
@@ -74,7 +97,7 @@ void launch_rmsnorm(const Tensor& x, const Tensor& weight, const Tensor* z, Tens
         constexpr int kWarpsPerBlock = kBlock / kWarpSize;
         const auto blocks = static_cast<unsigned int>((rows + kWarpsPerBlock - 1) / kWarpsPerBlock);
         if constexpr (kGateOnGrid) {
-            if (blocks > kRmsPrefetchBlocks) {
+            if (blocks > rms_prefetch_blocks()) {
                 rmsnorm_warp_bf16x2_kernel<Epilogue, kBlock, false><<<blocks, kBlock, 0, stream>>>(
                     reinterpret_cast<const __nv_bfloat162*>(x_bf16),
                     reinterpret_cast<const __nv_bfloat162*>(w_bf16),
@@ -107,7 +130,7 @@ void launch_rmsnorm(const Tensor& x, const Tensor& weight, const Tensor* z, Tens
                 reinterpret_cast<__nv_bfloat162*>(out_bf16), d, rows, eps);
     } else if (aligned2 && d > 3072 && d <= 8192 && d % 1024 == 0) {
         if constexpr (kGateOnGrid) {
-            if (rows > kRmsPrefetchBlocks) {
+            if (rows > rms_prefetch_blocks()) {
                 rmsnorm_cta_bf16x2_kernel<Epilogue, 512, 8, false>
                     <<<static_cast<unsigned int>(rows), 512, 0, stream>>>(
                         reinterpret_cast<const __nv_bfloat162*>(x_bf16),
