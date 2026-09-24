@@ -179,7 +179,9 @@ command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq git 
 
 echo "--- source: $BRANCH ---"
 if [[ -d "$SRC/.git" ]]; then
-  git -C "$SRC" fetch --depth 1 origin "$BRANCH" && git -C "$SRC" reset --hard FETCH_HEAD
+  # A failed refresh must stop the run: probing and testing stale code would report on the wrong tree.
+  git -C "$SRC" fetch --depth 1 origin "$BRANCH" && git -C "$SRC" reset --hard FETCH_HEAD \
+    || { echo "SOURCE_REFRESH_FAILED (fetch or reset of $BRANCH)"; exit 1; }
 else
   git clone --depth 1 --branch "$BRANCH" "$REPO" "$SRC" || { echo "CLONE_FAILED (is the branch pushed?)"; exit 1; }
 fi
@@ -285,6 +287,13 @@ ninfer_rmsnorm_test ninfer_kv_cache_test ninfer_gdn_gating_proj_test"
   [[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "TESTS_BUILD_FAILED"; exit 1; }
   pattern="^($(echo $TEST_TARGETS | tr ' ' '|'))\$"
   ctest --test-dir /root/build -j1 --output-on-failure -R "$pattern" 2>&1 | tee "$OUT/tests.txt" | tail -30
+  TESTS_RC="${PIPESTATUS[0]}"
+fi
+
+if (( TESTS )) && [[ "${TESTS_RC:-0}" -ne 0 ]]; then
+  echo
+  echo "=== TESTS_FAILED (ctest exit $TESTS_RC; see $OUT/tests.txt) ==="
+  exit 1
 fi
 
 echo

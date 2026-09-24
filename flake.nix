@@ -20,6 +20,11 @@
 
       cuda = pkgs.cudaPackages.cudatoolkit; # cuda-merged-12.9 (nvcc >= 12.8)
 
+      # Target architecture of the packaged build: 86 for the RTX 3090 this fork is tuned on. The
+      # CMake configure also accepts 80 (unmeasured GA100 compatibility target) and 89; change this
+      # one binding to package for another.
+      cudaArch = "86";
+
       ninfer = pkgs.gcc13Stdenv.mkDerivation {
         pname = "ninfer-3090";
         version = "0.6.1";
@@ -37,13 +42,13 @@
           pkgs.curl
         ];
 
-        # The project hard-requires CMAKE_CUDA_ARCHITECTURES=86 (see
-        # CMakeLists.txt) and CUDA >= 12.8. gcc13 matches the upstream-validated
+        # CMakeLists.txt accepts CMAKE_CUDA_ARCHITECTURES 80, 86 or 89 (cudaArch above) and
+        # requires CUDA >= 12.8. gcc13 matches the upstream-validated
         # Linux toolchain and stays inside nvcc 12.9's supported host-compiler
         # range. CC/CXX come from gcc13Stdenv, so CUDA host code uses the same
         # compiler as the C++ side.
         cmakeFlags = [
-          "-DCMAKE_CUDA_ARCHITECTURES=86"
+          "-DCMAKE_CUDA_ARCHITECTURES=${cudaArch}"
           "-DCMAKE_CUDA_COMPILER=${cuda}/bin/nvcc"
           "-DCUDAToolkit_ROOT=${cuda}"
           "-DCMAKE_BUILD_TYPE=Release"
