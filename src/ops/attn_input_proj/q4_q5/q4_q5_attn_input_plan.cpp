@@ -122,6 +122,8 @@ const char* q4_q5_attn_input_schedule_name(Q4Q5AttnInputScheduleId schedule) noe
         return "attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c64.s4";
     case Q4Q5AttnInputScheduleId::MixedR32C32S2:
         return "attn_input_proj.q4_q5.mixed.r32.c32.s2";
+    case Q4Q5AttnInputScheduleId::MixedR32C32K128S2:
+        return "attn_input_proj.q4_q5.mixed.r32.c32.k128.s2";
     case Q4Q5AttnInputScheduleId::MixedR32C64S3:
         return "attn_input_proj.q4_q5.mixed.r32.c64.s3";
     case Q4Q5AttnInputScheduleId::PairR32C64S3:
@@ -156,7 +158,8 @@ Q4Q5AttnInputPlan q4_q5_attn_input_resolve_plan(const Q4Q5AttnInputProblem& prob
 #else
     // The native sm_120 build keeps upstream's column bands, tuned on that architecture.
     if (problem.cols <= 12) return {Q4Q5AttnInputScheduleId::ParentSplitFixed};
-    if (problem.cols <= 32) return {Q4Q5AttnInputScheduleId::MixedR32C32S2};
+    if (problem.cols < 32) return {Q4Q5AttnInputScheduleId::MixedR32C32S2};
+    if (problem.cols == 32) return {Q4Q5AttnInputScheduleId::MixedR32C32K128S2};
     if (problem.cols <= 64) return {Q4Q5AttnInputScheduleId::MixedR32C64S3};
     if (problem.cols <= 104) return {Q4Q5AttnInputScheduleId::PairR32C64S3};
     if (problem.cols <= 128 || problem.cols >= 193)
@@ -192,6 +195,10 @@ void q4_q5_attn_input_execute_plan(const Q4Q5AttnInputPlan& plan, const Tensor& 
     case Q4Q5AttnInputScheduleId::MixedR32C32S2:
         q4_q5_attn_input_mixed_r32_c32_s2_launch(x, query_key_weight, gate_value_weight, q, gate, k,
                                                  v, stream);
+        return;
+    case Q4Q5AttnInputScheduleId::MixedR32C32K128S2:
+        q4_q5_attn_input_mixed_r32_c32_k128_s2_launch(x, query_key_weight, gate_value_weight, q,
+                                                      gate, k, v, stream);
         return;
     case Q4Q5AttnInputScheduleId::MixedR32C64S3:
         q4_q5_attn_input_mixed_r32_c64_s3_launch(x, query_key_weight, gate_value_weight, q, gate, k,

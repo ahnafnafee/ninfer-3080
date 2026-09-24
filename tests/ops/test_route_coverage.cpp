@@ -212,6 +212,7 @@ int main() {
                        })},
                        {"attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c32.s4",
                         "attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c64.s4",
+                        "attn_input_proj.q4_q5.mixed.r32.c32.k128.s2",
                         "attn_input_proj.q4_q5.mixed.r32.c32.s2",
                         "attn_input_proj.q4_q5.pair.r32.c64.s3",
                         "attn_input_proj.q4_q5.pair.r32.c64.s4",
@@ -262,15 +263,16 @@ int main() {
     //                          when the small-T MMA took 3..32 at up to 2.9x
     //                          (q5_linear_add_plan.cpp). GemvResidual (unrouted since split2 took
     //                          T=1) was deleted upstream in the 2026-09-17 catch-up: 31 -> 30.
-    //   q4_q5_attn_input    4  grouped_r32_c64_s4, pair_r32_c64_s3, pair_r32_c64_s4 -- the family
+    //   q4_q5_attn_input    7  grouped_r32_c64_s4, pair_r32_c64_s3, pair_r32_c64_s4 -- the family
     //                          whose dispatch held both switch bugs the catch-up merge shipped --
     //                          and ParentSplitFixed since 2026-09-11, when the small-T MMA took
     //                          1..8 from it (q4_q5_attn_input_plan.cpp); MixedR32C32S2 since the
-    //                          2026-09-24 catch-up, upstream's 13..32 band on a native sm_120 build.
+    //                          2026-09-24 catch-up, upstream's 13..32 band on a native sm_120 build,
+    //                          and MixedR32C32K128S2, the native build's T=32 route.
     //
     // All of them are kept on purpose: deleting an upstream schedule costs merge effort at every
     // future catch-up for no measured gain here. The point is that the set is written down.
-    constexpr std::size_t kExpectedUnrouted = 31;
+    constexpr std::size_t kExpectedUnrouted = 32;
     if (total != kExpectedUnrouted) {
         std::cerr << "route coverage changed: " << total << " unrouted schedules, expected "
                   << kExpectedUnrouted

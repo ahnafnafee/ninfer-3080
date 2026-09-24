@@ -16,6 +16,7 @@ enum class Q4Q5AttnInputScheduleId {
     GroupedHomogeneousPairMmaR32C32S4,
     GroupedHomogeneousPairMmaR32C64S4,
     MixedR32C32S2,
+    MixedR32C32K128S2,
     MixedR32C64S3,
     PairR32C64S3,
     MixedR64C128S2,
