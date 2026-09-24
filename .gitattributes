@@ -21,3 +21,9 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+
+# Chat templates render byte for byte into prompts and the serve fixtures are compared verbatim, so
+# both keep LF whatever core.autocrlf says: Git for Windows defaults to core.autocrlf=true, which
+# would check them out with CRLF and change every rendered prompt.
+*.jinja text eol=lf
+tests/fixtures/** text eol=lf
