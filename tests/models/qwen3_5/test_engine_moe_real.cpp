@@ -268,6 +268,8 @@ int exercise_maximum_configuration(const char* artifact) {
 
 } // namespace
 
+namespace {
+
 int run() {
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (artifact == nullptr || *artifact == '\0') {
@@ -285,5 +287,7 @@ int run() {
     std::cout << "ok\n";
     return 0;
 }
+
+} // namespace
 
 NINFER_GUARDED_TEST_MAIN(run)

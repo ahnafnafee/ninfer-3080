@@ -13,6 +13,8 @@
 #include <stdexcept>
 #include <utility>
 
+namespace {
+
 int run() {
     namespace qwen       = ninfer::models::qwen3_5;
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
@@ -68,5 +70,7 @@ int run() {
         return 1;
     }
 }
+
+} // namespace
 
 NINFER_GUARDED_TEST_MAIN(run)

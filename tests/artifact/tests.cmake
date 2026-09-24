@@ -10,13 +10,15 @@ set_tests_properties(
   ninfer_artifact_permute_row_split_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
+# Standalone: writer_interop.py runs it as an executable path, and the symbol wrapping below must not
+# reach any other test.
 if(MSVC)
   # MSVC has no link-time symbol wrapping; the CUDA fault-injection cases are compiled out.
-  ninfer_add_test(ninfer_artifact_materialization_test
+  ninfer_add_test(ninfer_artifact_materialization_test STANDALONE
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_materialization.cpp"
     LIBRARIES ninfer_artifact)
 else()
-  ninfer_add_test(ninfer_artifact_materialization_test
+  ninfer_add_test(ninfer_artifact_materialization_test STANDALONE
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_materialization.cpp" "${CMAKE_CURRENT_LIST_DIR}/materialization_cuda_errors.cpp"
     LIBRARIES ninfer_artifact)
   target_compile_definitions(ninfer_artifact_materialization_test PRIVATE NINFER_TEST_LINK_WRAP=1)
