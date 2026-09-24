@@ -6,10 +6,11 @@ function(ninfer_internal_includes target)
     ${PROJECT_SOURCE_DIR}/src)
 endfunction()
 
+# Whole-program device code: every device symbol is defined and used in one translation unit (no
+# extern __device__ or __constant__, no cross-unit device calls), and relocatable device code made
+# ptxas assume external linkage, lower computed-lane shuffles to out-of-line calls and give up
+# pipelining loads across loop back edges.
 function(ninfer_cuda_archive target)
-  set_target_properties(${target} PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON)
   if(WIN32)
     set_target_properties(${target} PROPERTIES CUDA_RUNTIME_LIBRARY Static)
   endif()

@@ -114,14 +114,17 @@ dispatch remain in C++; CMake only selects translation units.
 
 ## CUDA compilation boundaries
 
-`ninfer_core` and `ninfer_ops` enable separable compilation (RDC) and resolve device symbols in
-the static archive build. Keep this device-link boundary explicit.
+`ninfer_core` and `ninfer_ops` compile whole-program: no relocatable device code (RDC) and no
+device link. Every device symbol is defined and used in one translation unit. A change that needs a
+device symbol across translation units has to bring RDC back to its target and measure the cost:
+under RDC ptxas lowers a shuffle from a computed lane to an out-of-line call and stops pipelining
+loads across loop back edges.
 
-`ninfer_nvfp4_non_rdc` disables separable compilation and device-symbol resolution. It contains
-the warp-specialized Linear, LinearSwiGLU and causal-attention NVFP4 sources that depend on
-`setmaxnreg` register transfer. Their owning family manifests register these sources into the
-non-RDC target; host launchers connect them to the normal Ops. All three CUDA archive targets
-retain `-lineinfo`.
+`ninfer_nvfp4_non_rdc` explicitly disables separable compilation and device-symbol resolution. It
+contains the warp-specialized Linear, LinearSwiGLU and causal-attention NVFP4 sources that depend
+on `setmaxnreg` register transfer, which RDC would discard. Their owning family manifests register
+these sources into that target; host launchers connect them to the normal Ops. All three CUDA
+archive targets retain `-lineinfo`.
 
 Source-list maintenance must preserve language, architecture, RDC mode, device-link ownership
 and numerical compiler options. Splitting a manifest does not reduce kernel instantiation work
