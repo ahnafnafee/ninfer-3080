@@ -198,6 +198,19 @@ int main() {
                           "serve options did not preserve DFlash2 configuration");
     }
 
+    for (const auto k : {6U, 15U}) {
+        const auto options =
+            parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", std::to_string(k)});
+        failures += check(options.speculative.backend == ninfer::SpeculativeBackend::Mtp &&
+                              options.speculative.draft_tokens == k,
+                          "serve options did not accept an MTP window past five");
+    }
+    bool mtp_sixteen_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "16"});
+    } catch (const std::invalid_argument&) { mtp_sixteen_rejected = true; }
+    failures += check(mtp_sixteen_rejected, "an MTP window of 16 was accepted");
+
     const ServeOptions dflash_vision = parse(
         {"ninfer-serve", "model.ninfer", "--spec", "dflash", "--draft-tokens", "15", "--vision"});
     failures += check(dflash_vision.enable_vision &&

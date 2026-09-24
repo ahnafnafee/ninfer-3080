@@ -37,10 +37,9 @@ namespace ninfer::qwen3_5 {
 // lookup drafting elsewhere should check the baseline's acceptance first -- against a weak drafter
 // the same technique is transformative, and against this one it is a trim.
 //
-// **Where the real headroom is:** at 100% acceptance tokens per round is set by the draft window,
-// and MTP caps it at kMtpDecodeMaximumDrafts = 5. Measured at that ceiling: K=3/4/5 give
-// 148.9/169.3/191.0 tok/s. A lookup drafter has no architectural limit on how far ahead it can
-// propose, so a lookup-only backend sized like DFlash's (K up to 15) is the version worth building.
+// **Where the real headroom is:** at 100% acceptance tokens per round is set by the draft window.
+// Measured when MTP stopped at 5: K=3/4/5 gave 148.9/169.3/191.0 tok/s. The window now reaches 15,
+// so a lookup that keeps matching can propose that far ahead within one MTP round.
 //
 // Returns the number of drafts written, and zero when the n-gram has not been seen before -- which
 // the round already treats as a plain decode step.

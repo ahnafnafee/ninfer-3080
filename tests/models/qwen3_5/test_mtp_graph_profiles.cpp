@@ -105,7 +105,7 @@ void check(std::uint32_t capacity, std::uint32_t draft_window, KvCacheStorage st
 
 int main() {
     // One past the widest window any registered verify path can request today
-    // (kMtpDecodeMaximumDrafts is 5, kDFlashDecodeMaximumDrafts is 15), so the guard that adds
+    // (kMtpDecodeMaximumDrafts and kDFlashDecodeMaximumDrafts are both 15), so the guard that adds
     // the route-flip boundary is itself covered rather than trusted.
     constexpr std::uint32_t kSweptDraftWindows =
         ninfer::models::qwen3_5::kDFlashDecodeMaximumDrafts + 1U;
