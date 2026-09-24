@@ -1738,7 +1738,16 @@ private:
             const ActiveAdmissionSet active =
                 scheduler_.active_admission_set(slots_, max_concurrency_);
             if (active.size == 0) {
-                throw std::logic_error("isolated-feasible request is blocked in an idle Engine");
+                // No active lane will release anything, so the head cannot wait its way in. Fail
+                // only this request: a throw would stop the worker and refuse every later request.
+                ++cumulative_stats_.context_cache_exhausted_requests;
+                consecutive_context_cache_exhaustions_.fetch_add(1, std::memory_order_relaxed);
+                (void)remove_pending_error(
+                    head, std::make_exception_ptr(RequestError(
+                              RequestErrorKind::Overloaded,
+                              "context cache exhausted: an idle Engine found no placement")));
+                control_progress = true;
+                continue;
             }
             if (!scheduler_.protect_blocked_head(head->id, active.span(),
                                                  instance_.program->resource_revision())) {
