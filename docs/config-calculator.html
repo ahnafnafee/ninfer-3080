@@ -383,14 +383,14 @@
       <span class="inline-code" id="overhead-note"></span>, a <em>fixed</em> block rather than a
       per-token cost. Measuring it at a single context length would have made it look like roughly
       4 KB per token on the 27B, which understates memory at short contexts and overstates it badly
-      at long ones. It is identical across all six formats.
+      at long ones. It is identical across all seven formats.
     </li>
     <li>
       <strong>Perplexity</strong> is <code>ninfer-perplexity</code> on the fixed
       <code>ninfer-ppl-1m-v1</code> corpus with <code>--quick</code>, context/stride 4096/2048,
-      261,167 scored tokens &mdash; the same corpus and window for all six formats, so the
+      261,167 scored tokens &mdash; the same corpus and window for all seven formats, so the
       differences are comparable to each other. Absolute values are not comparable to perplexity
-      numbers from other tools. All six were measured on <strong>Qwen3.8-27B</strong>: the ranking
+      numbers from other tools. All seven are on <strong>Qwen3.8-27B</strong> (the rk4v4 figure is ratio-derived from a later session, not read directly): the ranking
       is a property of how each format quantizes, so it carries across models, but the absolute
       figures are the 27B's and are shown as such when another model is selected.
     </li>
@@ -547,7 +547,7 @@ const DATA = {
   },
 
   /* Perplexity is model-independent in the sense that it was measured once, on the 27B, over the
-     same corpus and window for all six formats. */
+     same corpus and window for all seven formats. */
   /* Re-measured September 2026. The fp8, k8v4 and nvfp4 figures published before that were
      scored through a data race in the quantized attention kernels that corrupted every prefill
      output column but the last; all three now reproduce bit-identically run to run. nvfp4 moved
@@ -828,7 +828,7 @@ function render() {
   const base = DATA.perplexity.bf16;
   const delta = ((ppl - base) / base) * 100;
   $("out-ppl").firstChild.nodeValue = delta === 0 ? "baseline" : "+" + delta.toFixed(4) + "%";
-  /* Perplexity was measured once, on the 27B, across all six formats. Say so rather than let the
+  /* Perplexity was measured once, on the 27B, across all seven formats. Say so rather than let the
      figure read as a property of whichever model is selected. */
   $("out-ppl-sub").textContent = ppl.toFixed(6) + " vs bf16 " + base.toFixed(6) +
     ($("model").value === "27b" ? "" : " · measured on the 27B");

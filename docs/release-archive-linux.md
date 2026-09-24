@@ -39,15 +39,15 @@ That is the headless profile: three lanes, `rk4v4` KV, MTP3 speculation plus the
 vision in overlay residency, with the lanes sharing one 262,144-token pool (any one request can
 use all of it). Three lanes start even beside a
 desktop, so a headless card has room to spare (`NINFER_CONCURRENCY=4` should fit there). Drop a lane
-or a context rung (196608 / 131072 / 114688 / 98304 / 81920) if startup refuses. For the dense 27B instead:
+or a context rung (229376 / 196608 / 163840 / 131072 / 98304) if startup refuses. For the dense 27B instead:
 
 ```bash
 ./download-model.sh qwen38-27b         # ~19 GB, the DFlash2 bundle; it also carries the MTP weights
-./run.sh qwen38-27b                    # one lane, 131,072 tokens, DFlash2 (fastest)
+./run.sh qwen38-27b                    # one lane, 262,144 tokens, DFlash2 (fastest)
 ```
 
 For the longest context instead, `NINFER_SPEC=mtp ./run.sh qwen38-27b` runs the MTP profile at two
-lanes and 212,992 tokens each with a smaller prefill chunk and `--lm-head-q6`: slower decode, more
+lanes and 262,144 tokens shared with a smaller prefill chunk and `--lm-head-q6`: slower decode, more
 context.
 
 `./run.sh qwen38-27b int8` and `./run.sh qwen38-27b c8` are the older INT8 profiles — one user at
@@ -91,8 +91,8 @@ it did, and starts. It only does this for the defaults: a `NINFER_CONTEXT`, `NIN
 `NINFER_FALLBACK=off` turns it off.
 
 For those cases the message names the numbers. Drop a context rung first —
-`NINFER_CONTEXT=196608`, then 131072, 114688, 98304, 81920 (the default DFlash2 profile starts at
-131072, so begin at 114688 there). Speculation is the next lever
+`NINFER_CONTEXT=196608`, then 163840, 131072, 98304 (the launcher's own step-down starts from 262144 and
+takes an eighth off each rung, so begin lower only if it keeps refusing). Speculation is the next lever
 (`NINFER_SPEC=none`), worth about 992 MiB at the cost of decode speed. Drop vision last: in overlay
 residency it costs almost nothing resident, and an `evictable pool window exceeds the evictable
 tail` message means the reservation is already tight rather than that the context is too large.

@@ -823,8 +823,13 @@ std::vector<KvCacheStorage> selected_storages(KvChoice choice) {
     if (choice == KvChoice::Rk4V4) { return {KvCacheStorage::RotatedLloyd4KeyInt4Value}; }
     if (choice == KvChoice::Nvfp4) { return {KvCacheStorage::Nvfp4Group16}; }
     if (choice == KvChoice::K8V4) { return {KvCacheStorage::Fp8KeyNvfp4Value}; }
-    return {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
-            KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value};
+    return {KvCacheStorage::BFloat16,
+            KvCacheStorage::Int8Group64,
+            KvCacheStorage::Fp8E4M3Row256,
+            KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
+            KvCacheStorage::RotatedLloyd4KeyInt4Value,
+            KvCacheStorage::Nvfp4Group16,
+            KvCacheStorage::Fp8KeyNvfp4Value};
 }
 
 struct RowProfile {
