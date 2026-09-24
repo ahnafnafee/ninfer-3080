@@ -57,6 +57,18 @@ option(NINFER_D3D12_RESIDENCY
 if(WIN32 AND NINFER_D3D12_RESIDENCY)
   add_compile_definitions(NINFER_D3D12_RESIDENCY=1)
 endif()
+# The largest attention units end a build on one single-threaded ptxas. --split-compile lets nvcc
+# optimize one unit on several threads; 0 means every core, which a parallel ninja multiplies by its
+# job count, so a bound is usually what is wanted.
+set(NINFER_NVCC_SPLIT_COMPILE "" CACHE STRING
+    "Threads nvcc may use per translation unit (--split-compile N); empty is off, 0 is every core")
+if(NOT NINFER_NVCC_SPLIT_COMPILE STREQUAL "")
+  add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:--split-compile=${NINFER_NVCC_SPLIT_COMPILE}>)
+endif()
+option(NINFER_PTXAS_VERBOSE "Print each kernel's registers and local-memory spills (-Xptxas=-v)" OFF)
+if(NINFER_PTXAS_VERBOSE)
+  add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v>)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
