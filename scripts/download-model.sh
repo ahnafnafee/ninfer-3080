@@ -28,6 +28,10 @@ set -euo pipefail
 #
 # Environment: NINFER_MODEL_DIR (default: models/ beside this script), NINFER_SKIP_SHA256=1 to accept
 # a file on size alone.
+#
+# Uses aria2c (16 parallel ranges) when it is on PATH, since single-stream curl against these
+# artifacts has been observed to throttle to ~1 MB/s or stall outright; falls back to curl
+# otherwise. `apt-get install aria2` / `brew install aria2` to opt in.
 
 usage() {
   printf 'usage: %s <model>\n\n  qwen38-27b\n  qwen36-27b\n  qwen36-35b-a3b\n' "${0##*/}" >&2
@@ -116,8 +120,17 @@ if [ -f "$model" ]; then
 fi
 
 printf '%s\n' "Downloading $label..."
-if ! curl -L -C - --fail --output "$part" \
-  "https://huggingface.co/neroued/$repo/resolve/$revision/$artifact"; then
+url="https://huggingface.co/neroued/$repo/resolve/$revision/$artifact"
+if command -v aria2c >/dev/null 2>&1; then
+  # 16 parallel ranges over one file, not single-stream curl. On the Vast rental boxes this repo
+  # downloads at ~98 MB/s over aria2c against the same throttled-to-~1MB/s (and once outright
+  # stalled at 11 of 21 GiB) single-stream curl -- see scripts/multi-gpu-testing/README.md. -c
+  # resumes into the same .part name curl would use, and HuggingFace serves ranges fine.
+  aria2c -x16 -s16 -c --file-allocation=none -d "$model_dir" -o "$(basename -- "$part")" "$url"
+else
+  curl -L -C - --fail --output "$part" "$url"
+fi
+if [ $? -ne 0 ]; then
   printf '%s\n' 'Download failed. Run this script again to resume.' >&2
   exit 1
 fi

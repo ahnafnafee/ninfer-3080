@@ -112,9 +112,17 @@ call :usage
 exit /b 0
 
 :model_known
-rem The default model path matches what download-model.bat writes and how the release archive is
-rem laid out: this launcher sits beside models\.
-set "MODEL=%~dp0models\%ARTIFACT%"
+rem Two layouts share this launcher. In the release archive it sits at the archive root beside
+rem models\, which is what download-model.bat writes to there. In a checkout it sits in scripts\,
+rem one level under the repo root, and models\ (see .gitignore) is beside the repo root, not beside
+rem this script -- a directory named scripts with a CMakeLists.txt above it tells the two apart (a
+rem bare CMakeLists.txt probe would misfire on an archive unpacked beneath any source tree). This
+rem must agree with download-model.bat's own default, which uses the same rule.
+for %%I in ("%~dp0..") do set "ROOT=%%~fI"
+for %%I in ("%~dp0.") do set "SCRIPT_DIRNAME=%%~nxI"
+set "MODEL_DIR=%~dp0models"
+if /i "%SCRIPT_DIRNAME%"=="scripts" if exist "%ROOT%\CMakeLists.txt" set "MODEL_DIR=%ROOT%\models"
+set "MODEL=%MODEL_DIR%\%ARTIFACT%"
 rem An explicit NINFER_MODEL_DIR is taken verbatim and never probed, as in run.sh, so a model
 rem downloaded there with download-model.bat is found here.
 if not "%NINFER_MODEL_DIR%"=="" set "MODEL=%NINFER_MODEL_DIR%\%ARTIFACT%"
@@ -125,7 +133,6 @@ if not "%NINFER_MODEL%"=="" set "MODEL=%NINFER_MODEL%"
 if not "%NINFER_HOST%"=="" set "HOST=%NINFER_HOST%"
 if not "%NINFER_PORT%"=="" set "PORT=%NINFER_PORT%"
 
-set "ROOT=%~dp0.."
 set "SERVER=%ROOT%\build-ninja\apps\ninfer-serve.exe"
 if not exist "%SERVER%" set "SERVER=%~dp0ninfer-serve.exe"
 if not "%NINFER_SERVER%"=="" set "SERVER=%NINFER_SERVER%"
