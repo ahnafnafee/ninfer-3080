@@ -110,12 +110,15 @@ goto :model_selected
 :model_selected
 rem Two layouts share this script. In the release archive it sits at the archive root beside
 rem models\. In a checkout it sits in scripts\, one level under the repo root, and models\ (see
-rem .gitignore) is beside the repo root, not beside this script -- the CMakeLists.txt marker tells
-rem the two apart, matching run.bat's own default so a model downloaded here is found there.
+rem .gitignore) is beside the repo root, not beside this script -- a directory named scripts with a
+rem CMakeLists.txt above it tells the two apart (a bare CMakeLists.txt probe would misfire on an
+rem archive unpacked beneath any source tree), matching run.bat's own default so a model
+rem downloaded here is found there.
 set "ROOT=%~dp0"
 for %%I in ("%ROOT%..") do set "REPO_ROOT=%%~fI"
+for %%I in ("%ROOT%.") do set "SCRIPT_DIRNAME=%%~nxI"
 set "MODEL_DIR=%ROOT%models"
-if exist "%REPO_ROOT%\CMakeLists.txt" set "MODEL_DIR=%REPO_ROOT%\models"
+if /i "%SCRIPT_DIRNAME%"=="scripts" if exist "%REPO_ROOT%\CMakeLists.txt" set "MODEL_DIR=%REPO_ROOT%\models"
 if defined NINFER_MODEL_DIR set "MODEL_DIR=%NINFER_MODEL_DIR%"
 set "MODEL=%MODEL_DIR%\%ARTIFACT%"
 
