@@ -97,7 +97,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--gdn-state-fp16] [--rope-yarn] [--wddm-evictable-budget] "
            "[--mlp-a8-decode] [--no-prefill-a8] "
            "[--prefill-cublas [--no-prefill-cublas-projections]] [--lookup-ngram N] "
-           "[--no-thinking] [--preserve-thinking] [--cors] "
+           "[--no-thinking] [--preserve-thinking] [--cors] [--no-webui] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
@@ -144,7 +144,8 @@ std::string serve_usage_text(const char* argv0) {
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
            "       sampler defaults come from the loaded model and resolved thinking mode; "
            "server flags and request fields override individual values.\n"
-           "       --greedy forces temperature 0 (exact argmax).\n";
+           "       --greedy forces temperature 0 (exact argmax).\n"
+           "       --no-webui stops serving a WebUI built in with NINFER_WEBUI_DIR on GET /.\n";
 }
 
 // "1,2,3" selects the ordered devices the model's pipeline stages run on; the first also holds the
@@ -438,6 +439,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.preserve_thinking = true;
         } else if (arg == "--cors") {
             options.enable_cors = true;
+        } else if (arg == "--no-webui") {
+            options.enable_webui = false;
         } else if (arg == "--temperature") {
             options.sampling_overrides.temperature =
                 parse_float_in(require_value("--temperature"), "temperature", 0.0f, 2.0f);

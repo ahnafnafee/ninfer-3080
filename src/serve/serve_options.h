@@ -85,6 +85,7 @@ struct ServeOptions {
     std::optional<RequestedReasoningEffort> default_reasoning_effort;
     int default_max_tokens = kDefaultMaxTokens;
     bool enable_cors       = false; // send permissive CORS headers for browser UIs
+    bool enable_webui      = true;  // serve a WebUI compiled in with NINFER_WEBUI_DIR
     // Process-level explicit overrides layered between registered model/mode defaults and request
     // fields. An omitted seed is replaced per request with a fresh random seed.
     SamplingOverrides sampling_overrides;

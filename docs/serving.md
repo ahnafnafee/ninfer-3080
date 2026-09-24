@@ -207,6 +207,21 @@ running and waiting requests. The `ninfer:` series add completed requests, admit
 prefix-cache hits, context-cache reuse, speculative drafts and acceptances, context-cache
 exhaustions and uptime.
 
+### WebUI
+
+A build configured with `-DNINFER_WEBUI_DIR=<dir>` compiles the files of a built WebUI into
+`ninfer-serve` and serves them on `GET /`; any other `GET` path outside the API routes returns the
+entry page, for the UI's client-side router. The static files need no API key, the API routes it
+calls still do. `--no-webui` turns it off at startup. The build never downloads anything:
+`scripts/fetch-webui.sh [tag]` unpacks one of llama.cpp's released WebUIs, which speaks this
+server's `/props`, `/slots`, `/v1/models` and streamed Chat Completions, and prints the directory to
+configure with.
+
+```bash
+./scripts/fetch-webui.sh
+cmake -S . -B build -DNINFER_WEBUI_DIR=<the directory it printed>
+```
+
 ## OpenAI Chat Completions
 
 ```bash
@@ -822,6 +837,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--no-prefill-cublas-projections` | with `--prefill-cublas`, keep the attention and GDN input projections off that route | projections on |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
+| `--no-webui` | stop serving a WebUI built in with `NINFER_WEBUI_DIR` | served when built in |
 | `--default-reasoning-effort E` | effort for requests that name none: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
 | `--vision-residency resident\|overlay` | `overlay` keeps the Vision tower in pinned host memory and encodes each image inside a window borrowed from the evict-ranked text weight tail, so `--vision` no longer reserves device memory and `--kv-capacity auto` resolves the no-vision capacity; requires `--vision` and CUDA virtual memory management | `resident` |

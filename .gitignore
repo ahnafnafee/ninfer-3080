@@ -74,3 +74,6 @@ dist/*
 # committed: they are whole real prompts, so they carry third-party system-prompt text and are
 # large (100 KB+ each) for something only the person who captured them can act on.
 repro/
+
+# WebUI releases unpacked by scripts/fetch-webui.sh for -DNINFER_WEBUI_DIR.
+third_party/webui/

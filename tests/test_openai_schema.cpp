@@ -857,6 +857,13 @@ int test_stream_observations() {
 
 int test_common_objects() {
     int failures      = 0;
+    Json without_model = base_request();
+    without_model.erase("model");
+    failures += check(parse(without_model).model.empty(),
+                      "Chat Completions accepts a request that omits the model");
+    without_model["model"] = 42;
+    failures += check(api_error([&] { (void)parse(without_model); }).param == "model",
+                      "a model that is present must still be a non-empty string");
     const Json models = Json::parse(make_models_list("qwen", 7, 240000, true));
     failures += check(models["data"][0]["id"] == "qwen" &&
                           models["data"][0]["max_model_len"] == 240000 &&
