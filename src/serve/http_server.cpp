@@ -232,6 +232,7 @@ HttpServer::HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> log
     server_.new_task_queue         = [request_workers, worker_limit] {
         return new httplib::ThreadPool(request_workers, worker_limit, worker_limit);
     };
+    server_.set_tcp_nodelay(true);
     server_.set_socket_options(configure_http_server_socket);
     server_.set_payload_max_length(options_.max_request_bytes);
     register_routes();
