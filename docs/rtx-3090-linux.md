@@ -105,6 +105,28 @@ Add these options to the native CMake command:
 -DVCPKG_TARGET_TRIPLET=x64-linux
 ```
 
+## Build options
+
+Every option below is off by default; a default build runs the tested routes. Pass them to the
+CMake configure command as `-DNAME=VALUE`.
+
+| option | effect |
+|---|---|
+| `NINFER_SFU_SIGMOID_SILU=ON` | sigmoid and SiLU evaluate `ex2.approx` and a correctly rounded reciprocal on the SFU instead of `expf` and a divide |
+| `NINFER_SFU_SOFTPLUS=ON` | the GDN decay gate's softplus runs on the SFU as well, switching to a log1p series where e^x is below 1/16 |
+| `NINFER_BF16_RESIDUAL_ADD=ON` | BF16 linear projections are added onto the residual in bf16 instead of fp32 |
+| `NINFER_NVCC_SPLIT_COMPILE=N` | nvcc optimizes one translation unit on N threads (`--split-compile`); `0` is every core, which a parallel ninja multiplies by its job count |
+| `NINFER_PTXAS_VERBOSE=ON` | ptxas reports each kernel's registers and local-memory spills |
+| `NINFER_WEBUI_DIR=PATH` | compiles the WebUI in that directory (an `index.html` or `index.html.gz` at its root) into the server |
+| `NINFER_SM120_NATIVE=ON` | on a `120a` build, compiles the Blackwell FP8/NVFP4 units instead of the `mma.sync` path |
+| `NINFER_D3D12_RESIDENCY=ON` | Windows: offers `--wddm-evictable-budget`, device arenas from a D3D12 heap held resident |
+| `NINFER_DIRECTSTORAGE=ON` | Windows: fetches the DirectStorage 1.3 runtime and offers `--disk-kv-directstorage` for disk-tier restores |
+
+The Windows options compile against Windows headers but have not been run on this line.
+At run time, `NINFER_CUDA_SYNC=spin|blocking|yield|auto` selects the CUDA synchronization schedule
+(unset keeps CUDA's default) and `NINFER_T2_A8_TILE=off` returns the ternary prefill route to its
+64-row kernel.
+
 ## Bash scripts
 
 The `scripts/` directory contains Bash versions of each Windows download, launcher, and packaging
