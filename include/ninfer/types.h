@@ -50,6 +50,10 @@ enum class KvCacheStorage : std::uint8_t {
     Nvfp4Group16,
     // K8V4: FP8 E4M3 key plane (same coding as Fp8E4M3Row256) paired with an NVFP4 value plane.
     Fp8KeyNvfp4Value,
+    // rk4v4 (this fork only): rotated keys as 4-bit indices into a Lloyd-Max codebook with a
+    // group-64 FP16 scale, paired with rk8v4's packed signed int4 group-32 value plane. Opt-in
+    // through --kv-dtype rk4v4.
+    RotatedLloyd4KeyInt4Value,
 };
 
 enum class EnginePurpose : std::uint8_t {

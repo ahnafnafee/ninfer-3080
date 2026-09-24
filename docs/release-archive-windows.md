@@ -38,8 +38,9 @@ The downloader writes into `models\` beside these files, which is where the laun
 `NINFER_MODEL_DIR` moves both: set it and the downloader puts artifacts there and the launcher looks
 there. To point the launcher at one file somewhere else, give it `NINFER_MODEL`.
 
-That is the recommended Windows profile: Qwen3.6-35B-A3B with `rk8v4` KV, MTP3 speculation plus the
-draft head, and vision in overlay residency. For the dense 27B instead:
+That is the recommended Windows profile: Qwen3.6-35B-A3B with `rk4v4` KV at the full 262,144-token
+context shared by two lanes (any one request can use all of it), MTP3 speculation plus the draft
+head, and vision in overlay residency. For the dense 27B instead:
 
 ```powershell
 .\download-model.bat qwen38-27b        # ~19 GB, the DFlash2 bundle; it also carries the MTP weights
@@ -86,8 +87,8 @@ Nothing here needs editing. **Every** profile reads `NINFER_MODEL`, `NINFER_MODE
 ## If startup refuses
 
 **The default profile handles this for you.** If `run.bat` is refused at startup for lack of GPU
-memory, it steps down by itself -- an eighth of the context at a time, up to five times, with a 2048
-prefill chunk and fewer host state slots -- says what it did, and starts. On a desktop that was
+memory, it steps down by itself -- an eighth of the context at a time, up to five times, and from
+the second step with a 2048 prefill chunk and fewer host state slots -- says what it did, and starts. On a desktop that was
 holding 2.8 GiB of the card, `run.bat qwen38-27b` stepped from 131,072 down to 81,920 tokens and
 served a request, at about 12 seconds per refused attempt. It only does this for the defaults: a
 `NINFER_CONTEXT`, `NINFER_PREFILL_CHUNK` or `NINFER_HOST_STATE_SLOTS` you set is honoured as given, and

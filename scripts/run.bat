@@ -9,7 +9,7 @@ rem   model             profiles
 rem   qwen38-27b        tuned (default), int8, c8
 rem   qwen36-35b-a3b    tuned (default)
 rem
-rem `tuned` is the recommended profile: rk8v4 KV, speculation plus the draft head, the memory
+rem `tuned` is the recommended profile: rk4v4 KV, speculation plus the draft head, the memory
 rem flags, vision in overlay residency, and the tuned context cache with automatic prefix grid.
 rem `int8` and `c8` are the older reference profiles for the 27B -- one user at 64K of INT8 KV
 rem (the quality default), and eight lanes at 8K -- with every serving flag fixed.
@@ -20,40 +20,42 @@ rem
 rem QWEN3.8-27B, `tuned`: two flag sets, each measured (docs\performance.md, "Recommended
 rem configurations"), chosen with NINFER_SPEC. The default is the fast one.
 rem
-rem   NINFER_SPEC=dflash2 (default): fastest at one stream, for context up to about 130K
+rem   NINFER_SPEC=dflash2 (default): fastest at one stream, 172,032 tokens of context
 rem
 rem     --spec dflash2 --draft-tokens 7 --lm-head-draft
 rem     --prefill-cublas --prefill-chunk 4096
-rem     --kv-dtype rk8v4 --embedding-q4 --gdn-state-fp16
+rem     --kv-dtype rk4v4 --embedding-q4 --gdn-state-fp16
 rem     --vision --vision-residency overlay
 rem
-rem   NINFER_SPEC=mtp: the longest context, still fast -- 200,000 tokens verified by loading it
+rem   NINFER_SPEC=mtp: the full 262,144-token native context, two lanes sharing it, still fast
 rem
 rem     --spec mtp --draft-tokens 3 --lm-head-draft
 rem     --prefill-cublas --prefill-chunk 2048
-rem     --kv-dtype rk8v4 --embedding-q4 --lm-head-q6 --gdn-state-fp16
+rem     --kv-dtype rk4v4 --embedding-q4 --lm-head-q6 --gdn-state-fp16
 rem     --vision --vision-residency overlay
 rem
 rem   set NINFER_SPEC=mtp && run.bat qwen38-27b
 rem
-rem Against the previous defaults the DFlash2 set is about 1.7x on prefill and 1.39x on decode, for
-rem +0.156%% perplexity from the cuBLAS route and +0.083%% from rk8v4. It gives up context because
-rem DFlash2's draft weights and its refusal of --lm-head-q6 cost about 65K tokens between them: the
-rem same flags on DFlash2 load at 130K and fail at 150K. `none` is the mtp set without speculation.
+rem rk4v4 KV (Lloyd-Max 4-bit keys) is 31%% smaller than rk8v4 at the same decode speed, for +0.10%%
+rem perplexity over it. Measured on a desktop RTX 3090 (2026-09-24), the DFlash2 set starts at up to
+rem 180,224 tokens (rk8v4: 131,072) and the default keeps a rung of margin; its draft weights and its
+rem refusal of --lm-head-q6 are why it stops short of 262,144. The mtp set starts at 262,144 with two
+rem lanes and about 1.2 GiB to spare. `none` is the mtp set without speculation.
 rem The qwen3_8_27b.ninfer that download-model.bat fetches is the DFlash2 bundle and carries the
 rem MTP weights too, so one file serves both.
 rem
 rem OVERRIDES, from the environment. All profiles: NINFER_MODEL (artifact path), NINFER_MODEL_DIR,
 rem NINFER_SERVER, NINFER_HOST, NINFER_PORT. `tuned` also: NINFER_CONTEXT, NINFER_CONCURRENCY, NINFER_KV_DTYPE,
 rem NINFER_SPEC, NINFER_DRAFT_TOKENS, NINFER_PREFILL_CHUNK, NINFER_VISION (on^|off),
-rem NINFER_VISION_RESIDENCY, NINFER_HOST_STATE_SLOTS. Windows keeps one lane by default: a desktop holds roughly 1.5 GiB of
-rem the card. Each spec's defaults (context, chunk) are the ones that fit; if startup refuses, drop
-rem a rung of NINFER_CONTEXT: 196608 / 163840 / 131072 / 114688 / 98304 / 65536.
+rem NINFER_VISION_RESIDENCY, NINFER_HOST_STATE_SLOTS. Each spec's defaults (context, lanes, chunk)
+rem are the ones measured to fit beside a desktop, which holds roughly 1.5 GiB of the card; if startup
+rem refuses, drop a rung of NINFER_CONTEXT: 229376 / 196608 / 163840 / 131072 / 98304 / 65536.
 rem
 rem IF THE CARD IS BUSY. A desktop (or another job) holding VRAM can leave too little for the default
 rem context. When the `tuned` profile is refused at startup for lack of GPU memory, this launcher
-rem steps down on its own -- an eighth of the context at a time, up to five times, with a 2048
-rem prefill chunk and fewer host state slots -- and says what it did, so the first run starts instead
+rem steps down on its own -- an eighth of the context at a time, up to five times, and from the
+rem second step also a 2048 prefill chunk and fewer host state slots -- and says what it did, so the
+rem first run starts instead
 rem of ending in an error. It only does that for the defaults: an explicit NINFER_CONTEXT, NINFER_PREFILL_CHUNK or
 rem NINFER_HOST_STATE_SLOTS is honoured as given and fails loudly, and NINFER_FALLBACK=off turns the
 rem step-down off.
@@ -128,7 +130,7 @@ rem downloaded there with download-model.bat is found here.
 if not "%NINFER_MODEL_DIR%"=="" set "MODEL=%NINFER_MODEL_DIR%\%ARTIFACT%"
 set "HOST=127.0.0.1"
 set "PORT=8080"
-set "KV_DTYPE=rk8v4"
+set "KV_DTYPE=rk4v4"
 if not "%NINFER_MODEL%"=="" set "MODEL=%NINFER_MODEL%"
 if not "%NINFER_HOST%"=="" set "HOST=%NINFER_HOST%"
 if not "%NINFER_PORT%"=="" set "PORT=%NINFER_PORT%"
@@ -167,7 +169,8 @@ exit /b 2
 
 :spec_dflash2
 set "SPEC=dflash2"
-set "CONTEXT=131072"
+set "CONTEXT=172032"
+set "CONCURRENCY=1"
 set "PREFILL_CHUNK=4096"
 set "DRAFT_TOKENS=7"
 set "MEMORY_ARGS="
@@ -175,7 +178,8 @@ goto :spec_done
 
 :spec_mtp
 set "SPEC=mtp"
-set "CONTEXT=163840"
+set "CONTEXT=262144"
+set "CONCURRENCY=2"
 set "PREFILL_CHUNK=2048"
 set "DRAFT_TOKENS=3"
 set "MEMORY_ARGS=--lm-head-q6"
@@ -183,13 +187,13 @@ goto :spec_done
 
 :spec_none
 set "SPEC=none"
-set "CONTEXT=163840"
+set "CONTEXT=262144"
+set "CONCURRENCY=2"
 set "PREFILL_CHUNK=2048"
 set "DRAFT_TOKENS="
 set "MEMORY_ARGS="
 
 :spec_done
-set "CONCURRENCY=1"
 if not "%NINFER_DRAFT_TOKENS%"=="" set "DRAFT_TOKENS=%NINFER_DRAFT_TOKENS%"
 if not "%NINFER_CONTEXT%"=="" set "CONTEXT=%NINFER_CONTEXT%"
 if not "%NINFER_CONCURRENCY%"=="" set "CONCURRENCY=%NINFER_CONCURRENCY%"
@@ -198,19 +202,23 @@ if not "%NINFER_PREFILL_CHUNK%"=="" set "PREFILL_CHUNK=%NINFER_PREFILL_CHUNK%"
 set "SPEC_ARGS="
 if /i not "%SPEC%"=="none" set "SPEC_ARGS=--spec %SPEC% --draft-tokens %DRAFT_TOKENS% --lm-head-draft"
 if /i "%SPEC%"=="dflash2" set "SPEC_LABEL=DFlash2 K=%DRAFT_TOKENS% + draft head"
-if /i "%SPEC%"=="mtp" set "SPEC_LABEL=MTP%DRAFT_TOKENS% + draft head, Q6 head, longest context"
+if /i "%SPEC%"=="mtp" set "SPEC_LABEL=MTP%DRAFT_TOKENS% + draft head, Q6 head, full context"
 if /i "%SPEC%"=="none" set "SPEC_LABEL=no speculation"
 set "PROFILE_ARGS=--max-concurrency %CONCURRENCY% --max-context %CONTEXT% --kv-capacity %CONTEXT% --kv-dtype %KV_DTYPE% %SPEC_ARGS% --embedding-q4 %MEMORY_ARGS% --gdn-state-fp16 --prefill-cublas --prefill-chunk %PREFILL_CHUNK%"
 set "LABEL=C%CONCURRENCY%  ^|  context %CONTEXT%  ^|  %KV_DTYPE% KV  ^|  %SPEC_LABEL%"
 set "PREFILL_NOTE=Prefill: cuBLAS route, chunk %PREFILL_CHUNK%"
-if /i "%SPEC%"=="dflash2" set "HINT=Need more than 130K context? Set NINFER_SPEC=mtp: longer context, slower decode."
+if /i "%SPEC%"=="dflash2" set "HINT=Need the full 262K context or a second lane? Set NINFER_SPEC=mtp: slower decode."
 goto :profile_tuned_common
 
 :profile_35b_tuned
+rem rk4v4 KV fits the full native context with two lanes beside a desktop (three measured to start,
+rem 2026-09-24; rk8v4 managed 147,456 with one). DFlash2 is a 27B-only backend. Lanes share the
+rem one --kv-capacity pool: any request may use all 262,144 tokens, but the lanes' requests together
+rem hold at most that many at a time.
 set "SPEC=mtp"
 if not "%NINFER_SPEC%"=="" set "SPEC=%NINFER_SPEC%"
-set "CONTEXT=147456"
-set "CONCURRENCY=1"
+set "CONTEXT=262144"
+set "CONCURRENCY=2"
 set "PREFILL_CHUNK=512"
 set "DRAFT_TOKENS=3"
 if /i "%SPEC%"=="mtp" goto :spec35_mtp
@@ -323,9 +331,12 @@ if errorlevel 1 goto :server_done
 if %RUNG% GEQ 5 goto :server_done
 set /a NEXT=RUNG+1
 set /a NEXT_CONTEXT=BASE_CONTEXT*(8-NEXT)/8/1024*1024
+rem The first step trims context only: an eighth of it frees more than a card that just misses
+rem needs, and prefill speed and cached prefixes are worth keeping. Later steps also give up the
+rem wider prefill chunk and halve the host state slots every other step.
 set "NEXT_CHUNK=%BASE_CHUNK%"
-if %BASE_CHUNK% GTR 2048 set "NEXT_CHUNK=2048"
-set /a "NEXT_SLOTS=BASE_SLOTS>>((NEXT+1)/2)"
+if %NEXT% GEQ 2 if %BASE_CHUNK% GTR 2048 set "NEXT_CHUNK=2048"
+set /a "NEXT_SLOTS=BASE_SLOTS>>(NEXT/2)"
 echo.
 echo Not enough free GPU memory to start at context %CONTEXT%. Retrying at %NEXT_CONTEXT% (prefill chunk %NEXT_CHUNK%, %NEXT_SLOTS% host state slots).
 echo Set NINFER_CONTEXT to choose your own, or NINFER_FALLBACK=off to fail instead.

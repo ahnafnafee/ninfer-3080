@@ -8,7 +8,7 @@
 #   qwen38-27b        tuned (default), int8, c8
 #   qwen36-35b-a3b    tuned (default)
 #
-# `tuned` is the recommended profile: rk8v4 KV, speculation plus the draft head, the memory flags,
+# `tuned` is the recommended profile: rk4v4 KV, speculation plus the draft head, the memory flags,
 # vision in overlay residency, and the tuned context cache with automatic prefix grid. `int8` and
 # `c8` are the older reference profiles for the 27B -- one user at 64K of INT8 KV (the quality
 # default), and eight lanes at 8K -- with every serving flag fixed.
@@ -19,30 +19,32 @@
 # QWEN3.8-27B, `tuned`: two flag sets, each measured (docs/performance.md, "Recommended
 # configurations"), chosen with NINFER_SPEC. The default is the fast one.
 #
-#   NINFER_SPEC=dflash2 (default): fastest at one stream, for context up to about 130K
+#   NINFER_SPEC=dflash2 (default): fastest at one stream, the full 262,144-token context headless
 #
 #     --spec dflash2 --draft-tokens 7 --lm-head-draft \
 #     --prefill-cublas --prefill-chunk 4096 \
-#     --kv-dtype rk8v4 --embedding-q4 --gdn-state-fp16 \
+#     --kv-dtype rk4v4 --embedding-q4 --gdn-state-fp16 \
 #     --vision --vision-residency overlay
 #
-#   NINFER_SPEC=mtp: the longest context, still fast -- 200,000 tokens verified by loading it
+#   NINFER_SPEC=mtp: the full context, two lanes sharing it, still fast
 #
 #     --spec mtp --draft-tokens 3 --lm-head-draft \
 #     --prefill-cublas --prefill-chunk 2048 \
-#     --kv-dtype rk8v4 --embedding-q4 --lm-head-q6 --gdn-state-fp16 \
+#     --kv-dtype rk4v4 --embedding-q4 --lm-head-q6 --gdn-state-fp16 \
 #     --vision --vision-residency overlay
 #
-# Against the previous defaults the DFlash2 set is about 1.7x on prefill and 1.39x on decode, for
-# +0.156% perplexity from the cuBLAS route and +0.083% from rk8v4. It gives up context because
-# DFlash2's draft weights and its refusal of --lm-head-q6 cost about 65K tokens between them: the
-# same flags on DFlash2 load at 130K and fail at 150K. `none` is the mtp set without speculation.
+# rk4v4 KV (Lloyd-Max 4-bit keys) is 31% smaller than rk8v4 at the same decode speed, for +0.10%
+# perplexity over it. Measured beside a desktop on an RTX 3090 (2026-09-24), the DFlash2 set starts
+# at up to 180,224 tokens and needs about 1.45 GB more for 262,144 -- roughly what a headless card
+# gets back -- so the full context below is the headless extrapolation, and the step-down catches
+# a card that falls short. The mtp set starts at 262,144 with two lanes even beside a desktop.
+# `none` is the mtp set without speculation.
 # The qwen3_8_27b.ninfer that download-model.sh fetches is the DFlash2 bundle and carries the MTP
 # weights too, so one file serves both.
 #
 # IF THE CARD IS BUSY. A desktop (or another job) holding VRAM can leave too little for the default
 # context. When the `tuned` profile is refused at startup for lack of GPU memory, this launcher steps
-# down on its own -- an eighth of the context at a time, up to five times, with a 2048 prefill chunk
+# down on its own -- an eighth of the context at a time, up to five times, from the second step with a 2048 prefill chunk
 # and fewer host state slots -- and says what it did, so the first run starts instead of ending in an
 # error. It
 # only does that for the defaults: an explicit NINFER_CONTEXT, NINFER_PREFILL_CHUNK,
@@ -117,24 +119,24 @@ case "$model_key/$profile" in
       dflash2)
         spec_args=(--spec dflash2 --draft-tokens "${NINFER_DRAFT_TOKENS:-7}" --lm-head-draft)
         memory_args=()
-        default_context=131072; default_concurrency=1; default_chunk=4096
+        default_context=262144; default_concurrency=1; default_chunk=4096
         spec_label="DFlash2 K=${NINFER_DRAFT_TOKENS:-7} + draft head" ;;
       mtp)
         spec_args=(--spec mtp --draft-tokens "${NINFER_DRAFT_TOKENS:-3}" --lm-head-draft)
         memory_args=(--lm-head-q6)
-        default_context=212992; default_concurrency=2; default_chunk=2048
-        spec_label="MTP${NINFER_DRAFT_TOKENS:-3} + draft head, Q6 head (longest context)" ;;
+        default_context=262144; default_concurrency=2; default_chunk=2048
+        spec_label="MTP${NINFER_DRAFT_TOKENS:-3} + draft head, Q6 head, two lanes" ;;
       none)
         spec_args=()
         memory_args=()
-        default_context=212992; default_concurrency=2; default_chunk=2048
+        default_context=262144; default_concurrency=2; default_chunk=2048
         spec_label='no speculation' ;;
       *) printf 'NINFER_SPEC must be dflash2, mtp or none, got %s\n' "$SPEC" >&2; exit 2 ;;
     esac
     CONTEXT="${NINFER_CONTEXT:-$default_context}"
     CONCURRENCY="${NINFER_CONCURRENCY:-$default_concurrency}"
     KV_CAPACITY="${NINFER_KV_CAPACITY:-$CONTEXT}"
-    KV_DTYPE="${NINFER_KV_DTYPE:-rk8v4}"
+    KV_DTYPE="${NINFER_KV_DTYPE:-rk4v4}"
     PREFILL_CHUNK="${NINFER_PREFILL_CHUNK:-$default_chunk}"
     profile_args=(
       --max-concurrency "$CONCURRENCY" --max-context "$CONTEXT" --kv-capacity "$KV_CAPACITY"
@@ -146,7 +148,7 @@ case "$model_key/$profile" in
     label="C$CONCURRENCY  |  context $CONTEXT  |  KV pool $KV_CAPACITY  |  $KV_DTYPE  |  $spec_label"
     prefill_note="Prefill: cuBLAS route, chunk $PREFILL_CHUNK"
     if [[ "$SPEC" == 'dflash2' ]]; then
-      hint="Need more than ~130K context?  NINFER_SPEC=mtp ${0##*/} $model_key  (longer context, slower decode)"
+      hint="Need a second lane?  NINFER_SPEC=mtp ${0##*/} $model_key  (slower decode)"
     fi ;;
 
   qwen36-35b-a3b/tuned)
@@ -157,10 +159,13 @@ case "$model_key/$profile" in
       none) spec_args=(); spec_label='no speculation' ;;
       *) printf 'NINFER_SPEC must be mtp or none, got %s\n' "$SPEC" >&2; exit 2 ;;
     esac
+    # rk4v4 fits three lanes at the full context even beside a desktop (2026-09-24; four fall 48 MB
+    # short there, so a headless card may take NINFER_CONCURRENCY=4). Lanes share the one
+    # --kv-capacity pool: any request may use all of it, but not every lane at once.
     CONTEXT="${NINFER_CONTEXT:-262144}"
-    CONCURRENCY="${NINFER_CONCURRENCY:-2}"
+    CONCURRENCY="${NINFER_CONCURRENCY:-3}"
     KV_CAPACITY="${NINFER_KV_CAPACITY:-$CONTEXT}"
-    KV_DTYPE="${NINFER_KV_DTYPE:-rk8v4}"
+    KV_DTYPE="${NINFER_KV_DTYPE:-rk4v4}"
     PREFILL_CHUNK="${NINFER_PREFILL_CHUNK:-512}"
     profile_args=(
       --max-concurrency "$CONCURRENCY" --max-context "$CONTEXT" --kv-capacity "$KV_CAPACITY"
@@ -273,8 +278,12 @@ if (( status != 0 && rung < 5 )) &&
    grep -q -E 'runtime reservation requires|cudaMallocHost failed' "$server_log"; then
   next=$((rung + 1))
   next_context=$(( base_context * (8 - next) / 8 / 1024 * 1024 ))
-  next_chunk=$(( base_chunk < 2048 ? base_chunk : 2048 ))
-  next_slots=$(( base_slots >> ((next + 1) / 2) ))
+  # The first step trims context only: an eighth of it frees more than a card that just misses
+  # needs, and prefill speed and cached prefixes are worth keeping. Later steps also give up the
+  # wider prefill chunk and halve the host state slots every other step.
+  next_chunk=$base_chunk
+  (( next < 2 || base_chunk <= 2048 )) || next_chunk=2048
+  next_slots=$(( base_slots >> (next / 2) ))
   printf '\nNot enough free GPU memory to start at context %s. Retrying at %s (prefill chunk %s, %s host state slots).\n' \
     "$CONTEXT" "$next_context" "$next_chunk" "$next_slots"
   printf 'Set NINFER_CONTEXT to choose your own, or NINFER_FALLBACK=off to fail instead.\n\n'

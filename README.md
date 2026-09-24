@@ -12,7 +12,9 @@ and feature requests are not guaranteed.
 
 
 On an RTX 3090, Qwen3.8-27B supports a measured **171K-token INT8 context** with the standard
-1 GiB safety headroom, or **226K tokens** with the opt-in RotorQuant `rk8v4` profile.
+1 GiB safety headroom, **226K tokens** with the opt-in RotorQuant `rk8v4` profile, and the full
+**262,144-token native context** with the opt-in [`rk4v4`](#lloyd-max-4-bit-keys-rk4v4) profile,
+even alongside MTP3 speculation and the draft head (where `rk8v4` stops at 182,336).
 
 > **RotorQuant `rk8v4` is available again**, ported onto the `kv_cache_append` Op that now owns KV
 > quantization. `--kv-dtype rk8v4` reaches a measured **226,560-token context** in about the same
@@ -22,7 +24,7 @@ On an RTX 3090, Qwen3.8-27B supports a measured **171K-token INT8 context** with
 This fork targets `sm_86`. Blackwell-only NVFP4/W4A4 and FP8 A8 tensor-core *weight and
 activation* execution are unavailable. FP8 and NVFP4 weights are admitted through their A16
 dequantizing routes. The paged runtime's KV-cache storage is a separate axis from weight/activation
-kernels: all six KV formats, including row-scaled FP8 E4M3, are measured and available on SM86 —
+kernels: all seven KV formats, including row-scaled FP8 E4M3, are measured and available on SM86 —
 see [`docs/config-calculator.html`](docs/config-calculator.html).
 
 The goal is the make the utmost rippin Qwen inference stack for the 3000 series. Gladly taking PR's, all help much appreciated. 
@@ -53,36 +55,42 @@ and, on Windows, the DLLs. Unpack it, run two scripts, and point your harness at
 `/v1/chat/completions` works; leave the API key blank.
 
 The launchers below run **Qwen3.6-35B-A3B** with the settings this project measured as the best
-overall trade on one 24 GB RTX 3090: `rk8v4` KV (+33% context over INT8 for +0.082% perplexity),
-MTP3 speculation plus the draft head, vision through the overlay residency so it costs no resident
+overall trade on one 24 GB RTX 3090: `rk4v4` KV (twice INT8's context per GiB for +0.21%
+perplexity), MTP3 speculation plus the draft head, vision through the overlay residency so it costs no resident
 capacity, and the tuned context cache (8 shared prefixes, 32 host state slots, automatic prefix
 grid) that takes prefix reuse from 8.4% to 98.3% on a multi-preamble workload.
 
-### Windows 11 — one user
+### Windows 11 — full 256K context, two lanes
 
 Download `ninfer-rtx3090-windows-x64-*.zip`, unzip it, and from that folder:
 
 ```powershell
 .\download-model.bat qwen36-35b-a3b       # downloads qwen3_6_35b_a3b.ninfer (~21 GB, resumable)
-.\run.bat qwen36-35b-a3b                   # serves on 127.0.0.1:8080, 147,456-token context
+.\run.bat qwen36-35b-a3b                   # serves on 127.0.0.1:8080, 2 lanes sharing 262,144 tokens
 ```
 
 Double-clicking either file asks which model instead. `NINFER_HOST`, `NINFER_PORT`, `NINFER_MODEL` and `NINFER_SERVER` override it without editing the
 file; `set NINFER_HOST=0.0.0.0` exposes it to the LAN, unauthenticated.
 
-### Headless Linux — full 256K context, two users, everything on
+### Headless Linux — full 256K context, three lanes, everything on
 
 Download `ninfer-rtx3090-linux-x64-*.tar.gz`, unpack it, and from that folder:
 
 ```bash
 tar -xzf ninfer-rtx3090-linux-x64-*.tar.gz && cd ninfer-rtx3090-linux-x64-*/
 ./download-model.sh qwen36-35b-a3b       # downloads qwen3_6_35b_a3b.ninfer (~21 GB, resumable)
-./run.sh qwen36-35b-a3b                  # 2 lanes, 262,144 tokens, MTP3 + draft head, vision
+./run.sh qwen36-35b-a3b                  # 3 lanes sharing 262,144 tokens, MTP3 + draft head, vision
 ```
 
-That is the default on Linux because a headless 3090 fits it: two lanes at the native 262,144-token
-maximum with `rk8v4`, MTP3 speculation plus the draft head, and vision in overlay residency, all at
-once. Nothing has to be traded away.
+Both launchers run the native 262,144-token maximum with `rk4v4`, MTP3 speculation plus the draft
+head, and vision in overlay residency, all at once: two lanes on Windows, three on Linux. Three
+lanes were measured to start even beside a desktop (2026-09-24); four fall 48 MB short there, so a
+headless card may take `NINFER_CONCURRENCY=4`.
+
+Lanes share one KV pool: `--kv-capacity` is the pool and `--max-context` the per-request cap,
+and the launchers set both to 262,144. Any one request can use the full native context, but the
+lanes' requests together hold at most 262,144 tokens at a time, so two users can't each keep a
+200K conversation resident. A lane adds only its fixed state, not a second pool.
 
 `NINFER_CONTEXT`, `NINFER_CONCURRENCY`, `NINFER_KV_CAPACITY`, `NINFER_SPEC`, `NINFER_VISION`,
 `NINFER_MODEL`, `NINFER_HOST` and `NINFER_PORT` override it. The launcher binds `127.0.0.1`;
@@ -90,22 +98,16 @@ set `NINFER_HOST=0.0.0.0` to expose it, which is unauthenticated.
 
 ### Which profile
 
-The headroom that makes the full profile fit is the ~1.5 GiB a desktop holds. Headless, the
-runtime reservation has roughly 3.7 GiB to work with against the 2.67 GiB the maximum profile
-asks for. **On a machine running a desktop that same profile does not fit**, and startup says so
-precisely:
+With `rk8v4` the full profile needed the ~1.5 GiB a desktop holds, so Windows ran one user at
+147,456 tokens. `rk4v4` stores the same context in 31% less memory, which is what lets every
+launcher run at the full context:
 
-```
-requested Engine runtime reservation requires 2864526592 bytes,
-but only 2375691264 bytes are available for runtime capacity
-```
-
-| Profile | lanes | context | speculation | vision | decode | runtime |
-|---|---|---|---|---|---|---|
-| **Headless Linux — default** | 2 | 262,144 | MTP3 + draft | overlay | ~240-280 tok/s | 2.67 GiB |
-| Headless Linux, one user | 1 | 262,144 | MTP3 + draft | overlay | ~240-280 tok/s | 2.46 GiB |
-| **Windows, one user** | 1 | 147,456 | MTP3 + draft | overlay | ~240-280 tok/s | 1.44 GiB |
-| Windows, two users | 2 | 65,536 | MTP3 + draft | overlay | ~240-280 tok/s | 1.57 GiB |
+| Profile (`rk4v4`) | lanes | context | speculation | vision | starts beside a desktop |
+|---|---|---|---|---|---|
+| **Headless Linux — default** | 3 | 262,144 | MTP3 + draft | overlay | yes (measured) |
+| **Windows — default** | 2 | 262,144 | MTP3 + draft | overlay | yes (measured) |
+| `NINFER_CONCURRENCY=3` | 3 | 262,144 | MTP3 + draft | overlay | yes, 24.0 of 24.5 GiB used |
+| `NINFER_CONCURRENCY=4` | 4 | 262,144 | MTP3 + draft | overlay | no, 48 MB short; headless should fit |
 
 `--kv-capacity` is the shared pool and `--max-context` is the per-request cap, so a second lane
 does not cost twice the memory unless you also want twice the per-request context.
@@ -117,9 +119,9 @@ format and a context length and tells you whether it fits in 24 GiB, what the la
 could run instead would be, and what the choice costs in decode speed and perplexity. Every
 constant in it is measured on an RTX 3090 against this fork.
 
-If startup refuses, drop a context rung first — 262144 / 196608 / 131072 / 114688 / 98304 / 81920.
-Speculation is the next lever, worth 992 MiB (MTP head 856 MiB, draft head 136 MiB, roughly 130,000
-rk8v4 tokens) at the cost of dropping decode to ~183 tok/s. Drop `--vision` last: in overlay
+If startup refuses, drop a lane or a context rung first — 262144 / 196608 / 131072 / 114688 / 98304
+/ 81920. Speculation is the next lever, worth 992 MiB (MTP head 856 MiB, draft head 136 MiB, roughly
+185,000 rk4v4 tokens) at the cost of dropping decode to ~183 tok/s. Drop `--vision` last: in overlay
 residency it costs no resident capacity, and the `evictable pool window exceeds the evictable tail`
 message some boxes show is a symptom of the reservation already being tight, not a context ceiling.
 
@@ -130,23 +132,25 @@ predictable. Same shape of command:
 
 ```powershell
 .\download-model.bat qwen38-27b          # downloads qwen3_8_27b.ninfer (~19 GB, resumable)
-.\run.bat qwen38-27b                      # one user, 131,072 tokens, DFlash2, cuBLAS prefill, rk8v4, vision
+.\run.bat qwen38-27b                      # one user, 172,032 tokens, DFlash2, cuBLAS prefill, rk4v4, vision
 ```
 
 ```bash
 ./download-model.sh qwen38-27b
-./run.sh qwen38-27b                       # one user, 131,072 tokens, same flags
+./run.sh qwen38-27b                       # one user, 262,144 tokens (headless), same flags
 ```
 
 The launcher's default is the fast profile: `--spec dflash2 --draft-tokens 7 --lm-head-draft
---prefill-cublas --prefill-chunk 4096 --kv-dtype rk8v4 --embedding-q4 --gdn-state-fp16 --vision
---vision-residency overlay`, about 1.7x the previous prefill and 1.39x the decode. It tops out near
-130K of context, because DFlash2's draft weights and its refusal of `--lm-head-q6` cost about 65K
-tokens. For the longest context, still fast, run it with `NINFER_SPEC=mtp` (Windows:
-`set NINFER_SPEC=mtp && run.bat qwen38-27b`; Linux: `NINFER_SPEC=mtp ./run.sh qwen38-27b`), which swaps in `--spec mtp --draft-tokens 3
---lm-head-draft --prefill-cublas --prefill-chunk 2048 --kv-dtype rk8v4 --embedding-q4 --lm-head-q6
---gdn-state-fp16 --vision --vision-residency overlay` and the larger context defaults below. Both
-sets are measured in [performance](docs/performance.md#recommended-configurations-rtx-3090-qwen38-27b).
+--prefill-cublas --prefill-chunk 4096 --kv-dtype rk4v4 --embedding-q4 --gdn-state-fp16 --vision
+--vision-residency overlay`, about 1.7x the previous prefill and 1.39x the decode. Beside a desktop
+it starts at up to 180,224 tokens (`rk8v4`: 131,072), so Windows defaults to 172,032; DFlash2's
+draft weights and its refusal of `--lm-head-q6` are why it stops short of 262,144 there, and a
+headless card gets the ~1.45 GB back that the full context needs. For the full context on any
+card, and a second lane, run it with `NINFER_SPEC=mtp` (Windows: `set NINFER_SPEC=mtp && run.bat qwen38-27b`; Linux:
+`NINFER_SPEC=mtp ./run.sh qwen38-27b`), which swaps in `--spec mtp --draft-tokens 3 --lm-head-draft
+--prefill-cublas --prefill-chunk 2048 --kv-dtype rk4v4 --embedding-q4 --lm-head-q6 --gdn-state-fp16
+--vision --vision-residency overlay` at 262,144 tokens, with two lanes sharing that pool. Both sets are measured in
+[performance](docs/performance.md#recommended-configurations-rtx-3090-qwen38-27b).
 
 The older reference profiles are `run.sh qwen38-27b int8` (one user at 65,536 tokens of INT8, which
 leaves 2.85 GiB of the card unused) and `run.sh qwen38-27b c8` (eight lanes at 8K). Prefer the
@@ -158,13 +162,13 @@ throughput. Every profile's host and port default to `127.0.0.1:8080` and accept
 | Profile | lanes | context | KV | vision | runtime | free (desktop) |
 |---|---|---|---|---|---|---|
 | `int8` profile | 1 | 65,536 | int8 | off | 2.73 GiB | 2.85 GiB |
-| **`tuned`** (default, DFlash2) | 1 | 131,072 | rk8v4 | overlay | not measured here | loads at 130K on a desktop 3090; 150K fails |
-| `NINFER_SPEC=mtp`, Windows | 1 | 163,840 | rk8v4 | overlay | 4.65 GiB | 1.63 GiB |
-| `NINFER_SPEC=mtp`, Linux | 2 | 212,992 | rk8v4 | overlay | 6.15 GiB (est.) | headless only |
-| `NINFER_SPEC=mtp NINFER_CONTEXT=196608` | 1 | 196,608 | rk8v4 | overlay | 5.49 GiB | 798 MiB |
+| **`tuned`** (default, DFlash2), Windows | 1 | 172,032 | rk4v4 | overlay | – | starts up to 180,224 beside a desktop |
+| `tuned` (default, DFlash2), Linux | 1 | 262,144 | rk4v4 | overlay | – | headless extrapolation; steps down if refused |
+| `NINFER_SPEC=mtp` | 2 | 262,144 | rk4v4 | overlay | – | 23.4 of 24.5 GiB used beside a desktop |
 
-The three `mtp` rows were measured before the cuBLAS prefill route, whose workspace (543 MiB at
-chunk 2048) comes off the free figure; the `mtp` profile's `--lm-head-q6` returns 341 MiB. The
+The `rk4v4` rows were measured by starting `ninfer-serve` with each launcher's flags on a desktop
+RTX 3090 (2026-09-24); earlier `rk8v4` figures are in
+[launcher profiles](docs/maintainer/launcher-profiles.md). The
 DFlash2 profile takes one lane because its advantage is largest at one stream (+38.6% decode at C1,
 +31.6% at C2) and the draft weights use the headroom a second lane would need.
 
@@ -252,8 +256,8 @@ The Linux guide covers the GPU check, the native Ubuntu build, model mounts and 
 
 | Command | Best for |
 |---|---|
-| `run.bat qwen36-35b-a3b` | **Recommended.** Qwen3.6-35B-A3B, one user, 147K context, rk8v4, vision, tuned cache |
-| `run.bat qwen38-27b` | **Recommended for 27B.** Qwen3.8-27B, one user, 131K context, DFlash2, cuBLAS prefill, rk8v4, tuned cache; `NINFER_SPEC=mtp` for 164K and longer |
+| `run.bat qwen36-35b-a3b` | **Recommended.** Qwen3.6-35B-A3B, two lanes sharing a 262K pool (any one request up to 262K), rk4v4, vision, tuned cache |
+| `run.bat qwen38-27b` | **Recommended for 27B.** Qwen3.8-27B, one user, 172K context, DFlash2, cuBLAS prefill, rk4v4, tuned cache; `NINFER_SPEC=mtp` for the full 262K and a second lane |
 | `run.bat qwen38-27b int8` | Qwen3.8-27B, one interactive user, INT8 quality default, 64K context |
 | `run.bat qwen38-27b c8` | Qwen3.8-27B, multiple users or agents, highest aggregate throughput, 8K context |
 
@@ -441,9 +445,56 @@ output. Upstream's `kv_cache_append` contract stores values from the represented
 directly, and measurement showed that is sufficient, so this port keeps it: there is no
 inverse-rotation kernel and no extra pass over the output.
 
+### Lloyd-Max 4-bit keys (`rk4v4`)
+
+`rk4v4` keeps `rk8v4`'s value plane and halves its keys: each rotated key dimension is a 4-bit
+index into the 16-level Lloyd-Max quantizer for a Gaussian, with one FP16 scale per 64 dimensions.
+That is the TurboQuant idea (rotate, then snap each coordinate to a fixed non-uniform codebook)
+without its 1-bit residual stage, which measured no better. It is **31% smaller than `rk8v4`**
+(17,920 B/token on the 27B against 26,112) and 3% larger than `nvfp4`, which it beats on every
+other axis.
+
+Each codebook level is stored as a fixed INT8 code, so an expanded key is an ordinary rotated INT8
+key and attention keeps `rk8v4`'s INT8 tensor-core QK path unchanged. Both attention kernels load
+the packed keys into registers ahead of use and expand them with byte permutes straight into the
+existing INT8 key tile, which adds no shared memory; that is what keeps it off the slow path the
+`nvfp4` and `k8v4` kernels take (see [TODO.md](TODO.md), "KV decode falloff").
+
+Measured together on one RTX 3090 (315 W cap), Qwen3.8-27B groupwise-int, 2026-09-23, this build:
+
+| KV profile | Bytes/token | Perplexity | vs `int8` | Decode 4K / 16K / 32K | Prefill at 32K |
+|---|---:|---:|---:|---|---:|
+| `int8` | 33,792 | 4.343155 | — | 44.6 / 43.1 / 41.5 tok/s | 1,363 tok/s |
+| `rk8v4` | 26,112 | 4.347943 | +0.110% | 46.1 / 44.5 / 42.4 tok/s | 1,377 tok/s |
+| **`rk4v4`** | **17,920** | 4.352432 | +0.214% | 45.1 / 43.7 / 41.9 tok/s | 1,361 tok/s |
+| `nvfp4` | 18,432 | 4.353589 | +0.240% | 43.8 / 40.7 / 36.3 tok/s | 895 tok/s |
+
+Perplexity is `ninfer-perplexity --quick` on `ninfer-ppl-1m-v1` (4096/2048). Decode is
+`ninfer_bench -pg P,128`, no speculation, the mean of two interleaved runs for `rk8v4` and `rk4v4`;
+the card slows about 0.4 tok/s per run as it heats, and against that drift `rk4v4` sits within ±1% of
+`rk8v4` at every depth. `int8` and `nvfp4` are single runs taken last, so they read slightly low.
+Qwen3.6-35B-A3B, same protocol: `rk4v4` decodes at 99.5-99.9% of `rk8v4` at 4K-32K (172.5 against
+173.4 tok/s at 32K) and 19% faster than `nvfp4` (144.9). With MTP3 and the draft head on the 27B,
+`rk4v4` is within about 0.5% of `rk8v4` at 32K; on four real prompts (greedy, 400 tokens) its draft
+acceptance was 65.8% against `rk8v4`'s 67.2% and `int8`'s 63.2%. Across the attention op
+benchmark's 18 decode/verify shapes it is at a geometric mean of 1.001x `rk8v4`'s time and 2-3x
+faster than `nvfp4` at 32K.
+
+**Context, measured with `--kv-capacity auto` and the standard 1 GiB headroom** on this box with a
+desktop running (1.8 GiB in use):
+
+| Qwen3.8-27B, one request | `rk8v4` | `rk4v4` |
+|---|---:|---:|
+| no speculation | 228,032 tokens | **262,144** (native maximum; 1.75 GiB still free) |
+| MTP3 + draft head | 182,336 tokens | **262,144** (native maximum) |
+| KV payload at 131,072 tokens | 3.19 GiB | **2.19 GiB** |
+
+For a shared pool serving several lanes, the same memory holds 1.46x as many `rk4v4` tokens as
+`rk8v4` tokens.
+
 ### Choosing a KV format
 
-All six SM86 KV formats, measured on Qwen3.8-27B. Size and perplexity are what most people weigh;
+All seven SM86 KV formats, measured on Qwen3.8-27B. Size and perplexity are what most people weigh;
 the decode column is the one that surprises, because the smallest formats are not the fastest.
 
 | KV profile | Bytes/token | KV at 2,048 tokens | Perplexity | vs `bf16` | Decode at 32K depth |
@@ -454,6 +505,10 @@ the decode column is the one that surprises, because the smallest formats are no
 | `rk8v4` | 26,112 | 51.00 MiB | 4.346413 | +0.0897% | 33.17 tok/s |
 | `k8v4` | 25,728 | 50.25 MiB | 4.347258 | +0.1092% | 28.90 tok/s |
 | `nvfp4` | **18,432** | **36.00 MiB** | 4.352201 | +0.2229% | 29.86 tok/s |
+| `rk4v4` | 17,920 | 35.00 MiB | see [above](#lloyd-max-4-bit-keys-rk4v4) | +0.214% vs `int8` | ≈ `rk8v4` |
+
+The `rk4v4` row was measured in a later session on a newer build, so it is stated against `int8`
+and `rk8v4` from that session rather than mixed into these columns.
 
 Perplexity is `ninfer-perplexity` on the fixed `ninfer-ppl-1m-v1` corpus, `--quick`, context/stride
 4096/2048, 261,167 scored tokens — the same corpus and window for every row. Decode is 128 timed
@@ -482,6 +537,10 @@ Three of these six are worth using:
   full 262,144 native context: `rk8v4` gets to about 231,000 and INT8 to about 179,000 there.
   Headless, `rk8v4` clears 262,144 as well. It costs about 15% of decode speed at 32K and +0.22%
   perplexity.
+- **`rk4v4`** now takes `nvfp4`'s place for context: 31% smaller than `rk8v4` and within 3% of
+  `nvfp4`'s size, with better perplexity than `nvfp4` and `rk8v4`'s decode and prefill speed. It
+  costs +0.10% perplexity over `rk8v4`. Use it when context or concurrent lanes are what you are
+  short of.
 
 `fp8` and `k8v4` are still hard to recommend, but the reason has changed and it is worth stating
 precisely rather than as "no niche".
@@ -739,8 +798,8 @@ a 24 GB card and the server can reuse fast CUDA Graphs instead of rebuilding wor
 - Tool calls are returned to the client but are not executed by NInfer.
 - NVFP4 A4, FP8 A8, and TMA kernels require Blackwell and are unavailable on SM86. FP8 and NVFP4
   weights are admitted through their A16 dequantizing routes.
-- The paged runtime exposes six KV formats on SM86 — `bf16`, `int8` group-64, row-scaled FP8 E4M3
-  `fp8`, RotorQuant `rk8v4`, `k8v4` and `nvfp4`. INT8 remains the quality default and the rest are
+- The paged runtime exposes seven KV formats on SM86 — `bf16`, `int8` group-64, row-scaled FP8 E4M3
+  `fp8`, RotorQuant `rk8v4`, Lloyd-Max `rk4v4`, `k8v4` and `nvfp4`. INT8 remains the quality default and the rest are
   opt-in; [`docs/config-calculator.html`](docs/config-calculator.html) has the measured size,
   speed and perplexity of each. Note that this is KV storage only: NVFP4 A4 and FP8 A8 *weight and
   activation* kernels still require Blackwell and are unavailable here.

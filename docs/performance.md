@@ -446,7 +446,7 @@ the choice between it and MTP3 is a speed/context trade, not a free upgrade.
 
 ### Choosing a KV format (RTX 3090, Qwen3.8-27B)
 
-All six SM86 KV formats, measured on Qwen3.8-27B.
+All seven SM86 KV formats, measured on Qwen3.8-27B.
 
 | KV profile | Bytes/token | KV at 2,048 tokens | Perplexity | vs `bf16` | Decode at 32K depth |
 |---|---:|---:|---:|---:|---:|
@@ -456,10 +456,15 @@ All six SM86 KV formats, measured on Qwen3.8-27B.
 | `rk8v4` | 26,112 | 51.00 MiB | 4.346811 | +0.0826% | 33.54 tok/s |
 | `k8v4` | 25,728 | 50.25 MiB | 4.347596 | +0.1006% | 28.61 tok/s |
 | `nvfp4` | **18,432** | **36.00 MiB** | 4.358924 | +0.3615% | 29.62 tok/s |
+| `rk4v4` | 17,920 | 35.00 MiB | 4.352432 | +0.214% vs `int8` | ≈ `rk8v4` |
 
 Perplexity is `ninfer-perplexity` on the fixed `ninfer-ppl-1m-v1` corpus, `--quick`, context/stride
 4096/2048, 261,167 scored tokens. Decode is 128 timed steps on top of a 32,768-token prefill, no
 speculation; attention re-reads the whole cache each step, so a format's cost only shows at depth.
+The `rk4v4` row comes from a later session and build (2026-09-23), where `int8` measured 4.343155,
+`rk8v4` 4.347943 and `nvfp4` 4.353589, and `rk4v4` decoded within ±1% of `rk8v4` at 4K-32K; its
+figures are stated against those rather than this table's. See the README's
+[`rk4v4` section](../README.md#lloyd-max-4-bit-keys-rk4v4).
 See [the README](../README.md#choosing-a-kv-format) for the fuller writeup and recommendations.
 
 ## Published coverage

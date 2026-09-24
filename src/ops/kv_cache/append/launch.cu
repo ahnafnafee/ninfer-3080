@@ -52,20 +52,20 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
         CUDA_CHECK(cudaGetLastError());
         return;
     }
-    if (cache.storage == KvCacheStorage::Int8Group64 ||
-        cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
+    if (kv_cache_is_int8_family(cache.storage)) {
         Tensor& cache_k_scale = cache.k_scale_pages;
         Tensor& cache_v_scale = cache.v_scale_pages;
-        // A U8 value plane is the rk8v4 packed signed int4 coding; I8 is the plain INT8 one. The
-        // key path is identical either way, so only the value half of the kernel changes.
+        // A U8 value plane is the packed signed int4 coding (rk8v4, rk4v4); a U8 key plane is the
+        // rk4v4 Lloyd-Max coding. Otherwise the plane is plain INT8.
         const bool packed_values = cache.v_pages.dtype == DType::U8;
-        if (tokens >= 128 && Geometry::KVHeads == 2) {
-            constexpr int TokensPerTile = 8;
-            const int max_tiles         = div_up(tokens + TokensPerTile - 1, TokensPerTile);
-            const dim3 fill_grid(static_cast<unsigned>(max_tiles),
-                                 static_cast<unsigned>(Geometry::KVHeads));
-            if (packed_values) {
-                kv_cache_append_full_i8_page_kernel<Geometry, Metadata, true>
+        const bool packed_keys   = cache.k_pages.dtype == DType::U8;
+        const auto issue         = [&]<bool PackedValues, bool PackedKeys>() {
+            if (tokens >= 128 && Geometry::KVHeads == 2) {
+                constexpr int TokensPerTile = 8;
+                const int max_tiles         = div_up(tokens + TokensPerTile - 1, TokensPerTile);
+                const dim3 fill_grid(static_cast<unsigned>(max_tiles),
+                                     static_cast<unsigned>(Geometry::KVHeads));
+                kv_cache_append_full_i8_page_kernel<Geometry, Metadata, PackedValues, PackedKeys>
                     <<<fill_grid, kBlock, 0, stream>>>(
                         static_cast<const __nv_bfloat16*>(k.data),
                         static_cast<const __nv_bfloat16*>(v.data),
@@ -75,7 +75,12 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
                         static_cast<__half*>(cache_k_scale.data),
                         static_cast<__half*>(cache_v_scale.data), tokens);
             } else {
-                kv_cache_append_full_i8_page_kernel<Geometry, Metadata, false>
+                constexpr int FillWarps = kBlock / 32;
+                const std::int64_t fill_units =
+                    static_cast<std::int64_t>(tokens) * Geometry::KVHeads;
+                const int fill_grid =
+                    static_cast<int>(div_up(fill_units, static_cast<std::int64_t>(FillWarps)));
+                kv_cache_append_full_i8_kernel<Geometry, Metadata, PackedValues, PackedKeys>
                     <<<fill_grid, kBlock, 0, stream>>>(
                         static_cast<const __nv_bfloat16*>(k.data),
                         static_cast<const __nv_bfloat16*>(v.data),
@@ -85,32 +90,13 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
                         static_cast<__half*>(cache_k_scale.data),
                         static_cast<__half*>(cache_v_scale.data), tokens);
             }
+        };
+        if (packed_keys) {
+            issue.template operator()<true, true>();
+        } else if (packed_values) {
+            issue.template operator()<true, false>();
         } else {
-            constexpr int FillWarps       = kBlock / 32;
-            const std::int64_t fill_units = static_cast<std::int64_t>(tokens) * Geometry::KVHeads;
-            const int fill_grid =
-                static_cast<int>(div_up(fill_units, static_cast<std::int64_t>(FillWarps)));
-            if (packed_values) {
-                kv_cache_append_full_i8_kernel<Geometry, Metadata, true>
-                    <<<fill_grid, kBlock, 0, stream>>>(
-                        static_cast<const __nv_bfloat16*>(k.data),
-                        static_cast<const __nv_bfloat16*>(v.data),
-                        static_cast<const std::int32_t*>(positions.data), metadata,
-                        static_cast<std::int8_t*>(cache_k.data),
-                        static_cast<std::int8_t*>(cache_v.data),
-                        static_cast<__half*>(cache_k_scale.data),
-                        static_cast<__half*>(cache_v_scale.data), tokens);
-            } else {
-                kv_cache_append_full_i8_kernel<Geometry, Metadata, false>
-                    <<<fill_grid, kBlock, 0, stream>>>(
-                        static_cast<const __nv_bfloat16*>(k.data),
-                        static_cast<const __nv_bfloat16*>(v.data),
-                        static_cast<const std::int32_t*>(positions.data), metadata,
-                        static_cast<std::int8_t*>(cache_k.data),
-                        static_cast<std::int8_t*>(cache_v.data),
-                        static_cast<__half*>(cache_k_scale.data),
-                        static_cast<__half*>(cache_v_scale.data), tokens);
-            }
+            issue.template operator()<false, false>();
         }
         CUDA_CHECK(cudaGetLastError());
         return;

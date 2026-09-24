@@ -138,7 +138,12 @@ static_assert(kCausalPromptI8SmemBytes == 93184);
 // PackedValues selects the rk8v4 half-width value plane. Packed bytes are staged into the leading
 // half of the same V slot the INT8 coding uses, so the shared-memory footprint and therefore the
 // occupancy of both instantiations are identical; only the global traffic halves.
-template <typename Geometry, typename Metadata, bool PackedValues = false>
+//
+// PackedKeys selects the rk4v4 key plane (4-bit Lloyd-Max indices). As in the small-T kernel, the
+// next tile's packed keys are loaded into registers where the INT8 path issues its cp.async, stay
+// in flight across the PV MMAs, and are expanded into the unchanged INT8 K tile before the tile
+// barrier.
+template <typename Geometry, typename Metadata, bool PackedValues = false, bool PackedKeys = false>
 __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8_kernel(
     const __nv_bfloat16* __restrict__ q, const std::int8_t* __restrict__ cache_k,
     const std::int8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
@@ -233,6 +238,26 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
     }
     __syncthreads();
 
+    constexpr int KChunks          = Bc * (D / 16);
+    constexpr int KChunksPerThread = (KChunks + kCausalPromptI8Threads - 1) / kCausalPromptI8Threads;
+    uint2 k_packed[PackedKeys ? KChunksPerThread : 1];
+    // Chunks past the causal limit keep their placeholder's expansion: their scales are staged as
+    // zero and their scores masked, exactly as the zero-filled INT8 chunks are.
+    auto commit_k_tile = [&]() {
+        if constexpr (PackedKeys) {
+#pragma unroll
+            for (int i = 0; i < KChunksPerThread; ++i) {
+                const int chunk = tid + i * kCausalPromptI8Threads;
+                if (chunk < KChunks) {
+                    const int key_l = chunk / (D / 16);
+                    const int dc    = chunk - key_l * (D / 16);
+                    store_vec(&k_i8[(key_l * DB16 + causal_prompt_swz(key_l, dc * 8)) * 2],
+                              kv_cache_lloyd4_expand16(k_packed[i]));
+                }
+            }
+        }
+    };
+
     auto issue_kv_tile = [&](int tile_k0) {
         const int physical_page = block_table[tile_k0 >> kPagedKVPageShift];
         for (int key_l = tid; key_l < Bc; key_l += kCausalPromptI8Threads) {
@@ -258,6 +283,34 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
                     store_vec(vd, make_int2(0, 0));
                 }
             }
+        }
+        if constexpr (PackedKeys) {
+            static_assert(PackedValues, "rk4v4 pairs packed keys with packed values");
+#pragma unroll
+            for (int i = 0; i < KChunksPerThread; ++i) {
+                const int chunk = tid + i * kCausalPromptI8Threads;
+                if (chunk < KChunks) {
+                    const int key_l = chunk / (D / 16);
+                    const int dc    = chunk - key_l * (D / 16);
+                    const int d     = dc * 16;
+                    const int key   = tile_k0 + key_l;
+                    k_packed[i]     = make_uint2(0u, 0u);
+                    if (key <= max_query_abs) {
+                        // Both planes are 128 bytes per row, so one offset addresses both.
+                        const std::int64_t off = kv_cache_int4_value_code_index<Geometry>(
+                            physical_page, kv_head, d >> 1, key_l);
+                        k_packed[i] = *reinterpret_cast<const uint2*>(
+                            reinterpret_cast<const std::uint8_t*>(cache_k) + off);
+                        ninfer::ops::cp_async<8>(
+                            &v_i8[key_l * D + (d >> 1)],
+                            reinterpret_cast<const std::uint8_t*>(cache_v) + off);
+                    } else {
+                        store_vec(&v_i8[key_l * D + (d >> 1)], make_int2(0, 0));
+                    }
+                }
+            }
+            ninfer::ops::cp_commit();
+            return;
         }
 #pragma unroll 1
         for (int chunk = tid; chunk < Bc * (D / 16); chunk += kCausalPromptI8Threads) {
@@ -294,6 +347,7 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
     };
 
     issue_kv_tile(0);
+    commit_k_tile();
     ninfer::ops::cp_wait<0>();
     __syncthreads();
 
@@ -554,7 +608,10 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
 #endif
             }
         }
-        if (has_next) { ninfer::ops::cp_wait<0>(); }
+        if (has_next) {
+            commit_k_tile();
+            ninfer::ops::cp_wait<0>();
+        }
         __syncthreads();
     }
 

@@ -133,16 +133,16 @@ recorded="$(record dflash2 -- qwen38-27b)"
 expect_flags '27B default' "$recorded" \
   '--spec dflash2 --draft-tokens 7 --lm-head-draft' \
   '--prefill-cublas --prefill-chunk 4096' \
-  '--kv-dtype rk8v4' '--embedding-q4' '--gdn-state-fp16' \
-  '--vision --vision-residency overlay' '--max-context 131072' '--max-concurrency 1'
+  '--kv-dtype rk4v4' '--embedding-q4' '--gdn-state-fp16' \
+  '--vision --vision-residency overlay' '--max-context 262144' '--max-concurrency 1'
 refuse_flag '27B default' "$recorded" '--lm-head-q6'
 
 recorded="$(record mtp NINFER_SPEC=mtp -- qwen38-27b tuned)"
 expect_flags '27B NINFER_SPEC=mtp' "$recorded" \
   '--spec mtp --draft-tokens 3 --lm-head-draft' \
   '--prefill-cublas --prefill-chunk 2048' \
-  '--kv-dtype rk8v4' '--embedding-q4' '--lm-head-q6' '--gdn-state-fp16' \
-  '--vision --vision-residency overlay' '--max-context 212992' '--max-concurrency 2'
+  '--kv-dtype rk4v4' '--embedding-q4' '--lm-head-q6' '--gdn-state-fp16' \
+  '--vision --vision-residency overlay' '--max-context 262144' '--max-concurrency 2'
 
 recorded="$(record none NINFER_SPEC=none -- qwen38-27b)"
 expect_flags '27B NINFER_SPEC=none' "$recorded" '--prefill-cublas --prefill-chunk 2048' '--embedding-q4'
@@ -183,8 +183,8 @@ refuse_flag '27B c8' "$recorded" '--auto-prefix-grid'
 recorded="$(record 35b -- qwen36-35b-a3b)"
 expect_flags '35B default' "$recorded" \
   '--spec mtp --draft-tokens 3 --lm-head-draft --mtp-experts-q4' \
-  '--kv-dtype rk8v4' '--gdn-state-fp16' '--prefill-chunk 512' \
-  '--vision --vision-residency overlay' '--max-context 262144' '--max-concurrency 2' '--auto-prefix-grid'
+  '--kv-dtype rk4v4' '--gdn-state-fp16' '--prefill-chunk 512' \
+  '--vision --vision-residency overlay' '--max-context 262144' '--max-concurrency 3' '--auto-prefix-grid'
 refuse_flag '35B default' "$recorded" '--prefill-cublas'
 refuse_flag '35B default' "$recorded" '--embedding-q4'
 recorded="$(record 35bnone NINFER_SPEC=none -- qwen36-35b-a3b)"
@@ -232,26 +232,26 @@ expect_eq() { # expect_eq <label> <got> <want>
 }
 
 attempts 100000
-expect_eq 'contexts stepped' "$(field --max-context)" '131072 114688 98304 '
-expect_eq 'chunk drops to 2048' "$(field --prefill-chunk)" '4096 2048 2048 '
-expect_eq 'slots halve' "$(field --host-state-slots)" '32 16 16 '
+expect_eq 'contexts stepped' "$(field --max-context)" '262144 229376 196608 163840 131072 98304 '
+expect_eq 'chunk drops to 2048' "$(field --prefill-chunk)" '4096 4096 2048 2048 2048 2048 '
+expect_eq 'slots halve' "$(field --host-state-slots)" '32 32 16 16 8 8 '
 expect_eq 'it started, so it exits 0' "$ladder_status" '0'
 
 attempts 1000
-expect_eq 'never fits: six attempts, then stops' "$(field --max-context)" '131072 114688 98304 81920 65536 49152 '
+expect_eq 'never fits: six attempts, then stops' "$(field --max-context)" '262144 229376 196608 163840 131072 98304 '
 expect_eq 'never fits: reports the failure' "$ladder_status" '1'
 
 # Values the caller chose are theirs, and a switch turns the ladder off: one attempt, loud failure.
 attempts 1000 NINFER_CONTEXT=131072
 expect_eq 'explicit context is not second-guessed' "$(field --max-context)" '131072 '
 attempts 1000 NINFER_HOST_STATE_SLOTS=32
-expect_eq 'explicit slots are not second-guessed' "$(field --max-context)" '131072 '
+expect_eq 'explicit slots are not second-guessed' "$(field --max-context)" '262144 '
 attempts 1000 NINFER_FALLBACK=off
-expect_eq 'NINFER_FALLBACK=off' "$(field --max-context)" '131072 '
+expect_eq 'NINFER_FALLBACK=off' "$(field --max-context)" '262144 '
 
 # Only a memory refusal steps down. Any other startup failure is not something a smaller context fixes.
 attempts 1000 NINFER_TEST_FAILURE='FATAL server failed during startup | artifact is corrupt'
-expect_eq 'other failures do not retry' "$(field --max-context)" '131072 '
+expect_eq 'other failures do not retry' "$(field --max-context)" '262144 '
 
 # The reference profiles are fixed shapes and never step down.
 ladder_log="$tmp/ladder.fixed.log"; : > "$ladder_log"
