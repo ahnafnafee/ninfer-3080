@@ -909,9 +909,10 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         break;
     }
-    if (device.compute_capability() != 86 && device.compute_capability() != 89) {
+    if (device.compute_capability() != 80 && device.compute_capability() != 86 &&
+        device.compute_capability() != 89) {
         throw std::invalid_argument(
-            "Qwen3.5 family runtime requires compute capability 8.6 or 8.9");
+            "Qwen3.5 family runtime requires compute capability 8.0, 8.6 or 8.9");
     }
 }
 

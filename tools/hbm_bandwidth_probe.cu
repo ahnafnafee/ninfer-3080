@@ -324,8 +324,11 @@ int main(int argc, char** argv) {
 
     const bool derived_peak = options.peak_gbps <= 0.0;
     if (derived_peak) {
-        // memoryClockRate is the single-data-rate clock in kHz; GDDR transfers on both edges.
-        options.peak_gbps = 2.0 * static_cast<double>(prop.memoryClockRate) * 1.0e3 *
+        // The memory clock is the single-data-rate clock in kHz; DRAM transfers on both edges.
+        // Queried as an attribute because cudaDeviceProp dropped memoryClockRate in CUDA 13.
+        int memory_clock_khz = 0;
+        CUDA_CHECK(cudaDeviceGetAttribute(&memory_clock_khz, cudaDevAttrMemoryClockRate, device));
+        options.peak_gbps = 2.0 * static_cast<double>(memory_clock_khz) * 1.0e3 *
                             (static_cast<double>(prop.memoryBusWidth) / 8.0) / 1.0e9;
     }
 
