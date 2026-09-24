@@ -575,6 +575,7 @@ public:
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
+    const ops::RopeYarn rope_yarn;
 
     // A checkpoint captured under one execution profile (backend, proposal head, KV coding) must
     // never be replayed under another. Capture and reuse-lookup derive the tag from this one place:

@@ -144,7 +144,7 @@ std::string usage_text(const char* argv0) {
            "       [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
            "       [--lookup-ngram N]\n"
            "       [--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4]\n"
-           "       [--gdn-state-fp16] [--mlp-a8-decode] [--no-prefill-a8]\n"
+           "       [--gdn-state-fp16] [--rope-yarn] [--mlp-a8-decode] [--no-prefill-a8]\n"
            "       [--prefill-cublas [--no-prefill-cublas-projections]]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -250,6 +250,8 @@ Options parse_options(int argc, char** argv) {
             options.mtp_experts_q4 = true;
         } else if (arg == "--gdn-state-fp16") {
             options.gdn_state_fp16 = true;
+        } else if (arg == "--rope-yarn") {
+            options.rope_yarn = true;
         } else if (arg == "--mlp-a8-decode") {
             options.mlp_a8_decode = true;
         } else if (arg == "--no-prefill-a8") {

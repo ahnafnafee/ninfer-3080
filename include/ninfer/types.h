@@ -202,6 +202,10 @@ struct EngineOptions {
     // device's free memory.
     std::vector<std::uint32_t> stage_layers;
     std::uint32_t max_context          = 2048; // Logical ceiling of one request or score window.
+    // Past the model's native window (max_position_embeddings), up to four times it: positions run
+    // unscaled RoPE, or with rope_yarn the whole window takes Qwen's YaRN at factor
+    // max_context / native (ops::RopeYarn).
+    bool rope_yarn = false;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(2048);
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;

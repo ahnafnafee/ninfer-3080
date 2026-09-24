@@ -83,6 +83,33 @@ __device__ __forceinline__ void apply_rope_head(__nv_bfloat16* data, std::int64_
         __floats2bfloat162_rn(second.x * c0 + first.x * s0, second.y * c1 + first.y * s1);
 }
 
+// Rotates every Q and K head of one token with the coefficients the CTA staged in shared memory.
+template <int HeadDim, int Half, int QHeads, int KHeads>
+__device__ __forceinline__ void
+apply_rope_token(__nv_bfloat16* q, __nv_bfloat16* k, int token, std::int64_t q_token_stride,
+                 std::int64_t k_token_stride, const float* cos_cache, const float* sin_cache) {
+    const int lane        = static_cast<int>(threadIdx.x) & 31;
+    const int warp        = static_cast<int>(threadIdx.x) >> 5;
+    const int block_warps = static_cast<int>(blockDim.x) >> 5;
+    float c0 = 0.0F, c1 = 0.0F, s0 = 0.0F, s1 = 0.0F;
+    if (lane < Half / 2) {
+        const int pair = lane * 2;
+        c0             = cos_cache[pair];
+        c1             = cos_cache[pair + 1];
+        s0             = sin_cache[pair];
+        s1             = sin_cache[pair + 1];
+    }
+    for (int combined_head = warp; combined_head < QHeads + KHeads; combined_head += block_warps) {
+        if (combined_head < QHeads) {
+            apply_rope_head<HeadDim, Half>(q, q_token_stride, combined_head, token, lane, c0, c1,
+                                           s0, s1);
+        } else {
+            apply_rope_head<HeadDim, Half>(k, k_token_stride, combined_head - QHeads, token, lane,
+                                           c0, c1, s0, s1);
+        }
+    }
+}
+
 template <RopeKernelMode Mode, int QHeads, int KHeads>
 __global__ void rope_fixed_kernel(const std::int32_t* positions, __nv_bfloat16* q, __nv_bfloat16* k,
                                   std::int32_t tokens, std::int64_t q_token_stride,
@@ -103,27 +130,43 @@ __global__ void rope_fixed_kernel(const std::int32_t* positions, __nv_bfloat16* 
         fixed_sincos<Mode>(positions, tokens, token, pair, &sin_cache[pair], &cos_cache[pair]);
     }
     __syncthreads();
+    apply_rope_token<kHeadDim, kHalf, QHeads, KHeads>(q, k, token, q_token_stride, k_token_stride,
+                                                      cos_cache, sin_cache);
+}
 
-    const int lane        = static_cast<int>(threadIdx.x) & 31;
-    const int warp        = static_cast<int>(threadIdx.x) >> 5;
-    const int block_warps = static_cast<int>(blockDim.x) >> 5;
-    float c0 = 0.0F, c1 = 0.0F, s0 = 0.0F, s1 = 0.0F;
-    if (lane < kHalf / 2) {
-        const int pair = lane * 2;
-        c0             = cos_cache[pair];
-        c1             = cos_cache[pair + 1];
-        s0             = sin_cache[pair];
-        s1             = sin_cache[pair + 1];
+// The D256/R64 Text table under YaRN (RopeYarn in include/ninfer/ops/rope.h): the host supplies
+// each pair's inverse frequency and the attention factor that scales cos and sin.
+struct RopeYarnKernelTable {
+    float inverse_frequency[32];
+    float attention_factor;
+};
+
+template <int QHeads, int KHeads, bool Mrope>
+__global__ void rope_yarn_kernel(const std::int32_t* positions, __nv_bfloat16* q, __nv_bfloat16* k,
+                                 std::int32_t tokens, std::int64_t q_token_stride,
+                                 std::int64_t k_token_stride, const RopeYarnKernelTable table) {
+    constexpr int kHeadDim = 256;
+    constexpr int kHalf    = 32;
+    const int token        = static_cast<int>(blockIdx.x);
+    if (token >= tokens) { return; }
+
+    __shared__ float cos_cache[kHalf];
+    __shared__ float sin_cache[kHalf];
+    if (threadIdx.x < kHalf) {
+        const int pair = static_cast<int>(threadIdx.x);
+        const int axis = Mrope ? pair % 3 : 0;
+        const float angle =
+            static_cast<float>(positions[static_cast<std::int64_t>(axis) * tokens + token]) *
+            table.inverse_frequency[pair];
+        float sine;
+        float cosine;
+        sincosf(angle, &sine, &cosine);
+        sin_cache[pair] = sine * table.attention_factor;
+        cos_cache[pair] = cosine * table.attention_factor;
     }
-    for (int combined_head = warp; combined_head < QHeads + KHeads; combined_head += block_warps) {
-        if (combined_head < QHeads) {
-            apply_rope_head<kHeadDim, kHalf>(q, q_token_stride, combined_head, token, lane, c0, c1,
-                                             s0, s1);
-        } else {
-            apply_rope_head<kHeadDim, kHalf>(k, k_token_stride, combined_head - QHeads, token, lane,
-                                             c0, c1, s0, s1);
-        }
-    }
+    __syncthreads();
+    apply_rope_token<kHeadDim, kHalf, QHeads, KHeads>(q, k, token, q_token_stride, k_token_stride,
+                                                      cos_cache, sin_cache);
 }
 
 template <RopeKernelMode Mode, int QHeads, int KHeads, int HeadsPerBlock>

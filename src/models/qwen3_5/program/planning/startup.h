@@ -10,6 +10,7 @@
 #include "models/qwen3_5/program/round_buffers.h"
 #include "models/qwen3_5/state/state_image.h"
 #include "models/load_options.h"
+#include "ninfer/ops/rope.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -95,6 +96,7 @@ struct SequencePlanningInputs {
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
+    ops::RopeYarn rope_yarn;
     models::LoadOptions features;
     bool use_cuda_graph = true;
     bool causal_scoring = false;
@@ -118,6 +120,7 @@ struct SequencePlanImpl {
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
+    ops::RopeYarn rope_yarn;
     models::LoadOptions features;
     bool use_cuda_graph = true;
     bool causal_scoring = false;

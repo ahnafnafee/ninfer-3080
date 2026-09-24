@@ -707,6 +707,7 @@ std::string format_server_start_json(
              {"embedding_q6", engine_options.embedding_q6},
              {"mtp_experts_q4", engine_options.mtp_experts_q4},
              {"gdn_state_fp16", engine_options.gdn_state_fp16},
+             {"rope_yarn", engine_options.rope_yarn},
              {"mlp_a8_decode", engine_options.mlp_a8_decode},
              {"prefill_a8", engine_options.prefill_a8},
              {"prefix_reuse", options.allow_prefix_reuse},

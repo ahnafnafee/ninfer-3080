@@ -42,6 +42,7 @@ struct Options {
     bool embedding_q6   = false;
     bool mtp_experts_q4 = false;
     bool gdn_state_fp16 = false;
+    bool rope_yarn      = false;
     bool mlp_a8_decode  = false;
     bool prefill_a8     = true;
     bool prefill_cublas = false;

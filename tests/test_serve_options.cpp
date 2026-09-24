@@ -119,6 +119,8 @@ int main() {
                       "--kv-dtype rk4v4-e8 did not select rotated K4/V4 E8 storage");
     failures += check(kv_help.find("rk4v4-e8") != std::string::npos,
                       "serve help omits --kv-dtype rk4v4-e8");
+    const ServeOptions yarn = parse({"ninfer-serve", "model.ninfer", "--rope-yarn"});
+    failures += check(yarn.rope_yarn && !defaults.rope_yarn, "--rope-yarn did not select YaRN");
 
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});

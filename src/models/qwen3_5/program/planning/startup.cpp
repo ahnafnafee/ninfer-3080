@@ -837,12 +837,17 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         throw std::invalid_argument(
             "loaded components do not match the requested execution options");
     }
+    // Past the native window positions run unscaled RoPE or YaRN, to four times the window: the
+    // extension Qwen documents for these models (1,048,576 tokens on a 262,144-token window).
+    constexpr std::uint64_t kPositionExtension = 4;
     if (parameters.draft &&
-        options.max_context > parameters.model.config().draft->max_position_embeddings) {
+        options.max_context >
+            kPositionExtension * parameters.model.config().draft->max_position_embeddings) {
         throw std::invalid_argument("max_context exceeds the selected draft position capacity");
     }
     if (options.max_context == 0 ||
-        options.max_context > parameters.model.config().text.max_position_embeddings) {
+        options.max_context >
+            kPositionExtension * parameters.model.config().text.max_position_embeddings) {
         throw std::invalid_argument("max_context exceeds the configured position capacity");
     }
     if (options.prefill_chunk == 0 || options.prefill_chunk % kPrefillChunkAlignment != 0) {
@@ -950,6 +955,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->lookup_ngram        = inputs.lookup_ngram;
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
+    impl->rope_yarn           = inputs.rope_yarn;
     impl->features            = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
     impl->causal_scoring      = inputs.causal_scoring;
@@ -1044,6 +1050,13 @@ std::uint32_t vision_item_token_bound(std::uint32_t capacity, const models::Load
         std::min<std::uint64_t>({capacity, kMaximumVisionItemTokens, requested}));
 }
 
+ops::RopeYarn planned_rope_yarn(const execution::Parameters& parameters,
+                                const EngineOptions& options) {
+    const std::uint32_t native = parameters.model.config().text.max_position_embeddings;
+    if (!options.rope_yarn || options.max_context <= native) { return {}; }
+    return {static_cast<float>(options.max_context) / static_cast<float>(native), native};
+}
+
 std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
 make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,
                            const EngineOptions& options) {
@@ -1058,6 +1071,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,
+        .rope_yarn           = planned_rope_yarn(parameters, options),
         .features            = models::load_options(options),
         .use_cuda_graph      = options.use_cuda_graph,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,

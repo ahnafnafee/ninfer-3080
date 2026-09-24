@@ -350,7 +350,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
                 execution::PrefillContext schedule_state{
                     {device, parameters, work, state_images->linear(0),
                      replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-                     proposal_head, stage_runtime.get()},
+                     proposal_head, stage_runtime.get(), rope_yarn},
                     text_kv_view(sequence),
                     mtp_kv_view(sequence),
                     decoder->text_kv,

@@ -96,10 +96,29 @@ void require_model_mode(int axes, int rotary_dim, std::int32_t head_dim) {
     }
 }
 
+void require_yarn(const RopeYarn& yarn, int axes, int rotary_dim, std::int32_t head_dim) {
+    if (!(yarn.factor > 1.0F)) { return; }
+    if (!std::isfinite(yarn.factor) || yarn.native_context == 0) {
+        throw std::invalid_argument("rope: YaRN needs a finite factor and a native context");
+    }
+    if (axes == 2 || head_dim != kTextHeadDim || rotary_dim != 64) {
+        throw std::invalid_argument("rope: YaRN applies to the D256/R64 Text table only");
+    }
+}
+
 } // namespace
 
 void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tensor& k,
           cudaStream_t stream) {
+    rope(positions, rotary_dim, theta, RopeYarn{}, q, k, stream);
+}
+
+void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, cudaStream_t stream) {
+    rope(positions, rotary_dim, theta, RopeYarn{}, x, stream);
+}
+
+void rope(const Tensor& positions, int rotary_dim, float theta, const RopeYarn& yarn, Tensor& q,
+          Tensor& k, cudaStream_t stream) {
     require_common(positions, rotary_dim, theta);
     if (q.dtype != DType::BF16 || k.dtype != DType::BF16) {
         throw std::invalid_argument("rope: q/k must be BF16");
@@ -113,6 +132,7 @@ void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tenso
     const std::int32_t q_heads  = q.ne[1];
     const std::int32_t k_heads  = k.ne[1];
     require_model_mode(axes, rotary_dim, head_dim);
+    require_yarn(yarn, axes, rotary_dim, head_dim);
     require_tensor_layout(q, "q", head_dim, q_heads, tokens);
     require_tensor_layout(k, "k", head_dim, k_heads, tokens);
     if (q_numel == 0) { return; }
@@ -120,10 +140,11 @@ void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tenso
     if (q.data == nullptr || k.data == nullptr) {
         throw std::invalid_argument("rope: q/k data must be non-null");
     }
-    detail::rope_launch(positions, rotary_dim, theta, q, k, stream);
+    detail::rope_launch(positions, rotary_dim, theta, yarn, q, k, stream);
 }
 
-void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, cudaStream_t stream) {
+void rope(const Tensor& positions, int rotary_dim, float theta, const RopeYarn& yarn, Tensor& x,
+          cudaStream_t stream) {
     require_common(positions, rotary_dim, theta);
     if (x.dtype != DType::BF16) { throw std::invalid_argument("rope: tensor must be BF16"); }
     (void)numel_allow_zero(positions, "positions");
@@ -133,11 +154,12 @@ void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, cudaS
     const std::int32_t head_dim = axes == 2 ? kVisionDim : x.ne[0];
     const std::int32_t heads    = x.ne[1];
     require_model_mode(axes, rotary_dim, head_dim);
+    require_yarn(yarn, axes, rotary_dim, head_dim);
     require_tensor_layout(x, "tensor", head_dim, heads, tokens);
     if (x_numel == 0) { return; }
     require_positions_storage(positions);
     if (x.data == nullptr) { throw std::invalid_argument("rope: tensor data must be non-null"); }
-    detail::rope_single_launch(positions, rotary_dim, theta, x, stream);
+    detail::rope_single_launch(positions, rotary_dim, theta, yarn, x, stream);
 }
 
 } // namespace ninfer::ops

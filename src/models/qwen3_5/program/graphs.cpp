@@ -305,7 +305,8 @@ void ProgramImpl::prepare_graphs() {
                                         prefill_hidden,
                                         prefill_chunk,
                                         proposal_head,
-                                        stage_runtime.get()};
+                                        stage_runtime.get(),
+                                        rope_yarn};
     };
 
     if (speculative_backend == SpeculativeBackend::None) {

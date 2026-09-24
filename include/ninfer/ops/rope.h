@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 
+#include <cstdint>
 #include <cuda_runtime.h> // cudaStream_t
 
 namespace ninfer::ops {
@@ -39,5 +40,28 @@ void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tenso
 // Single-tensor form with the same formula and storage contract. The head count comes directly
 // from x; Q versus K role does not change the transformation.
 void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x, cudaStream_t stream);
+
+/**
+ * YaRN, Qwen's way past a model's native window (Peng et al.; Hugging Face's `yarn` rope type with
+ * beta_fast=32 and beta_slow=1). With s=factor, L=native_context and R=rotary_dim, the correction
+ * range [lo,hi] holds the pairs whose wavelength 2*pi/theta^(-2i/R) fits between 32 times and once
+ * into L, rounded outward; pair i takes
+ *
+ *   inv_freq[i] = theta^(-2i/R) * ((1 - ramp(i)) + ramp(i)/s),  ramp(i) = clamp((i-lo)/(hi-lo), 0,
+ * 1),
+ *
+ * and cos and sin both carry the attention factor 0.1*ln(s)+1. factor<=1 leaves RoPE unscaled.
+ * Text 1-D and Text MRoPE at D256/R64 only.
+ */
+struct RopeYarn {
+    float factor                 = 1.0F;
+    std::uint32_t native_context = 0;
+};
+
+void rope(const Tensor& positions, int rotary_dim, float theta, const RopeYarn& yarn, Tensor& q,
+          Tensor& k, cudaStream_t stream);
+
+void rope(const Tensor& positions, int rotary_dim, float theta, const RopeYarn& yarn, Tensor& x,
+          cudaStream_t stream);
 
 } // namespace ninfer::ops

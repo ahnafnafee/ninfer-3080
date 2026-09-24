@@ -5,6 +5,7 @@
 #include "core/decode_graph.h"
 #include "core/device.h"
 #include "ninfer/ops/kv_cache_append.h"
+#include "ninfer/ops/rope.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/sliding_window_attention.h"
 #include "ninfer/ops/softmax_attention.h"
@@ -41,6 +42,7 @@ struct ExecutionCore {
     ProposalHead proposal_head;
     // Null on one device; see StageRuntime.
     StageRuntime* stages = nullptr;
+    ops::RopeYarn rope_yarn;
 };
 
 struct PrefillContext {

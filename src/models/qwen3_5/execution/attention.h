@@ -2,6 +2,7 @@
 
 #include "models/qwen3_5/execution/parameters.h"
 #include "models/qwen3_5/execution/rotation.h"
+#include "ninfer/ops/rope.h"
 
 namespace ninfer::models::qwen3_5::execution {
 
@@ -13,9 +14,9 @@ void attention_projection(const Tensor& hidden, const AttentionParameters& param
                           WorkspaceArena& workspace, cudaStream_t stream,
                           InputBasis basis = InputBasis::Primal);
 
-void text_rope(const Tensor& positions, const RopeConfig& config, Tensor& query,
-               cudaStream_t stream);
-void text_rope(const Tensor& positions, const RopeConfig& config, Tensor& query, Tensor& key,
-               cudaStream_t stream);
+void text_rope(const Tensor& positions, const RopeConfig& config, const ops::RopeYarn& yarn,
+               Tensor& query, cudaStream_t stream);
+void text_rope(const Tensor& positions, const RopeConfig& config, const ops::RopeYarn& yarn,
+               Tensor& query, Tensor& key, cudaStream_t stream);
 
 } // namespace ninfer::models::qwen3_5::execution

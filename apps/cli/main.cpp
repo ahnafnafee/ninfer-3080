@@ -293,6 +293,7 @@ int main(int argc, char** argv) {
         engine_options.embedding_q6             = cli.embedding_q6;
         engine_options.mtp_experts_q4           = cli.mtp_experts_q4;
         engine_options.gdn_state_fp16           = cli.gdn_state_fp16;
+        engine_options.rope_yarn                = cli.rope_yarn;
         engine_options.mlp_a8_decode            = cli.mlp_a8_decode;
         engine_options.prefill_a8               = cli.prefill_a8;
         engine_options.prefill_cublas           = cli.prefill_cublas;

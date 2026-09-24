@@ -32,7 +32,39 @@ struct Geometry {
     int axes;
     int tokens;
     float theta;
+    // Above one: YaRN over a native window of native_context positions.
+    float yarn_factor  = 1.0F;
+    int native_context = 0;
+
+    [[nodiscard]] ops::RopeYarn yarn() const {
+        return {yarn_factor, static_cast<std::uint32_t>(native_context)};
+    }
 };
+
+// Hugging Face's `yarn` inverse frequency with beta_fast=32 and beta_slow=1: the correction range
+// is where a wavelength fits between 32 times and once into the native window, rounded outward, and
+// the interpolated frequency theta^(-2i/R)/s blends in linearly across it by pair index.
+double yarn_frequency(const Geometry& geometry, int pair, double frequency) {
+    if (!(geometry.yarn_factor > 1.0F)) { return frequency; }
+    constexpr double kPi  = 3.14159265358979323846;
+    const double dim      = geometry.rotary_dim;
+    const auto correction = [&](double rotations) {
+        return dim *
+               std::log(static_cast<double>(geometry.native_context) / (rotations * 2.0 * kPi)) /
+               (2.0 * std::log(static_cast<double>(geometry.theta)));
+    };
+    const double lo = std::max(std::floor(correction(32.0)), 0.0);
+    double hi       = std::min(std::ceil(correction(1.0)), dim - 1.0);
+    if (hi == lo) { hi += 0.001; }
+    const double ramp = std::clamp((pair - lo) / (hi - lo), 0.0, 1.0);
+    return frequency / geometry.yarn_factor * ramp + frequency * (1.0 - ramp);
+}
+
+double yarn_attention_factor(const Geometry& geometry) {
+    return geometry.yarn_factor > 1.0F
+               ? 0.1 * std::log(static_cast<double>(geometry.yarn_factor)) + 1.0
+               : 1.0;
+}
 
 std::size_t dense_elements(int head_dim, int heads, int tokens) {
     return static_cast<std::size_t>(head_dim) * static_cast<std::size_t>(heads) *
@@ -93,13 +125,14 @@ std::vector<double> rope_oracle(const std::vector<float>& input, const std::vect
                     axis     = geometry.axes == 3 ? pair % 3 : 0;
                     exponent = -2.0 * static_cast<double>(pair) / geometry.rotary_dim;
                 }
-                const double frequency = std::pow(static_cast<double>(geometry.theta), exponent);
+                const double frequency = yarn_frequency(
+                    geometry, pair, std::pow(static_cast<double>(geometry.theta), exponent));
                 const double phase =
                     static_cast<double>(
                         positions[static_cast<std::size_t>(axis) * geometry.tokens + token]) *
                     frequency;
-                const double cosine  = std::cos(phase);
-                const double sine    = std::sin(phase);
+                const double cosine  = std::cos(phase) * yarn_attention_factor(geometry);
+                const double sine    = std::sin(phase) * yarn_attention_factor(geometry);
                 const std::size_t lo = dense_index(geometry.head_dim, heads, token, head, pair);
                 const std::size_t hi =
                     dense_index(geometry.head_dim, heads, token, head, pair + half);
@@ -270,7 +303,8 @@ int run_pair_case(const Geometry& geometry, int q_heads, int k_heads, int first_
     q_tensor.nb[2] = static_cast<std::int64_t>(q_stride) * sizeof(std::uint16_t);
     k_tensor.nb[2] = static_cast<std::int64_t>(k_stride) * sizeof(std::uint16_t);
 
-    ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, q_tensor, k_tensor, nullptr);
+    ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, geometry.yarn(), q_tensor,
+              k_tensor, nullptr);
     cuda_synchronize();
 
     if (graph) {
@@ -279,7 +313,8 @@ int run_pair_case(const Geometry& geometry, int q_heads, int k_heads, int first_
         cudaGraphExec_t executable;
         CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
         CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
-        ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, q_tensor, k_tensor, stream);
+        ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, geometry.yarn(), q_tensor,
+                  k_tensor, stream);
         CUDA_CHECK(cudaStreamEndCapture(stream, &captured));
         CUDA_CHECK(cudaGraphInstantiate(&executable, captured, nullptr, nullptr, 0));
         for (int replay = 0; replay < 2; ++replay) {
@@ -341,7 +376,8 @@ int run_single_case(const Geometry& geometry, int heads, int first_position, int
     Tensor position_tensor(position_device.data(), DType::I32, {geometry.tokens, geometry.axes});
     Tensor tensor(device.data(), DType::BF16, {geometry.head_dim, heads, geometry.tokens});
     tensor.nb[2] = static_cast<std::int64_t>(token_stride) * sizeof(std::uint16_t);
-    ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, tensor, nullptr);
+    ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, geometry.yarn(), tensor,
+              nullptr);
     cuda_synchronize();
 
     const auto got          = from_device<std::uint16_t>(device.data(), storage.size());
@@ -464,6 +500,17 @@ int main() {
     failures +=
         run_pair_case({"35b text native-context tail", 256, 64, 1, 7, kTextTheta}, 16, 2, 262'137);
     failures += run_pair_case({"35b text mrope", 256, 64, 3, 7, kTextTheta}, 16, 2, 2048, 16, 8);
+
+    // YaRN at four times a 262,144-token window, for both head geometries, 1-D and MRoPE, and the
+    // single-tensor form. Positions stay low: the phase is formed in FP32 as in the unscaled table.
+    failures +=
+        run_pair_case({"27b text yarn", 256, 64, 1, 128, kTextTheta, 4.0F, 262'144}, 24, 4, 4096);
+    failures += run_pair_case({"27b text mrope yarn", 256, 64, 3, 7, kTextTheta, 4.0F, 262'144}, 24,
+                              4, 2048);
+    failures += run_pair_case({"35b text yarn", 256, 64, 1, 5, kTextTheta, 2.5F, 262'144}, 16, 2,
+                              31, 16, 8);
+    failures +=
+        run_single_case({"27b mtp k yarn", 256, 64, 1, 128, kTextTheta, 4.0F, 262'144}, 4, 8192);
 
     // MTP bulk K append uses the single-tensor form; proposal tail uses the pair form above.
     failures += run_single_case({"27b mtp k mrope", 256, 64, 3, 128, kTextTheta}, 4, 8192);
