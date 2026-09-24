@@ -10,7 +10,6 @@
 #include "ops/linear/q4/q4_rowsplit_gemv.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
-#include "ops/linear/q5/q5_rowsplit_rowblock_small_t.cuh"
 
 #include <cuda_bf16.h>
 
@@ -147,37 +146,19 @@ void launch_q4(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t 
     }
 }
 
-void launch_q5_rowblock(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
-                        cudaStream_t stream) {
-    constexpr int kColsPerTile  = 8;
-    constexpr int kRowsPerBlock = 8;
-    constexpr int kStages       = 2;
-    constexpr int kThreads      = kRowsPerBlock * 32;
-    const std::int32_t cols     = x.ne[1];
-    const std::int32_t out_ld   = static_cast<std::int32_t>(value.nb[1] / sizeof(__nv_bfloat16));
-    const dim3 grid(static_cast<unsigned>(div_up(kValueZRows, kRowsPerBlock)),
-                    static_cast<unsigned>(div_up(cols, kColsPerTile)), 1u);
-    q5_rowsplit_rowblock_small_t_kernel<Q5RowSplitSimtSchedule, kColsPerTile, kRowsPerBlock,
-                                        kStages, true, kValueRows>
-        <<<grid, kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.qhigh),
-            static_cast<const std::uint8_t*>(weight.scales),
-            static_cast<__nv_bfloat16*>(value.data), static_cast<__nv_bfloat16*>(z.data),
-            kValueZRows, out_ld, kHidden, cols, weight.padded_shape[1], kHidden / 1024);
-    CUDA_CHECK(cudaGetLastError());
-}
-
-// Where the Q5 half hands over from the split4 route to simt_r8_c8.
-//
-// 8, measured. split4 beats the grouped c8 tile that used to be routed at these widths by 5.9% at
-// width 7 and 13.2% at width 8, with the two spreads disjoint at both, and collapses at 9 on a
-// register cliff. The route table now sends {1,8} to IndependentDirectFixed and the c8 band is
+// Where the Q5 half hands over from the split4 route to the narrow SIMT tiles.
+#if defined(NINFER_SM8X_COMPAT)
+// 8, measured on sm_86. split4 beats the grouped c8 tile that used to be routed at these widths by
+// 5.9% at width 7 and 13.2% at width 8, with the two spreads disjoint at both, and collapses at 9 on
+// a register cliff. The route table now sends {1,8} to IndependentDirectFixed and the c8 band is
 // gone. Numbers and method are in q4_q5_gdn_input_plan.cpp; the reason 9 collapses is on
-// launch_q5_split4_exact below. simt_r8_c8 keeps widths 9..15, which the route table does not
-// reach but the schedule bench does.
+// launch_q5_split4_exact below.
 constexpr std::int32_t kQ5Split4LastCols = 8;
+#else
+// 10, measured on sm_120 as complete-Op medians: split4 wins at 10 in every organisation that
+// exposes 10 aggregate columns and loses to the c4 tile at 11 and 12.
+constexpr std::int32_t kQ5Split4LastCols = 10;
+#endif
 
 void launch_q5_gemv(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
                     cudaStream_t stream) {
@@ -253,8 +234,14 @@ void launch_q5_split4_exact(const Tensor& x, const Weight& weight, Tensor& value
     case 8:
         launch_q5_split4<8>(x, weight, value, z, stream);
         return;
+    case 9:
+        launch_q5_split4<9>(x, weight, value, z, stream);
+        return;
+    case 10:
+        launch_q5_split4<10>(x, weight, value, z, stream);
+        return;
     default:
-        throw std::invalid_argument("GDN Q5 split4 requires T in [2,8]");
+        throw std::invalid_argument("GDN Q5 split4 requires T in [2,10]");
     }
 }
 
@@ -286,14 +273,6 @@ void launch_q5(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
     }
     if (x.ne[1] <= kQ5Split4LastCols) {
         launch_q5_split4_exact(x, weight, value, z, stream);
-        return;
-    }
-    if (x.ne[1] <= 8) {
-        // T=7/8: the row-block kernel stages one 1024-value activation slab per block in shared
-        // memory and lets all kRowsPerBlock warps read it, so the activation traffic drops by
-        // kRowsPerBlock. At T=8 that moved this side from 93.4 us (row-split SIMT, activation bound
-        // by repeated activation traffic) to 62.7 us.
-        launch_q5_rowblock(x, weight, value, z, stream);
         return;
     }
     if (x.ne[1] <= 12) {
