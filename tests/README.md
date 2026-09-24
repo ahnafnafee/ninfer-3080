@@ -291,3 +291,24 @@ reasoning transitions, speculative mask previews, injected thinking-budget closu
 boundary preservation. `--concurrency 8 --draft-tokens 15 --modes dflash2` exercises
 the largest draft and batch dimensions. A separate DFlash-capable artifact can use `--modes dflash`.
 The server is terminated on success or failure. An occupied test port causes the test to stop.
+
+The old/new Qwen3.8 binding matrix uses `out/qwen3_8_27b_old.ninfer` and
+`out/qwen3_8_27b_nvfp4_old.ninfer` for the legacy inventories, and the canonical filenames above
+for the companion artifacts. The legacy paths may be overridden with
+`NINFER_QWEN3_8_27B_OLD_WEIGHTS` and `NINFER_QWEN3_8_27B_NVFP4_OLD_WEIGHTS`.
+
+## Container build cache
+
+Check the Dockerfile's incremental-build and configuration-invalidation behavior without compiling
+or running NInfer:
+
+```bash
+bash tests/test_docker_build_cache.sh docker
+```
+
+This uses the real build stage with a tiny CMake fixture and isolated cache mounts. It checks added
+and removed compiler flags, changed and restored cached defaults, environment flags, old header
+timestamps, non-code edits, and one-file incremental compilation. Docker BuildKit is required;
+`podman` can be passed instead to check that builder. Logs and the fixture remain in an ignored
+`build-cache-test.*` directory; the test image and its small build caches remain in the builder.
+The check needs the Dockerfile's build dependencies but no GPU or model weights.
