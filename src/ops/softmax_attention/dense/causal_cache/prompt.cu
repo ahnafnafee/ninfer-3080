@@ -44,6 +44,11 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
             causal_attention_prompt_i8_kernel<Geometry, Metadata, true, KvKeyCoding::Int4E8>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptI8SmemBytes);
     });
+    configure_cuda_device_once([&] {
+        return cudaFuncSetAttribute(
+            causal_attention_prompt_i8_kernel<Geometry, Metadata, true, KvKeyCoding::RootE8>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptI8SmemBytes);
+    });
 
     const auto tokens = static_cast<std::int32_t>(q.ne[2]);
     if (kv_cache_is_int8_family(cache.storage)) {
@@ -58,8 +63,8 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
         // KvValueCodeT<RotatedInt8KeyInt4ValueGroup64>, which is U8 because the profile describes
         // the plane's storage rather than this kernel's signature, would not be a cleanup. Leave
         // it; the dtype check below is the guard that matters here.
-        // A U8 key plane is a packed key coding (rk4v4 or rk4v4-e8), told apart by storage; a U8
-        // value plane is the packed signed int4 coding they share with rk8v4.
+        // A U8 key plane is a packed key coding (rk4v4, rk4v4-e8 or rk2v4-e8), told apart by
+        // storage; a U8 value plane is the packed signed int4 coding they share with rk8v4.
         if (cache.storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
             causal_attention_prompt_i8_kernel<Geometry, Metadata, true, KvKeyCoding::Lloyd4>
                 <<<attention_grid, kCausalPromptI8Threads, kCausalPromptI8SmemBytes, stream>>>(
@@ -72,6 +77,16 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
                     static_cast<__nv_bfloat16*>(out.data), tokens);
         } else if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8) {
             causal_attention_prompt_i8_kernel<Geometry, Metadata, true, KvKeyCoding::Int4E8>
+                <<<attention_grid, kCausalPromptI8Threads, kCausalPromptI8SmemBytes, stream>>>(
+                    static_cast<const __nv_bfloat16*>(q.data),
+                    static_cast<const std::int8_t*>(cache_k.data),
+                    static_cast<const std::int8_t*>(cache_v.data),
+                    static_cast<const __half*>(cache_k_scale.data),
+                    static_cast<const __half*>(cache_v_scale.data), metadata,
+                    static_cast<const std::int32_t*>(positions.data), scale,
+                    static_cast<__nv_bfloat16*>(out.data), tokens);
+        } else if (cache.storage == KvCacheStorage::RotatedE8RootKeyInt4Value) {
+            causal_attention_prompt_i8_kernel<Geometry, Metadata, true, KvKeyCoding::RootE8>
                 <<<attention_grid, kCausalPromptI8Threads, kCausalPromptI8SmemBytes, stream>>>(
                     static_cast<const __nv_bfloat16*>(q.data),
                     static_cast<const std::int8_t*>(cache_k.data),

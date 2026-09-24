@@ -44,7 +44,9 @@ const double kColdPureReadCeilingGBs = bench::device_specs().sustained_read_gbs;
 
 enum class Entry : std::uint8_t { Append, Cached, Both };
 enum class GeometryChoice : std::uint8_t { H24Kv4, H16Kv2, All };
-enum class KvChoice : std::uint8_t { Bf16, Int8, Fp8, Rk8V4, Rk4V4, Rk4V4E8, Nvfp4, K8V4, All };
+enum class KvChoice : std::uint8_t {
+    Bf16, Int8, Fp8, Rk8V4, Rk4V4, Rk4V4E8, Rk2V4E8, Nvfp4, K8V4, All
+};
 enum class Execution : std::uint8_t { Eager, Graph, Both };
 enum class CacheMode : std::uint8_t { Cold, Warm, Both };
 enum class CacheState : std::uint8_t { Cold, Warm };
@@ -112,7 +114,7 @@ struct Result {
                  "usage: ninfer_causal_softmax_attention_bench "
                  "[--entry append|cached|both] "
                  "[--geometry d256-h24-kv4|d256-h16-kv2|all] "
-                 "[--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|nvfp4|k8v4|all] [--batch B,...] [--tokens W,...] "
+                 "[--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4|all] [--batch B,...] [--tokens W,...] "
                  "[--context L,...] [--row-contexts L0,...] [--valid-columns V0,...] "
                  "[--table-rows R0,...] "
                  "[--execution eager|graph|both] [--cache cold|warm|both] "
@@ -193,6 +195,8 @@ Options parse_options(int argc, char** argv) {
                 options.kv = KvChoice::Rk4V4;
             else if (value == "rk4v4-e8")
                 options.kv = KvChoice::Rk4V4E8;
+            else if (value == "rk2v4-e8")
+                options.kv = KvChoice::Rk2V4E8;
             else if (value == "nvfp4")
                 options.kv = KvChoice::Nvfp4;
             else if (value == "k8v4")
@@ -200,7 +204,7 @@ Options parse_options(int argc, char** argv) {
             else if (value == "all")
                 options.kv = KvChoice::All;
             else
-                usage("--kv-dtype expects bf16, int8, fp8, rk8v4, rk4v4, rk4v4-e8, nvfp4, k8v4, or all");
+                usage("--kv-dtype expects bf16, int8, fp8, rk8v4, rk4v4, rk4v4-e8, rk2v4-e8, nvfp4, k8v4, or all");
         } else if (argument == "--tokens") {
             options.tokens = parse_list(next("--tokens requires a value"), 1, 262144, "--tokens");
         } else if (argument == "--batch") {
@@ -601,6 +605,8 @@ const char* storage_name(KvCacheStorage storage) {
         return "rk4v4";
     case KvCacheStorage::RotatedInt4KeyInt4ValueE8:
         return "rk4v4-e8";
+    case KvCacheStorage::RotatedE8RootKeyInt4Value:
+        return "rk2v4-e8";
     case KvCacheStorage::Nvfp4Group16:
         return "nvfp4";
     case KvCacheStorage::Fp8KeyNvfp4Value:
@@ -826,6 +832,7 @@ std::vector<KvCacheStorage> selected_storages(KvChoice choice) {
     if (choice == KvChoice::Rk8V4) { return {KvCacheStorage::RotatedInt8KeyInt4ValueGroup64}; }
     if (choice == KvChoice::Rk4V4) { return {KvCacheStorage::RotatedLloyd4KeyInt4Value}; }
     if (choice == KvChoice::Rk4V4E8) { return {KvCacheStorage::RotatedInt4KeyInt4ValueE8}; }
+    if (choice == KvChoice::Rk2V4E8) { return {KvCacheStorage::RotatedE8RootKeyInt4Value}; }
     if (choice == KvChoice::Nvfp4) { return {KvCacheStorage::Nvfp4Group16}; }
     if (choice == KvChoice::K8V4) { return {KvCacheStorage::Fp8KeyNvfp4Value}; }
     return {KvCacheStorage::BFloat16,
@@ -834,6 +841,7 @@ std::vector<KvCacheStorage> selected_storages(KvChoice choice) {
             KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
             KvCacheStorage::RotatedLloyd4KeyInt4Value,
             KvCacheStorage::RotatedInt4KeyInt4ValueE8,
+            KvCacheStorage::RotatedE8RootKeyInt4Value,
             KvCacheStorage::Nvfp4Group16,
             KvCacheStorage::Fp8KeyNvfp4Value};
 }

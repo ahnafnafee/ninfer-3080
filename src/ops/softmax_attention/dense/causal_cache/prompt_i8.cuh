@@ -139,10 +139,10 @@ static_assert(kCausalPromptI8SmemBytes == 93184);
 // half of the same V slot the INT8 coding uses, so the shared-memory footprint and therefore the
 // occupancy of both instantiations are identical; only the global traffic halves.
 //
-// Keys selects a packed key plane (rk4v4 Lloyd-Max indices or rk4v4-e8 int4 codes). As in the
-// small-T kernel, the next tile's packed keys are loaded into registers where the INT8 path issues
-// its cp.async, stay in flight across the PV MMAs, and are expanded into the unchanged INT8 K tile
-// before the tile barrier.
+// Keys selects a packed key plane (rk4v4 Lloyd-Max indices, rk4v4-e8 int4 codes or rk2v4-e8 E8
+// root codes). As in the small-T kernel, the next tile's packed keys are loaded into registers
+// where the INT8 path issues its cp.async, stay in flight across the PV MMAs, and are expanded into
+// the unchanged INT8 K tile before the tile barrier.
 template <typename Geometry, typename Metadata, bool PackedValues = false,
           KvKeyCoding Keys = KvKeyCoding::Int8>
 __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8_kernel(
@@ -242,7 +242,8 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
 
     constexpr int KChunks          = Bc * (D / 16);
     constexpr int KChunksPerThread = (KChunks + kCausalPromptI8Threads - 1) / kCausalPromptI8Threads;
-    uint2 k_packed[PackedKeys ? KChunksPerThread : 1];
+    using KeyChunk = KvPackedKeyChunk<PackedKeys ? Keys : KvKeyCoding::Lloyd4>;
+    KeyChunk k_packed[PackedKeys ? KChunksPerThread : 1];
     // Chunks past the causal limit keep their placeholder's expansion: their scales are staged as
     // zero and their scores masked, exactly as the zero-filled INT8 chunks are.
     auto commit_k_tile = [&]() {
@@ -296,16 +297,18 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
                     const int dc    = chunk - key_l * (D / 16);
                     const int d     = dc * 16;
                     const int key   = tile_k0 + key_l;
-                    k_packed[i]     = make_uint2(0u, 0u);
+                    k_packed[i]     = KeyChunk{};
                     if (key <= max_query_abs) {
-                        // Both planes are 128 bytes per row, so one offset addresses both.
-                        const std::int64_t off = kv_cache_int4_value_code_index<Geometry>(
+                        const std::int64_t key_off =
+                            kv_cache_packed_key_chunk_index<Geometry, Keys>(physical_page, kv_head,
+                                                                            d, key_l);
+                        const std::int64_t value_off = kv_cache_int4_value_code_index<Geometry>(
                             physical_page, kv_head, d >> 1, key_l);
-                        k_packed[i] = *reinterpret_cast<const uint2*>(
-                            reinterpret_cast<const std::uint8_t*>(cache_k) + off);
+                        k_packed[i] = *reinterpret_cast<const KeyChunk*>(
+                            reinterpret_cast<const std::uint8_t*>(cache_k) + key_off);
                         ninfer::ops::cp_async<8>(
                             &v_i8[key_l * D + (d >> 1)],
-                            reinterpret_cast<const std::uint8_t*>(cache_v) + off);
+                            reinterpret_cast<const std::uint8_t*>(cache_v) + value_off);
                     } else {
                         store_vec(&v_i8[key_l * D + (d >> 1)], make_int2(0, 0));
                     }

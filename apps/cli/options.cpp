@@ -112,6 +112,8 @@ KvCacheStorage parse_kv_cache(std::string_view text) {
     if (text == "rk4v4") { return KvCacheStorage::RotatedLloyd4KeyInt4Value; }
     // rk4v4-e8: rotated E8-snapped int4 keys with the rk8v4 value plane. Opt-in.
     if (text == "rk4v4-e8") { return KvCacheStorage::RotatedInt4KeyInt4ValueE8; }
+    // rk2v4-e8: rotated keys as E8 root codes, two bytes per eight dimensions. Opt-in.
+    if (text == "rk2v4-e8") { return KvCacheStorage::RotatedE8RootKeyInt4Value; }
     if (text == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
     if (text == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
     throw std::invalid_argument("invalid kv-dtype: " + std::string(text));
@@ -140,7 +142,7 @@ std::string usage_text(const char* argv0) {
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--devices N,M,...] [--stage-layers A,B,...]\n"
-           "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|nvfp4|k8v4]\n"
+           "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4]\n"
            "       [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
            "       [--lookup-ngram N]\n"
            "       [--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4]\n"

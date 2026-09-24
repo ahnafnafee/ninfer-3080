@@ -65,14 +65,15 @@ inline constexpr D256KVCacheProfile d256_kv_cache_profile(DType dtype, DType val
 }
 
 // The storages the INT8-family kernels serve: keys reach QK as rotated INT8 codes with a G64 FP16
-// scale (stored directly, or as rk4v4 Lloyd-Max indices or rk4v4-e8 int4 codes expanded on load),
-// and values are INT8 or packed int4. The value plane's dtype and, for packed keys, the storage
-// select the coding inside each kernel.
+// scale (stored directly, or as rk4v4 Lloyd-Max indices, rk4v4-e8 int4 codes or rk2v4-e8 E8 root
+// codes expanded on load), and values are INT8 or packed int4. The value plane's dtype and, for
+// packed keys, the storage select the coding inside each kernel.
 inline constexpr bool kv_cache_is_int8_family(ninfer::KvCacheStorage storage) {
     return storage == ninfer::KvCacheStorage::Int8Group64 ||
            storage == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
            storage == ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value ||
-           storage == ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueE8;
+           storage == ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueE8 ||
+           storage == ninfer::KvCacheStorage::RotatedE8RootKeyInt4Value;
 }
 
 // Overload for call sites that describe a cache whose two planes share one coding.
@@ -98,6 +99,18 @@ inline constexpr D256KVCacheProfile d256_kv_cache_profile(ninfer::KvCacheStorage
         // int4 values), with rk8v4's scale planes: G64 FP16 for keys, G32 FP16 for values.
         return {DType::U8, DType::U8,   kD256KVCacheHeadDim / 2, kD256KVCacheHeadDim / 2,
                 64,        DType::FP16, 4,                       DType::FP16,
+                8};
+    case ninfer::KvCacheStorage::RotatedE8RootKeyInt4Value:
+        // Two E8 root code bytes per eight key dimensions under the G64 FP16 scale; the value
+        // plane is rk8v4's. Dispatch on the storage, as for rk4v4 and rk4v4-e8.
+        return {DType::U8,
+                DType::U8,
+                kD256KVCacheHeadDim / 4,
+                kD256KVCacheHeadDim / 2,
+                64,
+                DType::FP16,
+                4,
+                DType::FP16,
                 8};
     case ninfer::KvCacheStorage::Nvfp4Group16:
         // Both planes are e2m1-coded (2 codes/byte, so half the head dimension) with a 16-value

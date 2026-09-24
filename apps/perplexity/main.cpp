@@ -73,7 +73,7 @@ std::string usage_text() {
     return "usage: ninfer-perplexity <model.ninfer> "
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
            "       [--context N] [--stride N] [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|nvfp4|k8v4] [--output <directory>]\n"
+           "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--output <directory>]\n"
            "       [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] [--gdn-state-fp16]\n"
            "       [--mlp-a8-decode] [--no-prefill-a8] [--rope-yarn]\n"
            "       (--mlp-a8-decode is inert here: the route it enables is verify-phase"
@@ -142,13 +142,15 @@ Options parse_options(int argc, char** argv) {
                 out.kv = ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value;
             } else if (dtype == "rk4v4-e8") {
                 out.kv = ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueE8;
+            } else if (dtype == "rk2v4-e8") {
+                out.kv = ninfer::KvCacheStorage::RotatedE8RootKeyInt4Value;
             } else if (dtype == "nvfp4") {
                 out.kv = ninfer::KvCacheStorage::Nvfp4Group16;
             } else if (dtype == "k8v4") {
                 out.kv = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
             } else {
-                usage_error("--kv-dtype must be bf16, int8, fp8, rk8v4, rk4v4, rk4v4-e8, nvfp4, "
-                            "or k8v4");
+                usage_error("--kv-dtype must be bf16, int8, fp8, rk8v4, rk4v4, rk4v4-e8, "
+                            "rk2v4-e8, nvfp4, or k8v4");
             }
         } else if (option == "--output") {
             out.output = std::filesystem::path(value("--output"));
@@ -204,6 +206,8 @@ std::string kv_name(ninfer::KvCacheStorage value) {
         return "rotated-lloyd4g64-v4g32";
     case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueE8:
         return "rotated-k4e8g64-v4g32";
+    case ninfer::KvCacheStorage::RotatedE8RootKeyInt4Value:
+        return "rotated-k2e8g64-v4g32";
     case ninfer::KvCacheStorage::Nvfp4Group16:
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:

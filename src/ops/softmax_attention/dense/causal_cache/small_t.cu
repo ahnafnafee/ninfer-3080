@@ -193,8 +193,8 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
     Tensor& cache_v       = cache.v_pages;
     Tensor& cache_k_scale = cache.k_scale_pages;
     Tensor& cache_v_scale = cache.v_scale_pages;
-    // A U8 value plane is the packed signed int4 coding (rk8v4, rk4v4, rk4v4-e8); a U8 key plane
-    // is a packed key coding, told apart by storage.
+    // A U8 value plane is the packed signed int4 coding (rk8v4 and the packed-key storages); a
+    // U8 key plane is a packed key coding, told apart by storage.
     const bool packed_values = cache_v.dtype == DType::U8;
     auto launch = [&]<int WarpsPerCta, int MinBlocksPerSm, int KeyBlock, bool DynamicArena>() {
         const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
@@ -234,6 +234,8 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
             issue.template operator()<true, KvKeyCoding::Lloyd4>();
         } else if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8) {
             issue.template operator()<true, KvKeyCoding::Int4E8>();
+        } else if (cache.storage == KvCacheStorage::RotatedE8RootKeyInt4Value) {
+            issue.template operator()<true, KvKeyCoding::RootE8>();
         } else if (packed_values) {
             issue.template operator()<true, KvKeyCoding::Int8>();
         } else {

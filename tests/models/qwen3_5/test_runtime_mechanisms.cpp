@@ -135,6 +135,20 @@ void test_decoder_layout() {
     expect(e8.kv_payload_bytes() == rk4v4.kv_payload_bytes(),
            "rk4v4-e8 Text/MTP KV is rk4v4's size");
 
+    ninfer::LayoutBuilder root_builder;
+    const q36::DecoderStateLayout root = q36::plan_decoder_state(
+        root_builder, decoder_spec(ninfer::KvCacheStorage::RotatedE8RootKeyInt4Value, true));
+    (void)root_builder.finish(256);
+    expect(root.text_kv.pages.planes.size() == 8 &&
+               root.text_kv.pages.planes[0].geometry.dtype == ninfer::DType::U8 &&
+               root.text_kv.pages.planes[0].geometry.leading_extent == 64 &&
+               root.text_kv.pages.planes[1].geometry.leading_extent == 128 &&
+               root.text_kv.pages.planes[2].geometry.leading_extent == 4 &&
+               root.text_kv.pages.planes[3].geometry.leading_extent == 8,
+           "rk2v4-e8 Text KV keeps 64 key code bytes and G64 key / G32 value scales");
+    expect(root.kv_payload_bytes() < e8.kv_payload_bytes(),
+           "rk2v4-e8 Text/MTP KV is smaller than rk4v4-e8");
+
     ninfer::LayoutBuilder nvfp4_builder;
     const q36::DecoderStateLayout nvfp4 = q36::plan_decoder_state(
         nvfp4_builder, decoder_spec(ninfer::KvCacheStorage::Nvfp4Group16, true));

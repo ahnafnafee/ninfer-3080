@@ -256,8 +256,9 @@ __launch_bounds__(256) __global__
 
 // PackedValues selects the rk8v4 value coding: two signed 4-bit codes per byte in a half-width V
 // plane. The key path is identical in both instantiations, so a cache written by either is
-// consumable by the same rotated-INT8 key reader. Keys selects a packed key coding instead, the
-// rk4v4 Lloyd-Max or the rk4v4-e8 one (see kv_cache_i8_family_store_key_group).
+// consumable by the same rotated-INT8 key reader. Keys selects a packed key coding instead:
+// rk4v4's Lloyd-Max indices, rk4v4-e8's int4 codes or rk2v4-e8's E8 roots (see
+// kv_cache_i8_family_store_key_group).
 template <typename Geometry, typename Metadata, bool PackedValues = false,
           KvKeyCoding Keys = KvKeyCoding::Int8>
 __launch_bounds__(256) __global__

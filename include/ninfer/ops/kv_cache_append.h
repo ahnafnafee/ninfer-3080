@@ -88,6 +88,16 @@ struct KVCacheAppendPrefixExecutionEnvelope {
  * largest rounding error (lowest index on ties) one step towards y. The stored key code is
  * I4(clamp(RNE_even(point), -8, 7)), packed like values; the coset bit is not stored.
  *
+ * KvCacheStorage::RotatedE8RootKeyInt4Value (rk2v4-e8) is selected by storage as well. Values are
+ * the rk8v4 packed coding. Keys take the same rotation, G64 group and scale_bits = FP16_RNE(a / 7);
+ * each block of eight consecutive rotated dimensions b is stored as two bytes at row byte 2*block:
+ * the E8 root nearest to b/|b| (a pair root +-e_i+-e_j or a half root 1/2(+-1)^8 with an even
+ * number of minus signs, by the larger of their scores |u_i|+|u_j| and sum|u|/2 less the smallest
+ * |u| when the sign count is odd), then a byte holding the radius index -- the nearest integer to
+ * 3*log2(r)+8 in [1,15] for r = |b| / (s*sqrt(8)), zero for r < 0.08 -- over the residual axis,
+ * the largest coordinate of u less its projection on the root, with its sign. The exact operation
+ * order is ops/kv_cache/e8_root_codec.cuh's; decode yields eight int8 codes times s.
+ *
  * V uses represented BF16 source values directly as x under every profile, including rk8v4: values
  * are never rotated, so no inverse preparation is applied to the attention output. For every
  * quantized profile, K is a paired physical representation for causal Attention: its

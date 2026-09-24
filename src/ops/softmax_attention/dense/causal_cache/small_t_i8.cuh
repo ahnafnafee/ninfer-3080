@@ -42,13 +42,13 @@ namespace ninfer::ops {
 // PackedValues selects the rk8v4 half-width value plane, for both the fused append this kernel
 // performs and the value staging it consumes.
 //
-// Keys selects a packed key plane, half the INT8 key bytes: rk4v4's 4-bit Lloyd-Max indices or
-// rk4v4-e8's E8-snapped int4 codes. The shared K tile and the whole QK path are unchanged. Packed
-// keys for the next tile are loaded into registers at the top of each key-loop iteration
-// (load_k_tile), stay in flight across QK, the V dequant and PV, are expanded to their INT8 codes
-// (kv_cache_packed_key_expand16), and are stored into the tile just before the tile barrier; which
-// warps expand them, and when, depends on the row-tile count (see LoaderKeys). The K tile is idle
-// during PV, so this adds no shared memory and no barrier.
+// Keys selects a packed key plane: rk4v4's 4-bit Lloyd-Max indices or rk4v4-e8's E8-snapped int4
+// codes (half the INT8 key bytes), or rk2v4-e8's E8 root codes (a quarter). The shared K tile and
+// the whole QK path are unchanged. Packed keys for the next tile are loaded into registers at the
+// top of each key-loop iteration (load_k_tile), stay in flight across QK, the V dequant and PV,
+// are expanded to their INT8 codes (kv_cache_packed_key_expand16), and are stored into the tile
+// just before the tile barrier; which warps expand them, and when, depends on the row-tile count
+// (see LoaderKeys). The K tile is idle during PV, so this adds no shared memory and no barrier.
 template <typename Geometry, int TokenTile, int WarpsPerCta, int MinBlocksPerSm, int KeyBlock,
           bool DynamicArena, bool MultiBatch, bool Masked, typename CacheInput,
           bool PackedValues = false, KvKeyCoding Keys = KvKeyCoding::Int8>
@@ -409,7 +409,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     constexpr bool LoaderKeys = PackedKeys && RowTiles == 2 && 2 * VLoaderThreads >= Threads;
     constexpr int KeyThreads  = LoaderKeys ? VLoaderThreads : Threads;
     constexpr int KChunksPerKeyThread = (KChunks + KeyThreads - 1) / KeyThreads;
-    uint2 k_packed[PackedKeys ? KChunksPerKeyThread : 1];
+    using KeyChunk = KvPackedKeyChunk<PackedKeys ? Keys : KvKeyCoding::Lloyd4>;
+    KeyChunk k_packed[PackedKeys ? KChunksPerKeyThread : 1];
     int4 k_codes[LoaderKeys ? KChunksPerKeyThread : 1];
     const bool key_thread = LoaderKeys ? tid >= ProducerThreads : true;
     const int key_tid     = LoaderKeys ? tid - ProducerThreads : tid;
@@ -420,17 +421,17 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 #pragma unroll
             for (int i = 0; i < KChunksPerKeyThread; ++i) {
                 const int chunk = key_tid + i * KeyThreads;
-                k_packed[i]     = make_uint2(0u, 0u);
+                k_packed[i]     = KeyChunk{};
                 if (chunk < KChunks) {
                     const int key_l = chunk / (D / 16);
                     const int d     = (chunk - key_l * (D / 16)) * 16;
                     const int key   = tile_k0 + key_l;
                     if (key >= split_start && key < split_end) {
-                        const std::int64_t off = kv_cache_int4_value_code_index<Geometry>(
-                            physical_page, kv_head, d >> 1, key & kPagedKVPageMask);
+                        const std::int64_t off = kv_cache_packed_key_chunk_index<Geometry, Keys>(
+                            physical_page, kv_head, d, key & kPagedKVPageMask);
                         // A plain load: the fused append above may have written these bytes in
                         // this launch, so the read-only path is not an option.
-                        k_packed[i] = *reinterpret_cast<const uint2*>(
+                        k_packed[i] = *reinterpret_cast<const KeyChunk*>(
                             reinterpret_cast<const std::uint8_t*>(cache_k_i8) + off);
                     }
                 }
