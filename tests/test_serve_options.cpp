@@ -271,6 +271,13 @@ int main() {
                           configured.context_cache.host_kv_capacity_bytes == 0,
                       "root-only server mode retained default Host capacities");
     failures += check(configured.enable_vision, "--vision did not enable Vision");
+    failures += check(!defaults.webui_mcp_proxy,
+                      "the WebUI MCP relay reaches arbitrary hosts and must be off by default");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--webui-mcp-proxy"}).webui_mcp_proxy,
+                      "--webui-mcp-proxy did not enable the relay");
+    failures += check(serve_usage_text("ninfer-serve").find("--webui-mcp-proxy") !=
+                          std::string::npos,
+                      "serve help omits --webui-mcp-proxy");
     failures += check(configured.usage_chunk_choice,
                       "--usage-chunk-choice did not reach serving options");
     failures += check(configured.preserve_thinking == true,

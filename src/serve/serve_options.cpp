@@ -97,7 +97,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--gdn-state-fp16] [--rope-yarn] [--wddm-evictable-budget] "
            "[--mlp-a8-decode] [--no-prefill-a8] "
            "[--prefill-cublas [--no-prefill-cublas-projections]] [--lookup-ngram N] "
-           "[--no-thinking] [--preserve-thinking] [--cors] [--no-webui] [--usage-chunk-choice] "
+           "[--no-thinking] [--preserve-thinking] [--cors] [--no-webui] [--webui-mcp-proxy] "
+           "[--usage-chunk-choice] "
            "[--structured-output] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -154,6 +155,10 @@ std::string serve_usage_text(const char* argv0) {
            "server flags and request fields override individual values.\n"
            "       --greedy forces temperature 0 (exact argmax).\n"
            "       --no-webui stops serving a WebUI built in with NINFER_WEBUI_DIR on GET /.\n"
+           "       --webui-mcp-proxy relays the WebUI's MCP traffic at /cors-proxy (its \"Use\n"
+           "       llama-server proxy\" option): MCP servers send no CORS headers on POST, so a\n"
+           "       browser cannot reach them directly. http targets only; the relay reaches any\n"
+           "       host it is given and carries no API key, so enable it only on a trusted bind.\n"
            "       --structured-output accepts JSON and JSON Schema response formats; it reserves "
            "the grammar masks and adds a grammar stage to every DFlash round.\n";
 }
@@ -474,6 +479,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.enable_cors = true;
         } else if (arg == "--no-webui") {
             options.enable_webui = false;
+        } else if (arg == "--webui-mcp-proxy") {
+            options.webui_mcp_proxy = true;
         } else if (arg == "--structured-output") {
             options.structured_output = true;
         } else if (arg == "--usage-chunk-choice") {

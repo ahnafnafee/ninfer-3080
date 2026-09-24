@@ -20,6 +20,7 @@ add_library(ninfer_serve STATIC
   operational_log.cpp
   request_log.cpp
   http_server.cpp
+  mcp_proxy.cpp
   load_report.cpp
   serve_metrics.cpp
   openai_responses_http.cpp

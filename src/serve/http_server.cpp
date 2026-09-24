@@ -2,6 +2,7 @@
 
 #include "serve/anthropic_messages.h"
 #include "serve/http_transport.h"
+#include "serve/mcp_proxy.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
 #include "serve/webui.h"
@@ -27,7 +28,7 @@ constexpr std::string_view kCorsAllowedHeaders =
 // router owns paths the server has no file for.
 bool is_api_path(std::string_view path) {
     return path == "/v1" || path.starts_with("/v1/") || path == "/health" ||
-           path == "/metrics" || path == "/slots" || path == "/props";
+           path == "/metrics" || path == "/slots" || path == "/props" || path == kMcpProxyPath;
 }
 
 
@@ -401,7 +402,11 @@ void HttpServer::register_routes() {
             }
             return httplib::Server::HandlerResponse::Handled;
         }
+        // The MCP relay carries no API key: the WebUI prefixes every header it means for the MCP
+        // server, its own Authorization included, so requiring the key would break the relay
+        // rather than protect it. It is opt-in, and the bind address is its boundary.
         if (options_.api_key.empty() || req.path == "/health" || req.method == "OPTIONS" ||
+            (options_.webui_mcp_proxy && req.path == kMcpProxyPath) ||
             (webui_enabled() && req.method == "GET" && !is_api_path(req.path))) {
             return httplib::Server::HandlerResponse::Unhandled;
         }
@@ -542,6 +547,14 @@ void HttpServer::register_routes() {
     server_.Post("/v1/messages", [this](const httplib::Request& req, httplib::Response& res) {
         handle_messages(req, res);
     });
+    if (options_.webui_mcp_proxy) {
+        const auto relay = [](const httplib::Request& req, httplib::Response& res) {
+            relay_mcp_proxy(req, res);
+        };
+        server_.Get(kMcpProxyPath, relay);
+        server_.Post(kMcpProxyPath, relay);
+        server_.Delete(kMcpProxyPath, relay);
+    }
     // Registered last: httplib tries routes in order, so every API route above wins its path.
     if (webui_enabled()) {
         server_.Get(R"(/.*)", [this](const httplib::Request& req, httplib::Response& res) {
@@ -647,6 +660,8 @@ void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) c
         {"endpoint_slots", true},
         {"endpoint_props", true},
         {"endpoint_metrics", true},
+        // The WebUI ungreys its "Use llama-server proxy" option from this flag alone.
+        {"cors_proxy_enabled", options_.webui_mcp_proxy},
     };
     res.set_content(props.dump(), "application/json");
 }

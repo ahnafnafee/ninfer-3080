@@ -326,6 +326,14 @@ configure with.
 cmake -S . -B build -DNINFER_WEBUI_DIR=<the directory it printed>
 ```
 
+The WebUI's MCP client cannot reach an MCP server from the browser: the Streamable HTTP transports
+answer POST from a raw writer without CORS headers. `--webui-mcp-proxy` serves the `/cors-proxy`
+relay that the WebUI's "Use llama-server proxy" option targets (the target in the `url` query
+parameter, its headers prefixed with `x-llama-server-proxy-header-`) and reports
+`cors_proxy_enabled` in `/props`. The relay streams, forwards to any `http://` host it is given
+(`https://` is refused: there is no TLS client), and carries no API key, because the WebUI prefixes
+its own `Authorization` along with every other header; enable it only on a trusted bind address.
+
 ### Models
 
 `GET /v1/models` and `GET /v1/models/{id}` return the configured public OpenAI model alias
@@ -1097,6 +1105,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--default-max-tokens N` | output limit when omitted by a request; `0` generates until the context runs out | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--no-webui` | stop serving a WebUI built in with `NINFER_WEBUI_DIR` | served when built in |
+| `--webui-mcp-proxy` | relay the WebUI's MCP traffic at `/cors-proxy` (http targets, no API key) | off |
 | `--structured-output` | accept JSON and JSON Schema response formats (see [Structured output](#structured-output)) | off |
 | `--thinking-budget-message TEXT` | message a thinking-enabled request receives at its thinking budget instead of the built-in notice; the canonical `</think>` close is appended when missing | built-in |
 | `--default-reasoning-effort E` | effort for requests that name none: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | unset |
