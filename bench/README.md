@@ -1069,9 +1069,7 @@ the selected kernel topology and payload while replacing the mathematical operat
 bitwise work:
 
 ```bash
-cmake --build build --parallel --target \
-  ninfer_residual_add_bench ninfer_sigmoid_mul_bench \
-  ninfer_gelu_bench ninfer_add_bias_bench
+cmake --build build --parallel --target ninfer_benches
 
 ./build/bench/ninfer_benches ninfer_residual_add_bench [--patches P] [--control]
 ./build/bench/ninfer_benches ninfer_sigmoid_mul_bench \

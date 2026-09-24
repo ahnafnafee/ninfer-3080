@@ -454,7 +454,7 @@ A long-lived Op benchmark calls the public contract and, when applicable, its pu
 capacity query. It does not include private implementation headers, call private launchers, expose
 candidate or kernel forcing, or duplicate candidate legality and production dispatch tables.
 
-The sole standing exception is `ninfer_gated_delta_net_bench --chunked-only --breakdown`: the
+The sole standing exception is `ninfer_benches ninfer_gated_delta_net_bench --chunked-only --breakdown`: the
 complete chunked pipeline is still measured through the public Op, while the benchmark may call
 exactly its three intrinsic `prepare_wy_wu`, `state_passing`, and `output` stage launchers for
 algorithm-stage attribution. It may not call the private complete-pipeline launcher or any other
