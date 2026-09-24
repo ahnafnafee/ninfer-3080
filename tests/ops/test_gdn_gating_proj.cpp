@@ -34,9 +34,16 @@ constexpr Geometry kQwen27{"qwen3_6_27b", 5120, 48, false};
 constexpr Geometry kQwen38Parent{"qwen3_8_27b_parent", 5120, 48, true};
 constexpr Geometry kQwen35{"qwen3_6_35b_a3b", 2048, 32, true};
 
+#if defined(NINFER_SFU_SOFTPLUS) && NINFER_SFU_SOFTPLUS
+// The SFU softplus carries lg2.approx's error, about 2e-6 of the result.
+constexpr ReductionCriterion kGdnProjectionFp32{/*relative_l2=*/4.0e-6,
+                                                /*gross_absolute=*/5.0e-7,
+                                                /*gross_relative_to_max_reference=*/5.0e-6};
+#else
 constexpr ReductionCriterion kGdnProjectionFp32{/*relative_l2=*/1.4e-6,
                                                 /*gross_absolute=*/5.0e-7,
                                                 /*gross_relative_to_max_reference=*/2.5e-6};
+#endif
 constexpr ReductionCriterion kGdnNormOutputBf16{/*relative_l2=*/1.75e-3,
                                                 /*gross_absolute=*/1.0e-4,
                                                 /*gross_relative_to_max_reference=*/kBf16GrossRelativeFloor};

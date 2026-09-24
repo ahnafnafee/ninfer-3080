@@ -41,6 +41,16 @@ endif()
 option(NINFER_BUILD_APPS "Build the NInfer CLI, server and perplexity evaluator" ON)
 option(BUILD_TESTING "Build NInfer tests" OFF)
 option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
+option(NINFER_SFU_SIGMOID_SILU
+       "Evaluate sigmoid and SiLU on the SFU instead of with expf and a divide" OFF)
+if(NINFER_SFU_SIGMOID_SILU)
+  add_compile_definitions(NINFER_SFU_SIGMOID_SILU=1)
+endif()
+option(NINFER_SFU_SOFTPLUS
+       "Evaluate the GDN gate's softplus on the SFU instead of expf and log1pf" OFF)
+if(NINFER_SFU_SOFTPLUS)
+  add_compile_definitions(NINFER_SFU_SOFTPLUS=1)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

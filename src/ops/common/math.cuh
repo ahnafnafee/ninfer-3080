@@ -10,17 +10,52 @@
 
 namespace ninfer::ops {
 
-__device__ __forceinline__ float silu(float x) { return x / (1.0f + expf(-x)); }
-
-__device__ __forceinline__ float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
-
-__device__ __forceinline__ float softplus(float x) { return (x > 20.0f) ? x : log1pf(expf(x)); }
-
 __device__ __forceinline__ float exp2_approx(float x) {
     float y;
     asm("ex2.approx.f32 %0, %1;" : "=f"(y) : "f"(x));
     return y;
 }
+
+__device__ __forceinline__ float log2_approx(float x) {
+    float y;
+    asm("lg2.approx.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+}
+
+inline constexpr float kLog2e = 1.4426950408889634f;
+inline constexpr float kLn2   = 0.6931471805599453f;
+
+#if defined(NINFER_SFU_SIGMOID_SILU) && NINFER_SFU_SIGMOID_SILU
+// sigmoid and silu on the special function unit (the NINFER_SFU_SIGMOID_SILU build option):
+// ex2.approx and a correctly rounded reciprocal instead of expf and a divide. A large negative x
+// sends the exponential to +inf and the reciprocal to zero, the limits of both functions.
+__device__ __forceinline__ float sigmoid(float x) {
+    return __frcp_rn(1.0f + exp2_approx(-x * kLog2e));
+}
+
+__device__ __forceinline__ float silu(float x) { return x * sigmoid(x); }
+#else
+__device__ __forceinline__ float silu(float x) { return x / (1.0f + expf(-x)); }
+
+__device__ __forceinline__ float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
+#endif
+
+#if defined(NINFER_SFU_SOFTPLUS) && NINFER_SFU_SOFTPLUS
+// softplus on the special function unit (the NINFER_SFU_SOFTPLUS build option): ln 2 times
+// lg2(1 + 2^(x log2 e)). Where e^x is small, forming 1 + e^x in FP32 would round most of it away,
+// and those inputs are the slow decays of long-memory GDN heads, so that range takes the log1p
+// series instead.
+__device__ __forceinline__ float softplus(float x) {
+    if (x > 20.0f) { return x; }
+    const float t = exp2_approx(x * kLog2e);
+    if (t < 0.0625f) {
+        return t * (1.0f - t * (0.5f - t * (1.0f / 3.0f - t * (0.25f - t * 0.2f))));
+    }
+    return kLn2 * log2_approx(1.0f + t);
+}
+#else
+__device__ __forceinline__ float softplus(float x) { return (x > 20.0f) ? x : log1pf(expf(x)); }
+#endif
 
 // silu for a caller that rounds the result to bf16 immediately. Both halves of the accurate form
 // are expensive for a value about to lose 16 mantissa bits: expf compiles to a guarded slow path
