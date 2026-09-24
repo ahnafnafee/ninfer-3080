@@ -9,6 +9,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <vector>
 
 namespace ninfer::runtime {
 
@@ -378,14 +379,28 @@ struct PressureTargetAssessment {
 // Target-produced affine reservation curve for one Main KV physical-capacity axis. The byte
 // values come from complete target physical layout plans, not from a model geometry formula in
 // the common runtime.
+//
+// The primary device's curve is the flat fields below. A model split into pipeline stages has the
+// same curve for every further device in `extra_ranks`: each holds its own layers' KV, so a page
+// group costs each device a different number of bytes, and the capacity that fits is the smallest
+// any one of them allows. A device with no KV cost (stride zero) does not constrain it.
+struct RankCapacityCurve {
+    std::size_t minimum_device_reservation_bytes     = 0;
+    std::size_t bytes_per_additional_main_page_group = 0;
+};
+
 struct SequenceCapacityCurve {
     std::uint32_t main_page_tokens                   = 0;
     std::uint32_t minimum_main_page_groups           = 0;
     std::uint32_t maximum_main_page_groups           = 0;
     std::size_t minimum_device_reservation_bytes     = 0;
     std::size_t bytes_per_additional_main_page_group = 0;
+    std::vector<RankCapacityCurve> extra_ranks;
 
     [[nodiscard]] std::size_t reservation_bytes(std::uint32_t main_page_groups) const;
+    // Bytes further device `extra_rank` (0-based, so device 1 is index 0) must hold.
+    [[nodiscard]] std::size_t extra_rank_reservation_bytes(std::size_t extra_rank,
+                                                           std::uint32_t main_page_groups) const;
     [[nodiscard]] std::uint32_t resolved_tokens(std::uint32_t main_page_groups) const;
 };
 
@@ -397,6 +412,9 @@ struct KvCapacityResolution {
     std::size_t minimum_runtime_reservation_bytes    = 0;
     std::size_t bytes_per_additional_main_page_group = 0;
     std::size_t runtime_reservation_bytes            = 0;
+    // What each further device reserves (device 1 first), and which device bound the capacity.
+    std::vector<std::size_t> extra_rank_reservation_bytes;
+    std::size_t binding_rank                         = 0;
     std::size_t available_after_weights_bytes        = 0;
     std::size_t available_after_startup_bytes        = 0;
     std::size_t automatic_headroom_bytes             = 0;

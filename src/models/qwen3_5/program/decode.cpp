@@ -37,6 +37,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
                          {}, state.execution.linear_attention, state.execution.io,
                          state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
                          &state.text_cache);
+        card.set_stage_runtime(state.execution.stages);
 
         Tensor tokens             = ordinary.tokens.slice(0, 0, batch_size);
         Tensor cache_positions    = ordinary.cache_positions.slice(0, 0, batch_size);
@@ -217,7 +218,7 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
         // DFlash2 has only fixed cyclic state; DFlash also grows its Full backend KV here.
         if (sequence.kv->backend) {
             backend_kv_addresses->ensure_mapped_to_tokens(*sequence.kv->backend, end,
-                                                          device.stream);
+                                                          compute_streams);
         }
         minimum_count = std::min(minimum_count, counts[row]);
         maximum_count = std::max(maximum_count, counts[row]);
@@ -243,9 +244,9 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
     ops::prepare_ragged_prefix(dflash->pending_features, active_lane_tensor, device_starts,
                                device_ends, features, positions, device_counts, device.stream);
 
-    execution::DFlashAppendContext state{{device, parameters, work, state_images->linear(),
+    execution::DFlashAppendContext state{{device, parameters, work, state_images->linear(0),
                                           replay_records ? &*replay_records : nullptr, io,
-                                          prefill_hidden, prefill_chunk, proposal_head},
+                                          prefill_hidden, prefill_chunk, proposal_head, stage_runtime.get()},
                                          *dflash};
     mark_workspace_usage(workspace_plan.dflash_context);
     execution::dflash_append_context(state, features, positions, device_counts,
@@ -332,9 +333,9 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
         }
 
         execution::OrdinaryBatchContext schedule_state{
-            {device, parameters, work, state_images->linear(),
+            {device, parameters, work, state_images->linear(0),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, stage_runtime.get()},
             decoder->text_kv,
             *io.ordinary,
             *ordinary_host_ingress,
@@ -491,9 +492,9 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                       std::min(capacity, frontier + extent + draft_window));
         }
 
-        execution::MtpBatchContext schedule_state{{device, parameters, work, state_images->linear(),
+        execution::MtpBatchContext schedule_state{{device, parameters, work, state_images->linear(0),
                                                    replay_records ? &*replay_records : nullptr, io,
-                                                   prefill_hidden, prefill_chunk, proposal_head},
+                                                   prefill_hidden, prefill_chunk, proposal_head, stage_runtime.get()},
                                                   decoder->text_kv,
                                                   *decoder->mtp_cache(),
                                                   *io.mtp_decode,
@@ -686,9 +687,9 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         }
 
         execution::DFlashBatchContext schedule_state{
-            {device, parameters, work, state_images->linear(),
+            {device, parameters, work, state_images->linear(0),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, stage_runtime.get()},
             decoder->text_kv,
             *dflash,
             *io.dflash_decode,
@@ -835,7 +836,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
     if (request.pending.kind == PendingKind::Begin && terminal && sequence.state.fork_pending) {
         const StateImageSelectors selectors = state_selectors(sequence);
         timing.resume_submit();
-        state_images->copy_slot(selectors.source, selectors.destination, device.stream);
+        state_images->copy_slot(selectors.source, selectors.destination, compute_streams);
         timing.begin_wait();
         device.synchronize();
         timing.end_wait();

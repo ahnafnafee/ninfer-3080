@@ -617,83 +617,41 @@ MTP is intentionally off for this profile. At 32K, speculative recurrent state w
 3090 memory budget; KV compression alone does not recover enough memory. Text-only 35B profiles can
 still use MTP3 as documented above.
 
-## Two GPUs: expert offload (`--devices 0,1`)
+## Several GPUs: pipeline stages (`--devices A,B,...`)
 
-With two cards, each layer's expert/MLP block is materialized on the second GPU. Rank 0 keeps
-everything else -- embeddings, attention, GDN, norms, the head -- and therefore keeps the KV cache,
-the GDN recurrent state and the context cache. Every byte rank 0 sheds becomes KV.
+`--devices 0,1` splits the model's layers into one pipeline stage per GPU. Each stage owns its
+layers whole: weights, the KV cache of its attention layers, the recurrent state of its GDN layers
+and the scratch it runs in. The point is memory. A model that does not fit one card, or a context
+that does not, spreads across several, and every card's memory is usable for KV.
 
-Measured on a rented bridgeless 2x RTX 3090 (no NVLink; `nvidia-smi topo -m` reports PHB), int8 KV.
-Greedy output is byte-identical to the single-GPU reference in every split configuration, on both
-models, with and without MTP.
+```
+ninfer-serve model.ninfer --devices 0,1
+ninfer model.ninfer --devices 0,1,2 --stage-layers 20,22,22 --prompt "..."
+```
 
-### Capacity, which is the point
+- **`--stage-layers A,B,...`** sets the layers per stage. Without it the split follows each
+  device's free memory, so the first GPU, which also carries the embedding and head, takes fewer
+  layers and the most KV cache fits on every card at once.
+- **The first GPU also holds the embedding, the output head and the round state.** The last stage
+  sends the residual back to it, one extra hop per forward pass.
+- **It is a memory feature, not a speed feature.** The stages run in sequence and each reads only
+  its own weights, so a single stream decodes about as fast as one GPU, minus the boundary hops.
+- **Linux only for real multi-GPU.** Repeating one id (`--devices 0,0`) puts several stages on one
+  card, saves no memory, and exercises the whole stage path; it is how the path is tested without a
+  second GPU, and it works on Windows too.
+- **Works with a split:** the context cache and prefix reuse, CUDA graphs, and MTP. **Not yet:**
+  DFlash/DFlash2 and vision, which are refused at startup with a message saying so.
+- **Boundary transfers stage through pinned host memory.** Peer access is not needed, and no
+  consumer PCIe pair measured so far offers it. Measured with `tools/tp_probe.cu` on rented 2x A4000
+  and 2x 3090 PCIe boxes, a staged transfer took about 0.03 ms at a decode-sized payload and several
+  milliseconds at a prefill-chunk-sized one, depending on the slot's link width.
 
-| | max total KV | note |
-|---|---|---|
-| single GPU | 237,248 tokens | 262,144 context **fails to start at all** |
-| `--devices 0,1`, C=8 @ 262k | **1,929,728 tokens** | 8 sessions at ~241k each, 1.08 GiB spare |
-
-**8.1x the KV**, and a single 3090 cannot serve 262k context at any concurrency.
-
-| Qwen3.6-35B-A3B | weights on rank 0 | free for KV |
-|---|---|---|
-| single GPU | 19.6 GiB | 3.71 GiB |
-| `--devices 0,1` | **2.15 GiB** | **21.1 GiB** |
-
-| Qwen3.8-27B | weights on rank 0 | free for KV |
-|---|---|---|
-| single GPU | 15.9 GiB | 7.38 GiB |
-| `--devices 0,1` | **6.79 GiB** | **16.5 GiB** |
-
-The 27B divides less dramatically because its attention and GDN projections at hidden 5120 are
-large next to its dense MLP; the 35B's MoE is ~88% of its weights.
-
-### Aggregate throughput under concurrent load
-
-200 tokens per request, 16K context. This is the number that matters for serving, and it is not
-what single-stream decode suggests.
-
-| tok/s aggregate | C=1 | C=4 | C=8 |
-|---|---|---|---|
-| single GPU | 140.7 | 292.9 | 348.2 |
-| **`--devices 0,1`** | -- | 300.1 | **404.8** |
-| single GPU + MTP3 | 162.1 | 264.4 | -- |
-| `--devices 0,1` + MTP3 | **174.8** | **336.6** | 356.0 |
-
-**At C=8 the split is 16% faster than one card**, not slower. Decode at concurrency is
-bandwidth-bound, and the split reads expert weights from card 1's memory while reading KV from
-card 0's -- two memory systems in parallel. That outweighs the per-layer crossings once the batch
-is large enough to expose it.
-
-Single-stream is the opposite case and the split's worst one: 137 against 177 tok/s without
-speculation. Use MTP there (240.5 against 267.1, a 10% gap) and skip it under load, where drafting
-spends compute on tokens a full batch will reject.
-
-**Rule of thumb:** `--devices 0,1` alone for concurrent serving; add `--spec mtp --draft-tokens 3`
-for single-stream latency.
-
-Two cells above are blank because those runs failed to start with a runtime-planning error after a
-prior configuration had not released its VRAM. Both combinations work in isolation; they are left
-blank rather than filled in from a different run.
-
-### Prefill
-
-| | prefill tok/s |
-|---|---|
-| single GPU | 6.34k |
-| `--devices 0,1` | 5.30k (84%) |
-
-Prefill crossings carry a whole chunk (~4 MB) rather than one token's activation, so this is the
-one place a bridge would pay. Per token it would not: a decode crossing is ~4 KiB and
-latency-bound.
-
-Peer access is not required and is unavailable on a consumer pair anyway --
-`cudaDeviceCanAccessPeer` returns 0 between two GeForce cards. Crossings stage through pinned host
-memory, split into four pipelined pieces.
-
-`NINFER_KEEP_EXPERTS=N` keeps N layers' expert blocks on rank 0, trading KV room for fewer
-crossings. 0 (offload everything) is the default and maximises capacity.
+Measured on two rented Linux boxes (Qwen3.6-27B, int8 KV, no peer access on either): on 2x RTX 3090
+(PCIe 3.0 x16) greedy output is byte-identical to one card, decode is 48.5 tok/s against 46.9 on one
+card (105.3 against 100.2 with MTP3), prefill is unchanged, and `--kv-capacity auto` resolves the
+full 262,144-token context that one 24 GB card refuses. On 2x RTX A4000 the 27B runs at 262,144
+tokens with 24.1 tok/s decode (52.6 with MTP3) and 825 tok/s prefill. The tables, the cases checked
+and the design are in `docs/maintainer/pipeline-parallel-plan.md`.
 
 ## Capabilities
 
@@ -836,7 +794,7 @@ a 24 GB card and the server can reuse fast CUDA Graphs instead of rebuilding wor
   Qwen3.8-27B fits C8/8K with MTP3 through ReplaySSM.
 - The shared KV pool is fixed at startup and is not divided statically among request lanes.
 - This is bounded small-scale batching, not preemptive large-scale continuous batching.
-- No multi-GPU execution or CPU/GPU weight offload.
+- Multi-GPU execution is pipeline stages only (no tensor parallelism), Linux only, and does not yet cover speculative decoding or vision. No CPU/GPU weight offload.
 - Tool calls are returned to the client but are not executed by NInfer.
 - NVFP4 A4, FP8 A8, and TMA kernels require Blackwell and are unavailable on SM86. FP8 and NVFP4
   weights are admitted through their A16 dequantizing routes.

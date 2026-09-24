@@ -357,9 +357,9 @@ int main() {
         check(serve_usage_text("ninfer-serve").find("--auto-prefix-grid") != std::string::npos,
               "serve help omits --auto-prefix-grid");
 
-    // --devices selects ordered CUDA devices for model-parallel execution. Only the shape is
-    // parsed here; matching compute capability and peer access are the engine's to validate,
-    // because they need real devices.
+    // --devices selects the ordered CUDA devices the model's pipeline stages run on. Only the shape
+    // is parsed here; matching compute capability is the engine's to validate, because it needs real
+    // devices.
     failures += check(parse({"ninfer-serve", "model.ninfer"}).devices.empty(),
                       "devices defaulted to a non-empty list");
     const ServeOptions one_device = parse({"ninfer-serve", "model.ninfer", "--devices", "3"});
@@ -368,9 +368,12 @@ int main() {
     const ServeOptions pair = parse({"ninfer-serve", "model.ninfer", "--devices", "1,2"});
     failures += check(pair.devices.size() == 2 && pair.devices[0] == 1 && pair.devices[1] == 2,
                       "--devices did not preserve the ordered pair");
+    const ServeOptions triple = parse({"ninfer-serve", "model.ninfer", "--devices", "0,1,2"});
+    failures += check(triple.devices.size() == 3 && triple.devices[2] == 2,
+                      "--devices did not accept more than two stages");
 
     for (const auto& [value, why] : std::vector<std::pair<std::string, const char*>>{
-             {"0,1,2", "three devices"},
+             {"0,1,2,3,4,5,6,7,8", "more devices than a context holds"},
              {"", "an empty list"},
              {"1,", "a trailing comma"}}) {
         bool rejected = false;
@@ -386,6 +389,23 @@ int main() {
     failures += check(same_card.devices.size() == 2 && same_card.devices[0] == 0 &&
                            same_card.devices[1] == 0,
                       "--devices 0,0 was not accepted for single-card split coverage");
+
+    // --stage-layers gives the layers per stage, one count per device.
+    const ServeOptions staged =
+        parse({"ninfer-serve", "model.ninfer", "--devices", "0,0", "--stage-layers", "20,44"});
+    failures += check(staged.stage_layers == std::vector<std::uint32_t>({20, 44}),
+                      "--stage-layers did not reach serving options");
+    bool stage_layers_alone_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--stage-layers", "20,44"});
+    } catch (const std::invalid_argument&) { stage_layers_alone_rejected = true; }
+    failures += check(stage_layers_alone_rejected,
+                      "--stage-layers without a multi-device split was accepted");
+    bool zero_stage_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--devices", "0,0", "--stage-layers", "0,64"});
+    } catch (const std::invalid_argument&) { zero_stage_rejected = true; }
+    failures += check(zero_stage_rejected, "a stage with no layers was accepted");
 
     bool exclusive_rejected = false;
     try {

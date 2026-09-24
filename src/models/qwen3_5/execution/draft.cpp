@@ -618,6 +618,7 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                          {}, state.execution.linear_attention, state.execution.io,
                          state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
                          &state.text_cache);
+        card.set_stage_runtime(state.execution.stages);
         DFlashFeatureSink sink =
             batch_feature_sink_impl(state, active_lanes, valid_columns, width, batch_size);
         {

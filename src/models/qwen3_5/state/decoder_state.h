@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
+#include <vector>
 
 namespace ninfer::models::qwen3_5 {
 
@@ -23,11 +25,15 @@ struct DecoderStateSpec {
     std::int32_t kv_table_rows              = 1;
     std::uint32_t text_physical_page_groups = 0;
     std::uint32_t mtp_physical_page_groups  = 0;
+    // The rank holding each full-attention layer's KV planes; empty puts every layer on rank 0. The
+    // MTP cache always lives on rank 0.
+    std::vector<std::size_t> text_layer_rank;
 };
 
 struct PagedKVCacheLayout {
     DeviceKVPagePoolLayout pages;
-    KVExecutionTableLayout execution_tables;
+    // One copy of the block tables per rank that runs attention layers of this cache.
+    std::vector<KVExecutionTableLayout> execution_tables;
     std::uint32_t layers      = 0;
     std::uint32_t max_context = 0;
     std::int32_t kv_heads     = 0;
@@ -50,14 +56,18 @@ public:
 
 private:
     friend class PagedKVCache;
-    PagedKVCacheView(const PagedKVCache& cache, Tensor block_table) noexcept;
+    PagedKVCacheView(const PagedKVCache& cache, KVExecutionRowHandle row) noexcept;
 
     const PagedKVCache* cache_ = nullptr;
-    Tensor block_table_;
+    // The row, not a tensor: each layer reads the copy of its row held by the layer's own rank.
+    KVExecutionRowHandle row_;
 };
 
 class PagedKVCache {
 public:
+    // `backings[r]` is rank r's persistent device memory.
+    PagedKVCache(std::span<const DeviceSpan> backings, const PagedKVCacheLayout& layout);
+    // Every plane and table on rank 0.
     PagedKVCache(DeviceSpan backing, const PagedKVCacheLayout& layout);
 
     PagedKVCache(const PagedKVCache&)            = delete;
@@ -82,10 +92,13 @@ public:
     [[nodiscard]] PagedKVCacheView execution_view(const KVExecutionRowLease& row) const;
 
     [[nodiscard]] PagedKVBatchLayerView batch_layer_view(std::uint32_t layer) const;
+    // The rank holding this layer's KV planes, which is also the rank whose block table it reads.
+    [[nodiscard]] std::size_t layer_rank(std::uint32_t layer) const;
 
 private:
     friend class PagedKVCacheView;
-    [[nodiscard]] PagedKVLayerView layer_view(std::uint32_t layer, Tensor block_table) const;
+    [[nodiscard]] PagedKVLayerView layer_view(std::uint32_t layer,
+                                              const KVExecutionRowHandle* row) const;
 
     DeviceKVPagePool pages_;
     KVExecutionTablePool execution_tables_;
@@ -105,11 +118,16 @@ struct DecoderStateLayout {
 
 [[nodiscard]] DecoderStateLayout plan_decoder_state(LayoutBuilder& builder,
                                                     const DecoderStateSpec& spec);
+// One layout builder per rank: each layer's planes and each rank's block-table copy are laid out in
+// that rank's own backing.
+[[nodiscard]] DecoderStateLayout plan_decoder_state(std::span<LayoutBuilder* const> builders,
+                                                    const DecoderStateSpec& spec);
 
 struct DecoderState {
     PagedKVCache text_kv;
     std::optional<PagedKVCache> mtp_kv;
 
+    DecoderState(std::span<const DeviceSpan> backings, const DecoderStateLayout& layout);
     DecoderState(DeviceSpan backing, const DecoderStateLayout& layout);
 
     [[nodiscard]] PagedKVCache* mtp_cache() noexcept;

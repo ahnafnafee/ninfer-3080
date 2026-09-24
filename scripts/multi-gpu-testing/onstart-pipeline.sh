@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Does the expert-offload split actually run, and does it produce the right tokens?
+# Does the pipeline split actually run, and does it produce the right tokens?
 #
 # The test that matters is equivalence: greedy decoding on one GPU and greedy decoding with the
-# expert blocks offloaded to a second GPU must produce identical text. Anything else -- it starts,
-# it is fast, memory looks right -- can be true of a build that is silently reading the wrong
-# device's memory.
+# the layers split into one pipeline stage per GPU must produce identical text. Anything else -- it
+# starts, it is fast, memory looks right -- can be true of a build that is silently reading the
+# wrong device's memory.
 #
-# It also records what each card holds, because the point of the split is the KV room it frees on
-# rank 0, and compares the KV capacity the engine resolves in each mode.
+# It also records what each card holds, because the point of the split is the weight and KV room it
+# frees on each card, and compares the KV capacity the engine resolves in each mode.
 set -uo pipefail
 exec 2>&1
 echo "=== pipeline execution test $(date -u +%FT%TZ) ==="

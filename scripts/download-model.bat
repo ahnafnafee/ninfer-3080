@@ -30,8 +30,12 @@ rem Run with no argument (for instance by double-clicking it) it shows a numbere
 rem models instead; an unknown name still prints the usage and exits 2. download-model.sh has no
 rem menu and always requires the name.
 rem
-rem Environment: NINFER_MODEL_DIR (default: models\ beside this file), NINFER_SKIP_SHA256=1 to accept
-rem a file on size alone.
+rem Environment: NINFER_MODEL_DIR (default: models\ at the repo root in a checkout, or beside this
+rem file in the release archive), NINFER_SKIP_SHA256=1 to accept a file on size alone.
+rem
+rem Uses aria2c (16 parallel ranges) when it is on PATH, since single-stream curl against these
+rem artifacts has been observed to throttle to ~1 MB/s or stall outright; falls back to curl
+rem otherwise. Install it with `winget install aria2.aria2` or `choco install aria2` to opt in.
 
 if "%~1"=="" goto :menu
 if /i "%~1"=="qwen38-27b" goto :model_qwen38_27b
@@ -104,8 +108,17 @@ set "TESTS_VARIABLE=NINFER_QWEN3_6_35B_A3B_WEIGHTS"
 goto :model_selected
 
 :model_selected
+rem Two layouts share this script. In the release archive it sits at the archive root beside
+rem models\. In a checkout it sits in scripts\, one level under the repo root, and models\ (see
+rem .gitignore) is beside the repo root, not beside this script -- a directory named scripts with a
+rem CMakeLists.txt above it tells the two apart (a bare CMakeLists.txt probe would misfire on an
+rem archive unpacked beneath any source tree), matching run.bat's own default so a model
+rem downloaded here is found there.
 set "ROOT=%~dp0"
+for %%I in ("%ROOT%..") do set "REPO_ROOT=%%~fI"
+for %%I in ("%ROOT%.") do set "SCRIPT_DIRNAME=%%~nxI"
 set "MODEL_DIR=%ROOT%models"
+if /i "%SCRIPT_DIRNAME%"=="scripts" if exist "%REPO_ROOT%\CMakeLists.txt" set "MODEL_DIR=%REPO_ROOT%\models"
 if defined NINFER_MODEL_DIR set "MODEL_DIR=%NINFER_MODEL_DIR%"
 set "MODEL=%MODEL_DIR%\%ARTIFACT%"
 
@@ -132,7 +145,18 @@ if exist "%MODEL%" (
 )
 
 echo Downloading %LABEL%...
-curl.exe -L -C - --fail --output "%PART%" "https://huggingface.co/neroued/%REPO%/resolve/%REVISION%/%ARTIFACT%"
+set "URL=https://huggingface.co/neroued/%REPO%/resolve/%REVISION%/%ARTIFACT%"
+set "PART_NAME=%ARTIFACT%.%REVISION%.part"
+where /q aria2c
+if not errorlevel 1 (
+  rem 16 parallel ranges over one file, not single-stream curl. On the Vast rental boxes this repo
+  rem downloads at ~98 MB/s over aria2c against the same throttled-to-~1MB/s (and once outright
+  rem stalled at 11 of 21 GiB) single-stream curl -- see scripts\multi-gpu-testing\README.md. -c
+  rem resumes into the same .part name curl would use, and HuggingFace serves ranges fine.
+  aria2c -x16 -s16 -c --file-allocation=none -d "%MODEL_DIR%" -o "%PART_NAME%" "%URL%"
+) else (
+  curl.exe -L -C - --fail --output "%PART%" "%URL%"
+)
 if errorlevel 1 (
   echo Download failed. Run this file again to resume.
   exit /b 1

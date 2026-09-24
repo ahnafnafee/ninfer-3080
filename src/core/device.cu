@@ -44,19 +44,36 @@ void cuda_check(cudaError_t err, const char* expr, const char* file, int line) {
     std::abort();
 }
 
+DeviceBinding::DeviceBinding(int device) {
+    const cudaError_t get = cudaGetDevice(&previous_);
+    if (get != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaGetDevice failed", get));
+    }
+    if (previous_ == device) { return; }
+    const cudaError_t set = cudaSetDevice(device);
+    if (set != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaSetDevice failed", set));
+    }
+    changed_ = true;
+}
+
+DeviceBinding::~DeviceBinding() noexcept {
+    if (changed_) { log_cuda_error("cudaSetDevice", cudaSetDevice(previous_)); }
+}
+
 DeviceContext::DeviceContext(int device_id)
     : DeviceContext(std::span<const int>(&device_id, 1)) {}
 
-DeviceContext::DeviceContext(std::span<const int> device_ids,
-                             std::size_t min_crossing_staging_bytes) {
+DeviceContext::DeviceContext(std::span<const int> device_ids) {
     int count       = 0;
     cudaError_t err = cudaGetDeviceCount(&count);
     if (err != cudaSuccess) {
         throw std::runtime_error(cuda_error_message("cudaGetDeviceCount failed", err));
     }
     if (count <= 0) { throw std::runtime_error("no CUDA devices available"); }
-    if (device_ids.empty() || device_ids.size() > 2) {
-        throw std::invalid_argument("DeviceContext requires one or two CUDA devices");
+    if (device_ids.empty() || device_ids.size() > kMaxRanks) {
+        throw std::invalid_argument("DeviceContext requires between one and " +
+                                    std::to_string(kMaxRanks) + " CUDA devices");
     }
     device_ids_.assign(device_ids.begin(), device_ids.end());
     for (std::size_t i = 0; i < device_ids_.size(); ++i) {
@@ -66,17 +83,19 @@ DeviceContext::DeviceContext(std::span<const int> device_ids,
                                      std::to_string(count) +
                                      (count == 1 ? " device is visible" : " devices are visible"));
         }
-        // A repeated id is allowed on purpose. Two ranks on one card is not a useful deployment --
-        // it frees no memory -- but it exercises the entire split path (per-rank binding and
-        // materialization, per-rank workspaces, and the cross-rank copies) on a single-GPU
-        // machine. Every bug caught that way is one not caught by renting two cards.
+        // A repeated id is allowed on purpose. Several ranks on one card is not a useful
+        // deployment -- it frees no memory -- but it exercises the entire multi-rank path
+        // (per-rank binding and materialization, per-rank workspaces, and the cross-rank copies)
+        // on a single-GPU machine. Every bug caught that way is one not caught by renting a
+        // second card.
     }
 
     endpoints_.resize(device_ids_.size());
     try {
         for (std::size_t rank = 0; rank < device_ids_.size(); ++rank) {
-            Endpoint& endpoint = endpoints_[rank];
-            endpoint.device    = device_ids_[rank];
+            RankContext& endpoint = endpoints_[rank];
+            endpoint.index        = rank;
+            endpoint.device       = device_ids_[rank];
             err                = cudaSetDevice(endpoint.device);
             if (err != cudaSuccess) {
                 throw std::runtime_error(cuda_error_message("cudaSetDevice failed", err));
@@ -106,93 +125,66 @@ DeviceContext::DeviceContext(std::span<const int> device_ids,
                 throw std::runtime_error(
                     cuda_error_message("cudaEventCreateWithFlags(fence) failed", err));
             }
-            for (cudaEvent_t& piece : endpoint.piece_fences) {
-                err = cudaEventCreateWithFlags(&piece, cudaEventDisableTiming);
-                if (err != cudaSuccess) {
-                    throw std::runtime_error(
-                        cuda_error_message("cudaEventCreateWithFlags(piece fence) failed", err));
-                }
-            }
-            for (cudaEvent_t& piece : endpoint.piece_consumed) {
-                err = cudaEventCreateWithFlags(&piece, cudaEventDisableTiming);
-                if (err != cudaSuccess) {
-                    throw std::runtime_error(
-                        cuda_error_message("cudaEventCreateWithFlags(piece consumed) failed", err));
-                }
-            }
         }
 
-        // Two ranks on the same card need no peer setup: copies between them are ordinary
-        // device-to-device, and enabling peer access to self is an error.
-        if (endpoints_.size() == 2 && endpoints_[0].device == endpoints_[1].device) {
-            peer_access_ = true;
-        } else if (endpoints_.size() == 2) {
-            const Endpoint& first  = endpoints_[0];
-            const Endpoint& second = endpoints_[1];
-            if (first.props.major != second.props.major ||
-                first.props.minor != second.props.minor) {
+        // Every rank must share one compute capability, so kernels built for it run on all of them.
+        for (std::size_t rank = 1; rank < endpoints_.size(); ++rank) {
+            if (endpoints_[rank].props.major != endpoints_[0].props.major ||
+                endpoints_[rank].props.minor != endpoints_[0].props.minor) {
                 throw std::invalid_argument(
                     "model-parallel CUDA devices must have the same compute capability");
             }
-            // Peer access is a performance capability, not a requirement. NVIDIA disables P2P over
-            // PCIe on GeForce, so a pair of 3090s without an NVLink bridge reports can_access == 0
-            // -- but cudaMemcpyPeer still works there, staging through host memory. Refusing to
-            // start would rule out the most common consumer dual-GPU box for no reason, so record
-            // the capability and let callers choose a schedule that suits it.
-            //
-            // Measured on this fork's reference 3090 (PCIe 4.0 x16), a staged hop costs ~13us and
-            // is latency-bound: flat from 4KiB to 40KiB, which spans both models' per-token
-            // activation (35B-A3B hidden 2048 -> 4KiB, 27B hidden 5120 -> 10KiB). That is
-            // negligible for a schedule crossing once per token, and a few percent of a decode
-            // step for one crossing twice per layer.
-            peer_access_ = true;
-            for (std::size_t source = 0; source < 2; ++source) {
-                const std::size_t destination = 1 - source;
-                int can_access                = 0;
+        }
+
+        // peer_matrix_[from][to]: can `from` DMA into `to`. Ranks on one card need no peer setup:
+        // copies between them are ordinary device-to-device, and enabling peer access to self is an
+        // error, so they are recorded as reachable.
+        //
+        // Peer access is a performance capability, not a requirement. NVIDIA disables P2P over PCIe
+        // on GeForce, so a pair of 3090s without an NVLink bridge reports can_access == 0 -- but
+        // transfers still work there, staged through host memory. Refusing to start would rule out
+        // the most common consumer multi-GPU box for no reason, so record the capability and let
+        // callers choose a transport that suits it. (Neither a 2x 3090 nor a 2x A4000 PCIe box
+        // measured so far reported any.)
+        const std::size_t ranks = endpoints_.size();
+        peer_matrix_.assign(ranks * ranks, 0);
+        peer_access_ = true;
+        for (std::size_t source = 0; source < ranks; ++source) {
+            for (std::size_t destination = 0; destination < ranks; ++destination) {
+                char& reachable = peer_matrix_[source * ranks + destination];
+                if (endpoints_[source].device == endpoints_[destination].device) {
+                    reachable = 1;
+                    continue;
+                }
+                int can_access = 0;
                 err = cudaDeviceCanAccessPeer(&can_access, endpoints_[source].device,
                                               endpoints_[destination].device);
                 if (err != cudaSuccess) {
                     throw std::runtime_error(
                         cuda_error_message("cudaDeviceCanAccessPeer failed", err));
                 }
-                if (can_access == 0) {
-                    peer_access_ = false;
-                    continue;
+                if (can_access != 0) {
+                    err = cudaSetDevice(endpoints_[source].device);
+                    if (err != cudaSuccess) {
+                        throw std::runtime_error(cuda_error_message("cudaSetDevice failed", err));
+                    }
+                    err = cudaDeviceEnablePeerAccess(endpoints_[destination].device, 0);
+                    if (err == cudaErrorPeerAccessAlreadyEnabled) {
+                        (void)cudaGetLastError();
+                        reachable = 1;
+                    } else if (err != cudaSuccess) {
+                        // Capability without a usable mapping: fall back rather than fail outright.
+                        (void)cudaGetLastError();
+                    } else {
+                        reachable = 1;
+                    }
                 }
-                err = cudaSetDevice(endpoints_[source].device);
-                if (err != cudaSuccess) {
-                    throw std::runtime_error(cuda_error_message("cudaSetDevice failed", err));
-                }
-                err = cudaDeviceEnablePeerAccess(endpoints_[destination].device, 0);
-                if (err == cudaErrorPeerAccessAlreadyEnabled) {
-                    (void)cudaGetLastError();
-                } else if (err != cudaSuccess) {
-                    // Capability without a usable mapping: fall back rather than fail outright.
-                    (void)cudaGetLastError();
-                    peer_access_ = false;
-                }
+                if (reachable == 0) { peer_access_ = false; }
             }
         }
     } catch (...) {
         release();
         throw;
-    }
-
-    if (endpoints_.size() > 1) {
-        // Sized for the largest thing a crossing carries: one prefill chunk of the residual
-        // stream. The caller (which knows the configured prefill chunk and the model's hidden
-        // size) is responsible for passing a capacity that covers it; pinned host memory is cheap
-        // next to the weights either card holds.
-        void* staging                 = nullptr;
-        const cudaError_t staging_err =
-            cudaHostAlloc(&staging, min_crossing_staging_bytes, cudaHostAllocPortable);
-        if (staging_err != cudaSuccess) {
-            release();
-            throw std::runtime_error(
-                cuda_error_message("cudaHostAlloc(cross-rank staging) failed", staging_err));
-        }
-        crossing_staging_       = staging;
-        crossing_staging_bytes_ = min_crossing_staging_bytes;
     }
 
     active_rank_ = 0;
@@ -207,18 +199,11 @@ DeviceContext::DeviceContext(std::span<const int> device_ids,
 DeviceContext::~DeviceContext() { release(); }
 
 void DeviceContext::release() noexcept {
-    if (crossing_staging_ != nullptr) {
-        log_cuda_error("cudaFreeHost", cudaFreeHost(crossing_staging_));
-        crossing_staging_       = nullptr;
-        crossing_staging_bytes_ = 0;
-    }
-    for (Endpoint& endpoint : endpoints_) {
+    for (RankContext& endpoint : endpoints_) {
         if (endpoint.stream != nullptr || endpoint.transfer_stream != nullptr ||
             endpoint.vision_stream != nullptr || endpoint.fence != nullptr) {
             log_cuda_error("cudaSetDevice", cudaSetDevice(endpoint.device));
         }
-        for (cudaEvent_t& piece : endpoint.piece_fences) { destroy_event(piece); }
-        for (cudaEvent_t& piece : endpoint.piece_consumed) { destroy_event(piece); }
         destroy_event(endpoint.fence);
         destroy_stream(endpoint.vision_stream);
         destroy_stream(endpoint.transfer_stream);
@@ -226,6 +211,7 @@ void DeviceContext::release() noexcept {
     }
     endpoints_.clear();
     device_ids_.clear();
+    peer_matrix_.clear();
     device          = 0;
     stream          = nullptr;
     transfer_stream = nullptr;
@@ -235,10 +221,9 @@ void DeviceContext::release() noexcept {
 }
 
 DeviceContext::DeviceContext(DeviceContext&& other) noexcept
-    : crossing_staging_(other.crossing_staging_),
-      crossing_staging_bytes_(other.crossing_staging_bytes_),
-      endpoints_(std::move(other.endpoints_)), device_ids_(std::move(other.device_ids_)),
-      active_rank_(other.active_rank_), peer_access_(other.peer_access_) {
+    : endpoints_(std::move(other.endpoints_)), device_ids_(std::move(other.device_ids_)),
+      peer_matrix_(std::move(other.peer_matrix_)), active_rank_(other.active_rank_),
+      peer_access_(other.peer_access_) {
     refresh_active_aliases();
     other.device                  = 0;
     other.stream                  = nullptr;
@@ -247,8 +232,6 @@ DeviceContext::DeviceContext(DeviceContext&& other) noexcept
     other.props                   = {};
     other.active_rank_            = 0;
     other.peer_access_            = false;
-    other.crossing_staging_       = nullptr;
-    other.crossing_staging_bytes_ = 0;
 }
 
 DeviceContext& DeviceContext::operator=(DeviceContext&& other) noexcept {
@@ -257,10 +240,9 @@ DeviceContext& DeviceContext::operator=(DeviceContext&& other) noexcept {
     release();
     endpoints_              = std::move(other.endpoints_);
     device_ids_             = std::move(other.device_ids_);
+    peer_matrix_            = std::move(other.peer_matrix_);
     active_rank_            = other.active_rank_;
     peer_access_            = other.peer_access_;
-    crossing_staging_       = other.crossing_staging_;
-    crossing_staging_bytes_ = other.crossing_staging_bytes_;
     refresh_active_aliases();
     other.device                  = 0;
     other.stream                  = nullptr;
@@ -269,8 +251,6 @@ DeviceContext& DeviceContext::operator=(DeviceContext&& other) noexcept {
     other.props                   = {};
     other.active_rank_            = 0;
     other.peer_access_            = false;
-    other.crossing_staging_       = nullptr;
-    other.crossing_staging_bytes_ = 0;
     return *this;
 }
 
@@ -283,7 +263,7 @@ void DeviceContext::refresh_active_aliases() noexcept {
         props           = {};
         return;
     }
-    const Endpoint& endpoint = endpoints_[active_rank_];
+    const RankContext& endpoint = endpoints_[active_rank_];
     device                   = endpoint.device;
     stream                   = endpoint.stream;
     transfer_stream          = endpoint.transfer_stream;
@@ -318,51 +298,24 @@ std::size_t DeviceContext::total_vram() const noexcept { return props.totalGloba
 
 std::size_t DeviceContext::size() const noexcept { return endpoints_.size(); }
 
-bool DeviceContext::model_parallel() const noexcept { return endpoints_.size() == 2; }
+bool DeviceContext::model_parallel() const noexcept { return endpoints_.size() > 1; }
+
+const RankContext& DeviceContext::rank(std::size_t index) const {
+    if (index >= endpoints_.size()) { throw std::out_of_range("CUDA device rank is out of range"); }
+    return endpoints_[index];
+}
+
+bool DeviceContext::same_physical_device(std::size_t a, std::size_t b) const {
+    return rank(a).device == rank(b).device;
+}
 
 bool DeviceContext::peer_access() const noexcept { return peer_access_; }
 
-void* DeviceContext::crossing_staging() const noexcept { return crossing_staging_; }
-
-cudaEvent_t DeviceContext::piece_consumed_fence(std::size_t rank, std::size_t piece) const {
-    if (rank >= endpoints_.size() || piece >= kCrossingPipelineDepth) {
-        throw std::out_of_range("cross-rank piece fence is out of range");
+bool DeviceContext::peer_access(std::size_t from, std::size_t to) const {
+    if (from >= endpoints_.size() || to >= endpoints_.size()) {
+        throw std::out_of_range("CUDA device rank is out of range");
     }
-    return endpoints_[rank].piece_consumed[piece];
-}
-
-bool DeviceContext::piece_consumed_visible(std::size_t rank, std::size_t piece,
-                                           unsigned long long capture_id) const {
-    if (rank >= endpoints_.size() || piece >= kCrossingPipelineDepth) {
-        throw std::out_of_range("cross-rank piece fence is out of range");
-    }
-    const Endpoint& endpoint = endpoints_[rank];
-    return capture_id == 0 ? endpoint.piece_consumed_eager[piece]
-                           : endpoint.piece_consumed_capture[piece] == capture_id;
-}
-
-void DeviceContext::note_piece_consumed(std::size_t rank, std::size_t piece,
-                                        unsigned long long capture_id) {
-    if (rank >= endpoints_.size() || piece >= kCrossingPipelineDepth) {
-        throw std::out_of_range("cross-rank piece fence is out of range");
-    }
-    Endpoint& endpoint = endpoints_[rank];
-    if (capture_id == 0) {
-        endpoint.piece_consumed_eager[piece] = true;
-    } else {
-        endpoint.piece_consumed_capture[piece] = capture_id;
-    }
-}
-
-cudaEvent_t DeviceContext::piece_fence(std::size_t rank, std::size_t piece) const {
-    if (rank >= endpoints_.size() || piece >= kCrossingPipelineDepth) {
-        throw std::out_of_range("cross-rank piece fence is out of range");
-    }
-    return endpoints_[rank].piece_fences[piece];
-}
-
-std::size_t DeviceContext::crossing_staging_bytes() const noexcept {
-    return crossing_staging_bytes_;
+    return peer_matrix_[from * endpoints_.size() + to] != 0;
 }
 
 std::size_t DeviceContext::active_rank() const noexcept { return active_rank_; }
@@ -399,7 +352,7 @@ void DeviceContext::synchronize_rank(std::size_t rank) const {
 }
 
 void DeviceContext::synchronize() const {
-    for (const Endpoint& endpoint : endpoints_) {
+    for (const RankContext& endpoint : endpoints_) {
         CUDA_CHECK(cudaSetDevice(endpoint.device));
         CUDA_CHECK(cudaStreamSynchronize(endpoint.stream));
     }
@@ -414,74 +367,6 @@ ScopedDeviceRank::ScopedDeviceRank(DeviceContext& context, std::size_t rank)
 ScopedDeviceRank::~ScopedDeviceRank() noexcept {
     if (context_.active_rank() != previous_rank_) { context_.activate_rank(previous_rank_); }
 }
-
-void stage_cross_rank_copy(DeviceContext& context, const void* source, std::size_t from_rank,
-                           void* destination, std::size_t to_rank, std::size_t bytes) {
-    const cudaStream_t from_stream = context.stream_for_rank(from_rank);
-    const cudaStream_t to_stream   = context.stream_for_rank(to_rank);
-
-    // Which capture this crossing belongs to, or 0 outside one. It decides which consumed fences
-    // may be waited on: see DeviceContext::piece_consumed_visible.
-    unsigned long long capture_id        = 0;
-    cudaStreamCaptureStatus capture      = cudaStreamCaptureStatusNone;
-    CUDA_CHECK(cudaStreamGetCaptureInfo(from_stream, &capture, &capture_id));
-    if (capture != cudaStreamCaptureStatusActive) { capture_id = 0; }
-
-    void* staging = context.crossing_staging();
-    if (staging == nullptr || bytes > context.crossing_staging_bytes()) {
-        throw std::runtime_error("cross-rank staging buffer is too small: need " +
-                                 std::to_string(bytes) + " bytes, have " +
-                                 std::to_string(context.crossing_staging_bytes()));
-    }
-
-    // Split the byte range so the two halves of the crossing overlap. Done as one copy, D2H must
-    // finish before H2D starts and a 4 MB residual stream costs ~0.765 ms -- roughly twice what its
-    // bandwidth implies. In pieces, piece i+1 streams out of the source while piece i streams into
-    // the destination.
-    //
-    // Small transfers skip this: a decode crossing is ~4 KiB, where the per-piece launch and fence
-    // overhead would cost more than the overlap saves.
-    constexpr std::size_t kMinimumPipelinedBytes = 256U << 10;
-    const std::size_t pieces =
-        bytes >= kMinimumPipelinedBytes ? kCrossingPipelineDepth : std::size_t{1};
-    const std::size_t piece_bytes = (bytes + pieces - 1) / pieces;
-
-    for (std::size_t piece = 0; piece < pieces; ++piece) {
-        const std::size_t offset = piece * piece_bytes;
-        const std::size_t length = std::min(piece_bytes, bytes - offset);
-        if (length == 0) { break; }
-        auto* staged            = static_cast<std::byte*>(staging) + offset;
-        const auto* src         = static_cast<const std::byte*>(source) + offset;
-        auto* dst               = static_cast<std::byte*>(destination) + offset;
-        const cudaEvent_t fence = context.piece_fence(from_rank, piece);
-        {
-            ScopedDeviceRank guard(context, from_rank);
-            // Every crossing stages through the same pinned buffer, and this D2H overwrites the
-            // piece the *previous* crossing's H2D may still be reading -- that copy is only
-            // enqueued here, never waited for. Wait on each rank's consumed fence for this piece
-            // (an unrecorded event is satisfied, so the first crossing is free) rather than
-            // tracking which rank consumed it last; with two ranks this is two no-op waits.
-            for (std::size_t rank = 0; rank < context.size(); ++rank) {
-                if (!context.piece_consumed_visible(rank, piece, capture_id)) { continue; }
-                CUDA_CHECK(
-                    cudaStreamWaitEvent(from_stream, context.piece_consumed_fence(rank, piece), 0));
-            }
-            CUDA_CHECK(cudaMemcpyAsync(staged, src, length, cudaMemcpyDeviceToHost, from_stream));
-            CUDA_CHECK(cudaEventRecord(fence, from_stream));
-        }
-        {
-            ScopedDeviceRank guard(context, to_rank);
-            CUDA_CHECK(cudaStreamWaitEvent(to_stream, fence, 0));
-            CUDA_CHECK(cudaMemcpyAsync(dst, staged, length, cudaMemcpyHostToDevice, to_stream));
-            // Publishes "this piece has been read out of staging"; the event belongs to the
-            // destination device, which is the one recording it.
-            CUDA_CHECK(cudaEventRecord(context.piece_consumed_fence(to_rank, piece), to_stream));
-            context.note_piece_consumed(to_rank, piece, capture_id);
-        }
-    }
-}
-
-
 
 CudaEventTimer::CudaEventTimer(const DeviceContext& ctx)
     : CudaEventTimer(ctx, ctx.stream) {}
@@ -553,8 +438,12 @@ float CudaEventTimer::stop_ms() {
     return elapsed_ms();
 }
 
-CudaCompletionEvent::CudaCompletionEvent(const DeviceContext& ctx) : device_(ctx.device) {
-    ctx.bind_to_current_thread();
+CudaCompletionEvent::CudaCompletionEvent(const DeviceContext& ctx)
+    : CudaCompletionEvent(ctx.rank(ctx.active_rank())) {}
+
+CudaCompletionEvent::CudaCompletionEvent(const RankContext& rank) : device_(rank.device) {
+    // The event belongs to this rank's device, which is the one that will record it.
+    DeviceBinding bind(rank.device);
     const cudaError_t err = cudaEventCreateWithFlags(&event_, cudaEventDisableTiming);
     if (err != cudaSuccess) {
         throw std::runtime_error(cuda_error_message("cudaEventCreateWithFlags failed", err));
@@ -600,6 +489,32 @@ bool CudaCompletionEvent::ready() const {
 void CudaCompletionEvent::synchronize() const {
     if (event_ == nullptr) { throw std::logic_error("CUDA completion event is empty"); }
     CUDA_CHECK(cudaEventSynchronize(event_));
+}
+
+RankFenceSet::RankFenceSet(const DeviceContext& context) {
+    events_.reserve(context.size());
+    for (std::size_t rank = 0; rank < context.size(); ++rank) {
+        events_.emplace_back(context.rank(rank));
+    }
+}
+
+void RankFenceSet::record(RankStreams streams) {
+    for (std::size_t rank = 0; rank < events_.size(); ++rank) { events_[rank].record(streams[rank]); }
+}
+
+void RankFenceSet::wait(RankStreams streams) const {
+    for (std::size_t rank = 0; rank < events_.size(); ++rank) { events_[rank].wait(streams[rank]); }
+}
+
+bool RankFenceSet::ready() const {
+    for (const CudaCompletionEvent& event : events_) {
+        if (!event.ready()) { return false; }
+    }
+    return true;
+}
+
+void RankFenceSet::synchronize() const {
+    for (const CudaCompletionEvent& event : events_) { event.synchronize(); }
 }
 
 } // namespace ninfer

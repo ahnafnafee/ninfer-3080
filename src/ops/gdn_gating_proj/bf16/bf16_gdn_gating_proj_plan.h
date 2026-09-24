@@ -56,6 +56,13 @@ bool bf16_gdn_gating_admits(const Bf16GdnGatingProblem& problem) noexcept;
 Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& problem);
 Bf16GdnGatingPlan bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId schedule,
                                                     const Bf16GdnGatingProblem& problem);
+// The same for a device with `sm_count` multiprocessors instead of the current one. Cooperative
+// schedules need their whole grid resident, so which schedule a width gets depends on it.
+Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& problem,
+                                               std::int32_t sm_count);
+Bf16GdnGatingPlan bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId schedule,
+                                                    const Bf16GdnGatingProblem& problem,
+                                                    std::int32_t sm_count);
 
 std::size_t bf16_gdn_gating_capacity_workspace_bytes(std::int32_t heads, std::int32_t input_rows,
                                                      std::int32_t min_cols, std::int32_t max_cols);

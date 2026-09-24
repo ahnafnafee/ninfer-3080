@@ -374,6 +374,8 @@ int exercise_vision_dflash(const char* artifact, const std::vector<ninfer::Token
 
 } // namespace
 
+namespace {
+
 int run() {
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (artifact == nullptr || *artifact == '\0') {
@@ -440,5 +442,7 @@ int run() {
     std::cout << "ok\n";
     return 0;
 }
+
+} // namespace
 
 NINFER_GUARDED_TEST_MAIN(run)

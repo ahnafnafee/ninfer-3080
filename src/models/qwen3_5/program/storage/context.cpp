@@ -1388,11 +1388,13 @@ void ProgramImpl::bind_sequence_kv(SequenceState& sequence) {
     try {
         if (!text_active) {
             text_kv_addresses->activate(sequence.kv->text,
-                                        text_kv_addresses->mapped_pages(sequence.kv->text), row);
+                                        text_kv_addresses->mapped_pages(sequence.kv->text), row,
+                                        compute_streams);
             if (sequence.kv->backend) {
                 backend_kv_addresses->activate(
                     *sequence.kv->backend,
-                    backend_kv_addresses->mapped_pages(*sequence.kv->backend), row);
+                    backend_kv_addresses->mapped_pages(*sequence.kv->backend), row,
+                    compute_streams);
             }
         }
         set_device_i32(io.text_kv_table_row, text_kv_addresses->bound_row(sequence.kv->text));
@@ -1434,10 +1436,10 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
     if (backend_tokens != 0 && !sequence.kv->backend) {
         throw std::logic_error("backend KV materialization requested without an allocation");
     }
-    text_kv_addresses->ensure_mapped_to_tokens(sequence.kv->text, main_tokens, device.stream);
+    text_kv_addresses->ensure_mapped_to_tokens(sequence.kv->text, main_tokens, compute_streams);
     if (backend_tokens != 0) {
         backend_kv_addresses->ensure_mapped_to_tokens(*sequence.kv->backend, backend_tokens,
-                                                      device.stream);
+                                                      compute_streams);
     }
 }
 

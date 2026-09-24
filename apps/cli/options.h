@@ -24,9 +24,11 @@ struct Options {
     KvCapacityPolicy kv_capacity = KvCapacityPolicy::explicit_capacity(2048);
     std::uint32_t prefill_chunk  = 1024;
     int device                   = 0;
-    // Two ids enable the expert-offload split: rank 0 serves attention and holds the KV cache,
-    // rank 1 holds the offloaded mlp/expert blocks. Empty means use `device`.
+    // Several ids split the model's layers into one pipeline stage per device, the first also
+    // holding the embedding, head and round state. Empty means use `device`.
     std::vector<int> devices;
+    // Layers per pipeline stage, one count per entry of `devices`. Empty lets the engine choose.
+    std::vector<std::uint32_t> stage_layers;
 
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;

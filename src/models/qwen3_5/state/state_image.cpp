@@ -150,12 +150,40 @@ void validate_slot(std::int32_t slot, std::int32_t slot_count, const char* label
 
 StateImageDeviceLayout plan_state_image_device_pool(LayoutBuilder& builder,
                                                     const StateImageSpec& spec) {
+    LayoutBuilder* const builders[] = {&builder};
+    const StateImageShard whole[]   = {{.rank = 0, .first_layer = 0, .layers = spec.linear.layers}};
+    return plan_state_image_device_pool(builders, whole, spec);
+}
+
+StateImageDeviceLayout plan_state_image_device_pool(std::span<LayoutBuilder* const> builders,
+                                                    std::span<const StateImageShard> shards,
+                                                    const StateImageSpec& spec) {
     if (spec.hidden <= 0) {
         throw std::invalid_argument("StateImage hidden width must be positive");
     }
+    if (shards.empty()) { throw std::invalid_argument("StateImage needs at least one shard"); }
+    std::uint32_t next_layer = 0;
+    for (const StateImageShard& shard : shards) {
+        if (shard.first_layer != next_layer || shard.layers == 0 || shard.rank >= builders.size() ||
+            builders[shard.rank] == nullptr) {
+            throw std::invalid_argument("StateImage shards must cover the layers in order");
+        }
+        next_layer += shard.layers;
+    }
+    if (next_layer != spec.linear.layers) {
+        throw std::invalid_argument("StateImage shards do not cover every Linear Attention layer");
+    }
 
     StateImageDeviceLayout out;
-    out.linear = plan_linear_attention_state_pool(builder, spec.linear);
+    out.shards.assign(shards.begin(), shards.end());
+    for (const StateImageShard& shard : shards) {
+        LinearAttentionStatePoolSpec shard_spec = spec.linear;
+        shard_spec.layers                       = shard.layers;
+        out.linear.push_back(plan_linear_attention_state_pool(*builders[shard.rank], shard_spec));
+    }
+    // The continuation hidden and DFlash local state are read by the head and the draft, which run
+    // on rank 0.
+    LayoutBuilder& builder = *builders[0];
     out.continuation_hidden =
         builder.add_tensor(DType::BF16, {spec.hidden, spec.linear.slot_count}, kStateImageAlignment,
                            "StateImage continuation hidden");
@@ -269,17 +297,38 @@ std::byte* HostStatePool::slot_data(std::uint32_t index) const noexcept {
 }
 
 StateImageDevicePool::StateImageDevicePool(DeviceSpan backing, const StateImageDeviceLayout& layout)
-    : linear_(backing, layout.linear),
-      continuation_hidden_(layout.continuation_hidden.bind(backing)), host_layout_(layout.host) {
+    : StateImageDevicePool(std::span<const DeviceSpan>(&backing, 1), layout) {}
+
+StateImageDevicePool::StateImageDevicePool(std::span<const DeviceSpan> backings,
+                                           const StateImageDeviceLayout& layout)
+    : shards_(layout.shards),
+      continuation_hidden_(layout.continuation_hidden.bind(backings.front())),
+      host_layout_(layout.host) {
+    if (layout.shards.empty() || layout.shards.size() != layout.linear.size()) {
+        throw std::invalid_argument("StateImage shard inventory is inconsistent");
+    }
+    linear_.reserve(layout.shards.size());
+    for (std::size_t index = 0; index < layout.shards.size(); ++index) {
+        if (layout.shards[index].rank >= backings.size()) {
+            throw std::invalid_argument("StateImage shard names a rank with no backing");
+        }
+        linear_.push_back(std::make_unique<LinearAttentionStatePool>(
+            backings[layout.shards[index].rank], layout.linear[index]));
+    }
     if (continuation_hidden_.dtype != DType::BF16 || !continuation_hidden_.is_contiguous() ||
         continuation_hidden_.ne[0] != host_layout_.spec.hidden ||
-        continuation_hidden_.ne[1] != linear_.slot_count()) {
+        continuation_hidden_.ne[1] != linear_.front()->slot_count()) {
         throw std::invalid_argument("StateImage continuation hidden layout is inconsistent");
     }
     if (layout.dflash_local.has_value() != host_layout_.spec.dflash_local.has_value()) {
         throw std::invalid_argument("StateImage DFlash layout is inconsistent");
     }
-    StateImageSpec device_spec{.linear = layout.linear.spec, .hidden = continuation_hidden_.ne[0]};
+    // The device components must add up to the host image's geometry: rebuild the whole-model spec
+    // from the shards and compare.
+    LinearAttentionStatePoolSpec whole = layout.linear.front().spec;
+    whole.layers                       = 0;
+    for (const auto& shard_layout : layout.linear) { whole.layers += shard_layout.spec.layers; }
+    StateImageSpec device_spec{.linear = whole, .hidden = continuation_hidden_.ne[0]};
     if (layout.dflash_local) {
         device_spec.dflash_local = DFlashLocalStateSpec{
             .layers   = static_cast<std::uint32_t>(layout.dflash_local->k.size()),
@@ -292,18 +341,25 @@ StateImageDevicePool::StateImageDevicePool(DeviceSpan backing, const StateImageD
         throw std::invalid_argument("StateImage host layout does not match its device components");
     }
     if (layout.dflash_local) {
-        if (layout.dflash_local->lane_capacity != linear_.slot_count()) {
+        if (layout.dflash_local->lane_capacity != linear_.front()->slot_count()) {
             throw std::invalid_argument("StateImage components do not share one slot geometry");
         }
-        dflash_local_.emplace(backing, *layout.dflash_local);
+        dflash_local_.emplace(backings.front(), *layout.dflash_local);
     }
+}
+
+LinearAttentionStatePool* StateImageDevicePool::single_shard() const {
+    if (linear_.size() != 1) {
+        throw std::logic_error("StateImage pool is sharded across ranks: address a shard");
+    }
+    return linear_.front().get();
 }
 
 StateImageDeviceSlotView StateImageDevicePool::slot_view(std::int32_t slot) const {
     StateImageDeviceSlotView view{
-        .linear              = linear_.slot_view(slot),
         .continuation_hidden = continuation_hidden_slot(slot),
     };
+    for (const auto& pool : linear_) { view.linear.push_back(pool->slot_view(slot)); }
     if (dflash_local_) { view.dflash_local = dflash_local_->slot_view(slot); }
     return view;
 }
@@ -321,10 +377,13 @@ const CyclicKVCache* StateImageDevicePool::dflash_local() const noexcept {
     return dflash_local_ ? &*dflash_local_ : nullptr;
 }
 
-void StateImageDevicePool::zero_slot(std::int32_t slot, cudaStream_t stream) {
+void StateImageDevicePool::zero_slot(std::int32_t slot, RankStreams streams) {
     validate_slot(slot, slot_count(), "StateImage zero slot is out of range");
-    linear_.zero_slot(slot, stream);
-    const Tensor hidden = continuation_hidden_slot(slot);
+    for (std::size_t index = 0; index < linear_.size(); ++index) {
+        linear_[index]->zero_slot(slot, streams[shards_[index].rank]);
+    }
+    const cudaStream_t stream = streams[0];
+    const Tensor hidden       = continuation_hidden_slot(slot);
     CUDA_CHECK(cudaMemsetAsync(hidden.data, 0, hidden.bytes(), stream));
     if (dflash_local_) {
         for (std::uint32_t layer = 0; layer < dflash_local_->layer_count(); ++layer) {
@@ -337,8 +396,11 @@ void StateImageDevicePool::zero_slot(std::int32_t slot, cudaStream_t stream) {
     }
 }
 
-void StateImageDevicePool::zero_all(cudaStream_t stream) {
-    linear_.zero_all(stream);
+void StateImageDevicePool::zero_all(RankStreams streams) {
+    for (std::size_t index = 0; index < linear_.size(); ++index) {
+        linear_[index]->zero_all(streams[shards_[index].rank]);
+    }
+    const cudaStream_t stream = streams[0];
     CUDA_CHECK(cudaMemsetAsync(continuation_hidden_.data, 0, continuation_hidden_.bytes(), stream));
     if (dflash_local_) {
         for (std::uint32_t layer = 0; layer < dflash_local_->layer_count(); ++layer) {
@@ -350,11 +412,14 @@ void StateImageDevicePool::zero_all(cudaStream_t stream) {
 }
 
 void StateImageDevicePool::copy_slot(std::int32_t source, std::int32_t destination,
-                                     cudaStream_t stream) {
+                                     RankStreams streams) {
     validate_slot(source, slot_count(), "StateImage copy source is out of range");
     validate_slot(destination, slot_count(), "StateImage copy destination is out of range");
     if (source == destination) { return; }
-    linear_.copy_slot(source, destination, stream);
+    for (std::size_t index = 0; index < linear_.size(); ++index) {
+        linear_[index]->copy_slot(source, destination, streams[shards_[index].rank]);
+    }
+    const cudaStream_t stream       = streams[0];
     const Tensor source_hidden      = continuation_hidden_slot(source);
     const Tensor destination_hidden = continuation_hidden_slot(destination);
     CUDA_CHECK(cudaMemcpyAsync(destination_hidden.data, source_hidden.data,
@@ -365,7 +430,8 @@ void StateImageDevicePool::copy_slot(std::int32_t source, std::int32_t destinati
 }
 
 void StateImageDevicePool::copy_dflash_local(std::int32_t source, std::int32_t destination,
-                                             cudaStream_t stream) {
+                                             RankStreams streams) {
+    const cudaStream_t stream = streams[0];
     validate_slot(source, slot_count(), "StateImage DFlash copy source is out of range");
     validate_slot(destination, slot_count(), "StateImage DFlash copy destination is out of range");
     if (!dflash_local_) { throw std::logic_error("StateImage has no DFlash local component"); }
@@ -382,22 +448,29 @@ void StateImageDevicePool::validate_host_layout(const StateImageHostLayout* layo
 }
 
 void StateImageDevicePool::copy_to_host(std::int32_t source, HostStateImageView destination,
-                                        cudaStream_t stream) const {
+                                        RankStreams streams) const {
     validate_slot(source, slot_count(), "StateImage copy-to-host source is out of range");
     validate_host_layout(destination.layout, destination.data);
-    for (std::uint32_t layer = 0; layer < linear_.layer_count(); ++layer) {
-        const Tensor conv = linear_.conv_slot(layer, source);
-        CUDA_CHECK(cudaMemcpyAsync(
-            byte_offset(destination.data, host_layout_.linear_conv.offset +
-                                              layer * host_layout_.linear_conv_layer_bytes),
-            conv.data, conv.bytes(), cudaMemcpyDeviceToHost, stream));
-        const Tensor recurrent = linear_.recurrent_slot(layer, source);
-        CUDA_CHECK(cudaMemcpyAsync(
-            byte_offset(destination.data, host_layout_.linear_recurrent.offset +
-                                              layer * host_layout_.linear_recurrent_layer_bytes),
-            recurrent.data, recurrent.bytes(), cudaMemcpyDeviceToHost, stream));
+    // Each shard's layers land at their global offsets in the one host image.
+    for (std::size_t index = 0; index < linear_.size(); ++index) {
+        const cudaStream_t shard_stream = streams[shards_[index].rank];
+        for (std::uint32_t local = 0; local < linear_[index]->layer_count(); ++local) {
+            const std::size_t layer = shards_[index].first_layer + local;
+            const Tensor conv       = linear_[index]->conv_slot(local, source);
+            CUDA_CHECK(cudaMemcpyAsync(
+                byte_offset(destination.data, host_layout_.linear_conv.offset +
+                                                  layer * host_layout_.linear_conv_layer_bytes),
+                conv.data, conv.bytes(), cudaMemcpyDeviceToHost, shard_stream));
+            const Tensor recurrent = linear_[index]->recurrent_slot(local, source);
+            CUDA_CHECK(cudaMemcpyAsync(
+                byte_offset(destination.data,
+                            host_layout_.linear_recurrent.offset +
+                                layer * host_layout_.linear_recurrent_layer_bytes),
+                recurrent.data, recurrent.bytes(), cudaMemcpyDeviceToHost, shard_stream));
+        }
     }
-    const Tensor hidden = continuation_hidden_slot(source);
+    const cudaStream_t stream = streams[0];
+    const Tensor hidden       = continuation_hidden_slot(source);
     CUDA_CHECK(
         cudaMemcpyAsync(byte_offset(destination.data, host_layout_.continuation_hidden.offset),
                         hidden.data, hidden.bytes(), cudaMemcpyDeviceToHost, stream));
@@ -419,25 +492,30 @@ void StateImageDevicePool::copy_to_host(std::int32_t source, HostStateImageView 
 }
 
 void StateImageDevicePool::copy_from_host(HostStateImageConstView source, std::int32_t destination,
-                                          cudaStream_t stream) {
+                                          RankStreams streams) {
     validate_slot(destination, slot_count(),
                   "StateImage copy-from-host destination is out of range");
     validate_host_layout(source.layout, source.data);
-    for (std::uint32_t layer = 0; layer < linear_.layer_count(); ++layer) {
-        const Tensor conv = linear_.conv_slot(layer, destination);
-        CUDA_CHECK(cudaMemcpyAsync(
-            conv.data,
-            byte_offset(source.data, host_layout_.linear_conv.offset +
-                                         layer * host_layout_.linear_conv_layer_bytes),
-            conv.bytes(), cudaMemcpyHostToDevice, stream));
-        const Tensor recurrent = linear_.recurrent_slot(layer, destination);
-        CUDA_CHECK(cudaMemcpyAsync(
-            recurrent.data,
-            byte_offset(source.data, host_layout_.linear_recurrent.offset +
-                                         layer * host_layout_.linear_recurrent_layer_bytes),
-            recurrent.bytes(), cudaMemcpyHostToDevice, stream));
+    for (std::size_t index = 0; index < linear_.size(); ++index) {
+        const cudaStream_t shard_stream = streams[shards_[index].rank];
+        for (std::uint32_t local = 0; local < linear_[index]->layer_count(); ++local) {
+            const std::size_t layer = shards_[index].first_layer + local;
+            const Tensor conv       = linear_[index]->conv_slot(local, destination);
+            CUDA_CHECK(cudaMemcpyAsync(
+                conv.data,
+                byte_offset(source.data, host_layout_.linear_conv.offset +
+                                             layer * host_layout_.linear_conv_layer_bytes),
+                conv.bytes(), cudaMemcpyHostToDevice, shard_stream));
+            const Tensor recurrent = linear_[index]->recurrent_slot(local, destination);
+            CUDA_CHECK(cudaMemcpyAsync(
+                recurrent.data,
+                byte_offset(source.data, host_layout_.linear_recurrent.offset +
+                                             layer * host_layout_.linear_recurrent_layer_bytes),
+                recurrent.bytes(), cudaMemcpyHostToDevice, shard_stream));
+        }
     }
-    const Tensor hidden = continuation_hidden_slot(destination);
+    const cudaStream_t stream = streams[0];
+    const Tensor hidden       = continuation_hidden_slot(destination);
     CUDA_CHECK(cudaMemcpyAsync(hidden.data,
                                byte_offset(source.data, host_layout_.continuation_hidden.offset),
                                hidden.bytes(), cudaMemcpyHostToDevice, stream));

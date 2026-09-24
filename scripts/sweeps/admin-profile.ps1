@@ -239,19 +239,21 @@ try {
   # dominating means the loads are issued but not enough of them are in flight; stall_mio_throttle
   # means the LSU itself is the limit; a poor sectors-per-request in the memory tables means each
   # fetch is delivering a fraction of a sector's worth of useful bytes. Those want different fixes.
-  $gdnBench = '.\build-ninja\bench\ninfer_q4_q5_gdn_input_schedule_bench.exe'
-  $q5Bench  = '.\build-ninja\bench\ninfer_q5_linear_add_schedule_bench.exe'
+  # Both are programs in the ninfer_benches bundle; the first argument selects one.
+  $benches = '.\build-ninja\bench\ninfer_benches.exe'
   $narrow = @(
-    @{ label = 'gdn_input_w8'; exe = $gdnBench; out = 'narrow_gdn_input.txt'
+    @{ label = 'gdn_input_w8'; exe = $benches; out = 'narrow_gdn_input.txt'
        # Width 8 is the C8 serving cohort's extent and one past the DFlash2 k=6 cliff, so it is the
        # width both entries care about. All six schedules run, so the independent SIMT route is
        # captured beside the grouped MMA tiles as its own reference.
-       args = @('--tokens', '8', '--repeat', '9', '--warmup', '2') }
-    @{ label = 'q5_linear_add_t8'; exe = $q5Bench; out = 'narrow_q5_linear_add.txt'
+       args = @('ninfer_q4_q5_gdn_input_schedule_bench', '--tokens', '8', '--repeat', '9',
+                '--warmup', '2') }
+    @{ label = 'q5_linear_add_t8'; exe = $benches; out = 'narrow_q5_linear_add.txt'
        # T=8 is where split2_exact still beats mma_r64_c16 (74.8 us against 101.4) despite c16
        # being the flat one. Profiling both at the same width is how the 24%-of-floor figure
        # acquires a cause instead of a magnitude.
-       args = @('--tokens', '8', '--repeat', '9', '--warmup', '2') }
+       args = @('ninfer_q5_linear_add_schedule_bench', '--tokens', '8', '--repeat', '9',
+                '--warmup', '2') }
   )
   $step = 0
   foreach ($n in $(if ($wanted.Contains(5)) { $narrow } else { @() })) {

@@ -47,8 +47,8 @@ void test_decoder_layout() {
     (void)bf16_builder.finish(256);
     expect(bf16.text_kv.pages.planes.size() == 4, "BF16 Text KV has K/V planes per layer");
     expect(bf16.text_kv.pages.spec.page_group_count == 5 &&
-               bf16.text_kv.execution_tables.spec.logical_page_capacity == 3 &&
-               bf16.text_kv.execution_tables.spec.table_rows == 1,
+               bf16.text_kv.execution_tables.front().spec.logical_page_capacity == 3 &&
+               bf16.text_kv.execution_tables.front().spec.table_rows == 1,
            "Text KV separates five physical pages from three logical pages");
     expect(std::all_of(bf16.text_kv.pages.planes.begin(), bf16.text_kv.pages.planes.end(),
                        [](const ninfer::DeviceKVPlaneLayout& plane) {
@@ -69,7 +69,7 @@ void test_decoder_layout() {
     expect(int8.mtp_kv.has_value() && int8.mtp_kv->layers == 1 &&
                int8.mtp_kv->pages.planes.size() == 4 &&
                int8.mtp_kv->pages.spec.page_group_count == 4 &&
-               int8.mtp_kv->execution_tables.spec.logical_page_capacity == 3,
+               int8.mtp_kv->execution_tables.front().spec.logical_page_capacity == 3,
            "enabled MTP has one paged KV layer");
     expect(int8.mtp_kv && int8.mtp_kv->pages.planes[2].geometry.dtype == ninfer::DType::FP16 &&
                int8.mtp_kv->pages.planes[3].geometry.dtype == ninfer::DType::FP16,

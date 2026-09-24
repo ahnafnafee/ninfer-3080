@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/arena.h"
+#include "core/device.h"
 #include "core/layout.h"
 #include "core/paged_kv_storage.h"
 #include "core/tensor.h"
@@ -79,6 +80,8 @@ struct KVExecutionTableSpec {
 
 struct DeviceKVPlaneLayout {
     KVPlaneGeometry geometry;
+    // Which rank's device memory holds the plane, and so which backing `storage` is a region of.
+    std::size_t rank = 0;
     TensorRegion storage;
 };
 
@@ -104,6 +107,8 @@ struct DeviceKVPagePoolLayout {
 
 struct KVExecutionTableLayout {
     KVExecutionTableSpec spec;
+    // The rank whose backing holds this copy of the table.
+    std::size_t rank = 0;
     TensorRegion block_tables;
 
     [[nodiscard]] std::size_t metadata_bytes() const noexcept;
@@ -112,8 +117,17 @@ struct KVExecutionTableLayout {
 [[nodiscard]] DeviceKVPagePoolLayout plan_device_kv_page_pool(LayoutBuilder& builder,
                                                               const DeviceKVPagePoolSpec& spec);
 
+// Plans a pool whose planes live on several ranks: plane `i` is laid out in
+// `builders[plane_rank[i]]`, so each rank's planes are contiguous in that rank's own backing.
+[[nodiscard]] DeviceKVPagePoolLayout
+plan_device_kv_page_pool(std::span<LayoutBuilder* const> builders,
+                         std::span<const std::size_t> plane_rank, const DeviceKVPagePoolSpec& spec);
+
+// `rank` says whose backing `builder` lays out. A pool spanning several ranks plans one table per
+// rank that runs attention, since a kernel cannot read another device's copy.
 [[nodiscard]] KVExecutionTableLayout plan_kv_execution_tables(LayoutBuilder& builder,
-                                                              const KVExecutionTableSpec& spec);
+                                                              const KVExecutionTableSpec& spec,
+                                                              std::size_t rank = 0);
 
 class DeviceKVPagePool;
 class KVExecutionTablePool;
@@ -199,8 +213,15 @@ private:
     std::uint32_t pages_     = 0;
 };
 
+// One page-group allocator over planes that may be spread across ranks. The allocator, its
+// generations and every reservation are rank-agnostic: a page group id names the same slice in every
+// plane wherever the plane lives, which is what lets the layers above (admission, prefix reuse, the
+// context cache) stay unaware of how many devices hold the cache.
 class DeviceKVPagePool {
 public:
+    // `backings[r]` is rank r's device memory; a plane bound to rank r is a region of it.
+    DeviceKVPagePool(std::span<const DeviceSpan> backings, const DeviceKVPagePoolLayout& layout);
+    // Every plane on rank 0.
     DeviceKVPagePool(DeviceSpan backing, const DeviceKVPagePoolLayout& layout);
 
     DeviceKVPagePool(const DeviceKVPagePool&)            = delete;
@@ -220,9 +241,13 @@ public:
     [[nodiscard]] std::uint32_t available_pages() const noexcept;
     [[nodiscard]] std::size_t plane_count() const noexcept;
     [[nodiscard]] const Tensor& plane(std::size_t index) const;
+    // Ranks the planes span (the highest plane rank plus one) and the rank holding plane `index`.
+    [[nodiscard]] std::size_t rank_count() const noexcept { return rank_count_; }
+    [[nodiscard]] std::size_t plane_rank(std::size_t index) const;
     [[nodiscard]] std::span<const KVPageRun> free_runs() const noexcept;
     // Device bytes one plane devotes to a run of consecutive pages. Page-major geometry only:
-    // a run is one contiguous block there, which is what makes a run lendable.
+    // a run is one contiguous block there, which is what makes a run lendable. Lending exists for a
+    // single device, so a pool spanning several ranks refuses it.
     [[nodiscard]] KVPlaneByteRange plane_page_range(std::size_t plane, std::int32_t first_page,
                                                     std::uint32_t count) const;
 
@@ -254,15 +279,18 @@ public:
                        std::vector<DeviceKVPageLease>& source);
     void dematerialize_one(DeviceKVPageReservation& reservation, DeviceKVPageLease&& page);
 
-    void zero_pages(std::span<const DeviceKVPageHandle> pages, cudaStream_t stream = nullptr) const;
+    // Data movement. Each plane's copy is issued on the stream of the rank that holds it, so the
+    // work for a page group fans out across ranks and the caller fences on all of them. The host
+    // image of a page keeps the full plane inventory: ranks write disjoint plane ranges of it.
+    void zero_pages(std::span<const DeviceKVPageHandle> pages, RankStreams streams = {}) const;
     void copy_page(DeviceKVPageHandle source, DeviceKVPageHandle destination,
-                   cudaStream_t stream = nullptr) const;
+                   RankStreams streams = {}) const;
 
     void copy_to_host(std::span<const DeviceKVPageHandle> source, HostKVAllocationView destination,
-                      cudaStream_t stream = nullptr) const;
+                      RankStreams streams = {}) const;
     void copy_from_host(HostKVAllocationConstView source,
                         std::span<const DeviceKVPageHandle> destination,
-                        cudaStream_t stream = nullptr) const;
+                        RankStreams streams = {}) const;
 
 private:
     friend class DeviceKVPageLease;
@@ -280,6 +308,8 @@ private:
 
     DeviceKVPagePoolSpec spec_;
     std::vector<Tensor> planes_;
+    std::vector<std::size_t> plane_ranks_;
+    std::size_t rank_count_ = 1;
     std::vector<KVPageRun> free_page_runs_;
     std::vector<std::uint32_t> page_generations_;
     std::vector<bool> page_allocated_;
@@ -351,8 +381,17 @@ private:
     std::uint32_t generation_    = 0;
 };
 
+// The logical-to-physical page map every attention layer reads. One host shadow is the source of
+// truth; each rank that runs attention holds a device copy of its own, and publishing writes them
+// all, so a mapping is visible on every rank once each rank's stream has passed the copy.
 class KVExecutionTablePool {
 public:
+    // `backings[r]` is rank r's device memory; a layout with rank r is a region of it. One copy per
+    // layout, at most one per rank.
+    KVExecutionTablePool(std::span<const DeviceSpan> backings,
+                         std::span<const KVExecutionTableLayout> layouts,
+                         const DeviceKVPagePool& pages);
+    // A single copy on rank 0.
     KVExecutionTablePool(DeviceSpan backing, const KVExecutionTableLayout& layout,
                          const DeviceKVPagePool& pages);
 
@@ -365,16 +404,21 @@ public:
     [[nodiscard]] std::int32_t row_count() const noexcept;
     [[nodiscard]] KVExecutionRowLease acquire(std::int32_t row);
 
+    // Each copy is written on the stream of the rank that holds it.
     void publish(KVExecutionRowHandle row, std::uint32_t logical_begin,
-                 std::span<const DeviceKVPageHandle> pages, cudaStream_t stream = nullptr);
+                 std::span<const DeviceKVPageHandle> pages, RankStreams streams = {});
     void publish(KVExecutionRowHandle row, std::uint32_t logical_begin,
-                 std::span<const DeviceKVPageLease> pages, cudaStream_t stream = nullptr);
+                 std::span<const DeviceKVPageLease> pages, RankStreams streams = {});
     void publish_repeated(KVExecutionRowHandle row, DeviceKVPageHandle page, std::uint32_t count,
-                          cudaStream_t stream = nullptr);
+                          RankStreams streams = {});
 
-    [[nodiscard]] Tensor row(KVExecutionRowHandle handle) const;
-
-    [[nodiscard]] const Tensor& matrix() const noexcept { return block_tables_; }
+    // The row and matrix as rank `rank` sees them. Throws if that rank holds no copy.
+    [[nodiscard]] Tensor row(KVExecutionRowHandle handle, std::size_t rank = 0) const;
+    [[nodiscard]] const Tensor& matrix(std::size_t rank = 0) const;
+    // Ranks that hold a copy, in the order the layouts were given.
+    [[nodiscard]] std::span<const std::size_t> replica_ranks() const noexcept {
+        return replica_ranks_;
+    }
 
 private:
     friend class KVExecutionRowLease;
@@ -382,11 +426,13 @@ private:
     [[nodiscard]] bool valid_handle(KVExecutionRowHandle handle) const noexcept;
     bool release_row(std::int32_t row, std::uint32_t generation) noexcept;
     void publish_indices(KVExecutionRowHandle row, std::uint32_t logical_begin,
-                         std::span<const std::int32_t> indices, cudaStream_t stream);
+                         std::span<const std::int32_t> indices, RankStreams streams);
+    [[nodiscard]] const Tensor& replica(std::size_t rank) const;
 
     KVExecutionTableSpec spec_;
     const DeviceKVPagePool* pages_ = nullptr;
-    Tensor block_tables_;
+    std::vector<Tensor> replicas_;
+    std::vector<std::size_t> replica_ranks_;
     PinnedHostBuffer host_shadow_;
     std::vector<bool> row_in_use_;
     std::vector<std::uint32_t> row_generations_;

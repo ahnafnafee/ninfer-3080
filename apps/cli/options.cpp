@@ -33,9 +33,10 @@ std::uint32_t parse_u32(const char* text, std::string_view label, bool allow_zer
     return static_cast<std::uint32_t>(value);
 }
 
-// Same shape as serve's --devices: one or two ids. Repeating an id puts both ranks on one
-// card, which exercises the split path without a second GPU. Existence is checked at engine
-// startup; this only parses the shape.
+// Same shape as serve's --devices: the ordered devices the model's pipeline stages run on.
+// Repeating an id puts several stages on one card, which exercises the split path without a
+// second GPU. Existence is checked at engine startup; this only parses the shape.
+constexpr std::size_t kMaximumDevices = 8;
 std::vector<int> parse_device_list(std::string_view text) {
     std::vector<int> devices;
     std::size_t start = 0;
@@ -54,15 +55,32 @@ std::vector<int> parse_device_list(std::string_view text) {
         if (comma == std::string_view::npos) { break; }
         start = comma + 1;
     }
-    if (devices.empty() || devices.size() > 2) {
-        throw std::invalid_argument("--devices takes one or two CUDA device ids");
+    if (devices.empty() || devices.size() > kMaximumDevices) {
+        throw std::invalid_argument("--devices takes between one and " +
+                                    std::to_string(kMaximumDevices) + " CUDA device ids");
     }
-    if (devices.size() == 2 && devices[0] == devices[1]) {
-        // Deliberately permitted: the same id twice puts both ranks on one card, which saves no
-        // memory but exercises the whole split path on a single-GPU machine.
-        (void)0;
-    }
+    // Repeated ids are deliberately permitted: they put several stages on one card, which saves no
+    // memory but exercises the whole split path on a single-GPU machine.
     return devices;
+}
+
+// "30,34": the layers each pipeline stage owns, one count per device in --devices. Whether they add
+// up to the model's layers is checked when the model loads; this only parses the shape.
+std::vector<std::uint32_t> parse_stage_layers(std::string_view text) {
+    std::vector<std::uint32_t> counts;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t comma = text.find(',', start);
+        const std::string_view piece =
+            text.substr(start, comma == std::string_view::npos ? std::string_view::npos
+                                                               : comma - start);
+        if (piece.empty()) { throw std::invalid_argument("--stage-layers entries must not be empty"); }
+        const std::string entry(piece);
+        counts.push_back(parse_u32(entry.c_str(), "stage-layers", false));
+        if (comma == std::string_view::npos) { break; }
+        start = comma + 1;
+    }
+    return counts;
 }
 
 int parse_device(const char* text) {
@@ -119,7 +137,7 @@ std::string usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
-           "       [--device N] [--devices N,M]\n"
+           "       [--device N] [--devices N,M,...] [--stage-layers A,B,...]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
            "       [--lookup-ngram N]\n"
            "       [--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4]\n"
@@ -143,8 +161,11 @@ std::string usage_text(const char* argv0) {
            "memory per image; --vision-max-merged bounds one item's merged tokens (default 16384).\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "
            "toward --max-new.\n"
-           "--devices N,M offloads the expert/MLP blocks to the second GPU; rank 0 keeps attention, "
-           "the KV cache and the head, so nearly all of its memory becomes KV.\n"
+           "--devices N,M,... splits the model's layers into one pipeline stage per GPU, each owning "
+           "its layers' weights, KV cache and state; the first GPU also holds the embedding, head "
+           "and round state. --stage-layers A,B,... sets the layers per stage (default: chosen "
+           "from each GPU's free memory). Multi-GPU execution is Linux only; repeat one id "
+           "(--devices 0,0) to exercise the path on a single GPU.\n"
            "--lm-head-q4, --lm-head-q6, --embedding-q4, --embedding-q6, --mtp-experts-q4, "
            "--gdn-state-fp16 and --mlp-a8-decode are "
            "speed- or memory-for-quality trades, off by "
@@ -204,6 +225,8 @@ Options parse_options(int argc, char** argv) {
             device_explicit = true;
         } else if (arg == "--devices") {
             options.devices = parse_device_list(value(arg));
+        } else if (arg == "--stage-layers") {
+            options.stage_layers = parse_stage_layers(value(arg));
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value(arg));
         } else if (arg == "--spec") {
@@ -309,6 +332,9 @@ Options parse_options(int argc, char** argv) {
     }
     if (!options.devices.empty() && device_explicit) {
         throw std::invalid_argument("--device and --devices are mutually exclusive");
+    }
+    if (!options.stage_layers.empty() && options.devices.size() < 2) {
+        throw std::invalid_argument("--stage-layers needs --devices naming more than one device");
     }
 
     const bool has_prompt   = !options.prompt.empty();

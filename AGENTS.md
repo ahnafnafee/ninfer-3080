@@ -27,7 +27,8 @@ approval requirements beyond the user's instructions and the actual execution en
 
 ## Product and architecture
 
-NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU performance. It implements
+NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU performance, with an
+optional layer pipeline across several GPUs on Linux. It implements
 `Qwen3_5ForCausalLM` and `Qwen3_5MoeForCausalLM`; official Qwen3.6/3.8 artifacts and user recipes
 use the same architecture, binding and execution path.
 This fork targets **`sm_86`** and is tuned on **NVIDIA GeForce RTX 3090** (24 GB), built with
@@ -37,8 +38,12 @@ route table this fork inherited and re-measured on sm_86 turned out to be wrong 
 upstream tuning constant as a hypothesis until measured on this card. The build environment and the
 compatibility constraints are in "Windows build environment (RTX 3090 fork host)" below.
 
-Generation uses one GPU, one resident model, startup-fixed concurrency of one to eight requests,
-bounded FIFO ingress, no active-request preemption, and one compact decode batch per round.
+Generation uses one resident model on one GPU, or split into pipeline stages over up to eight
+(`--devices`, Linux only; each stage owns whole layers with their KV and state, and the head,
+round state and sampling stay on the first device; design in
+`docs/maintainer/pipeline-parallel-plan.md`). It runs startup-fixed concurrency of one to eight
+requests, bounded FIFO ingress, no active-request preemption, and one compact decode batch per
+round. Tensor parallelism is not built.
 Generation and offline CausalScoring use the same public `.ninfer` Engine route. Delivered
 capabilities and commands are documented in `README.md`, the product guides, and executable
 `--help`. New mathematical architectures, execution platforms, large-scale/preemptive continuous

@@ -768,6 +768,10 @@ int main() {
     failures += run_case({48, 48, 10240}, 16, 8, {0, 1, 2, 3, 7, 13, 15, 16}, 1825U, true);
     failures += run_case({48, 48, 10240}, 16, 1, {16}, 1827U, true);
     failures += run_case({48, 48, 10240}, 16, 1, {0}, 1829U, true);
+    // A pipeline stage folds only its own layers, so the count is not a property of the model.
+    failures += run_case({24, 48, 10240}, 6, 4, {0, 2, 5, 6}, 1861U, true);
+    failures += run_case({7, 48, 10240}, 3, 8, {3, 0, 1, 2, 3, 1, 2, 0}, 1863U);
+    failures += run_case({11, 32, 8192}, 6, 2, {6, 1}, 1865U);
     failures += run_case({30, 32, 8192}, 2, 1, {2}, 1831U);
     failures += run_case({30, 32, 8192}, 6, 1, {6}, 1841U);
     failures += run_case({30, 32, 8192}, 6, 2, {2, 5}, 1851U);

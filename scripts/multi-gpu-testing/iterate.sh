@@ -95,7 +95,7 @@ PROMPT="${PROMPT:-The quick brown fox jumps over the lazy dog. }"
 REPEATS="${REPEATS:-300}"
 MAX_NEW="${MAX_NEW:-60}"
 
-echo "==> equivalence: single GPU against expert offload"
+echo "==> equivalence: single GPU against pipeline stages"
 run "set -u
   MODEL=/root/models/qwen3_6_35b_a3b.ninfer
   PROMPT=\$(python3 -c \"print('$PROMPT' * $REPEATS)\")
@@ -106,7 +106,7 @@ run "set -u
     >/root/a.txt 2>/root/a.err; echo \"exit=\$?\"
   grep -E 'prefill speed|decode speed|gpu weights used|free after weights' /root/a.err || tail -3 /root/a.err
 
-  echo '--- expert offload (0,1) ---'
+  echo '--- pipeline stages (0,1) ---'
   /root/build/apps/ninfer \"\$MODEL\" --prompt \"\$PROMPT\" \$COMMON --devices 0,1 \
     >/root/b.txt 2>/root/b.err; echo \"exit=\$?\"
   grep -E 'prefill speed|decode speed|gpu weights used|free after weights' /root/b.err || tail -3 /root/b.err

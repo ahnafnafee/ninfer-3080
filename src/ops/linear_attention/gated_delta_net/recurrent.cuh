@@ -464,9 +464,11 @@ struct RecordAccess {
     }
 };
 
-template <int Layers, int QkHeads, int ValueHeads, int ConvChannels>
+// The per-layer shape of a fold. The number of layers is not part of it: each layer folds
+// independently, so the launch grid takes the count from the records. That is what lets a model split
+// into pipeline stages fold each stage's layers with the same kernel.
+template <int QkHeads, int ValueHeads, int ConvChannels>
 struct FoldGeometry {
-    static constexpr int kLayers       = Layers;
     static constexpr int kQkHeads      = QkHeads;
     static constexpr int kValueHeads   = ValueHeads;
     static constexpr int kConvChannels = ConvChannels;
@@ -474,8 +476,8 @@ struct FoldGeometry {
     static_assert(ConvChannels % 128 == 0);
 };
 
-using FoldGeometry48x48 = FoldGeometry<48, 16, 48, 10240>;
-using FoldGeometry30x32 = FoldGeometry<30, 16, 32, 8192>;
+using FoldGeometry16x48 = FoldGeometry<16, 48, 10240>;
+using FoldGeometry16x32 = FoldGeometry<16, 32, 8192>;
 
 template <class Geometry, class StateT = float>
 struct FoldAccess {
