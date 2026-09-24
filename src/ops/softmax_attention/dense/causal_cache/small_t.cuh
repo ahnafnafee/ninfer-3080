@@ -22,7 +22,8 @@ namespace ninfer::ops {
 inline constexpr int kCausalHeadDim = 256;
 
 // The most keys one split may cover: a split stages at most 64 physical-page IDs, and two 64-key
-// pages go to key-tile rounding and page alignment.
+// pages go to key-tile rounding and page alignment. A split that must cover more, past the maximum
+// split count, reads its pages from the block table instead.
 inline constexpr int kCausalSmallTSplitKeyLimit = 3968;
 
 struct CausalAppendInput {

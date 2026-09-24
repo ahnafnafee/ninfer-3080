@@ -53,6 +53,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     constexpr int ConsumerWarpsPerTile = Wc / RowTiles;
     constexpr int PVNtPerWarp          = D / (ConsumerWarpsPerTile * 8);
     constexpr int PVKs                 = Bc / 16;
+    // A split stages up to 64 page IDs, enough for a 262,144-key window in this split
+    // geometry; a split that spans more pages reads the block table directly.
     constexpr int PageIds              = 64;
     constexpr float Log2E              = 1.4426950408889634074F;
     constexpr unsigned FullMask        = 0xffffffffU;
@@ -174,10 +176,17 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     const int first_tile = (split_start / Bc) * Bc;
     const int key_blocks = div_up(split_end - first_tile, Bc);
     const int first_page = first_tile >> kPagedKVPageShift;
-    const int page_count = ((split_end - 1) >> kPagedKVPageShift) - first_page + 1;
-    for (int page = tid; page < page_count; page += Threads) {
-        physical_pages_s[page] = block_table[first_page + page];
+    const int page_count    = ((split_end - 1) >> kPagedKVPageShift) - first_page + 1;
+    const bool staged_pages = page_count <= PageIds;
+    if (staged_pages) {
+        for (int page = tid; page < page_count; page += Threads) {
+            physical_pages_s[page] = block_table[first_page + page];
+        }
     }
+    const auto page_at = [&](int key) {
+        return staged_pages ? physical_pages_s[(key >> kPagedKVPageShift) - first_page]
+                            : block_table[key >> kPagedKVPageShift];
+    };
     __syncthreads();
 
     if constexpr (CacheInput::writes_cache) {
@@ -186,8 +195,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         for (int token = warp; token < valid_tokens; token += Wc) {
             const int position = positions[token];
             if (position < split_start || position >= split_end) continue;
-            const int physical_page =
-                physical_pages_s[(position >> kPagedKVPageShift) - first_page];
+            const int physical_page = page_at(position);
             const int page_offset = position & kPagedKVPageMask;
             float values[8];
             float* row_s = quant_scratch + warp * D;
@@ -319,7 +327,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         ninfer::ops::cp_commit();
     };
 
-    int physical_page = physical_pages_s[0];
+    int physical_page = page_at(first_tile);
     issue_kv_tile(first_tile, physical_page);
     ninfer::ops::cp_wait<0>();
     __syncthreads();
@@ -509,7 +517,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         if (has_next) {
             const int next_k0 = k0 + Bc;
             if ((next_k0 & kPagedKVPageMask) == 0) {
-                physical_page = physical_pages_s[(next_k0 >> kPagedKVPageShift) - first_page];
+                physical_page = page_at(next_k0);
             }
             issue_kv_tile(next_k0, physical_page);
         }

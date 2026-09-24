@@ -79,7 +79,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     constexpr int ConsumerWarpsPerTile = Wc / RowTiles;
     constexpr int PVNtPerWarp          = D / (ConsumerWarpsPerTile * 8);
     constexpr int PVKs                 = Bc / 16;
-    // The 262144-key maximum envelope spans at most 49 pages in this split geometry.
+    // A split stages up to 64 page IDs, enough for a 262,144-key window in this split
+    // geometry; a split that spans more pages reads the block table directly.
     constexpr int PageIds         = 64;
     constexpr int ProducerThreads = RowTiles * 32;
     constexpr int VLoaderThreads  = Threads - ProducerThreads;
@@ -213,10 +214,17 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     const int first_tile = (split_start / Bc) * Bc;
     const int key_blocks = div_up(split_end - first_tile, Bc);
     const int first_page = first_tile >> kPagedKVPageShift;
-    const int page_count = ((split_end - 1) >> kPagedKVPageShift) - first_page + 1;
-    for (int page = tid; page < page_count; page += Threads) {
-        physical_pages_s[page] = block_table[first_page + page];
+    const int page_count    = ((split_end - 1) >> kPagedKVPageShift) - first_page + 1;
+    const bool staged_pages = page_count <= PageIds;
+    if (staged_pages) {
+        for (int page = tid; page < page_count; page += Threads) {
+            physical_pages_s[page] = block_table[first_page + page];
+        }
     }
+    const auto page_at = [&](int key) {
+        return staged_pages ? physical_pages_s[(key >> kPagedKVPageShift) - first_page]
+                            : block_table[key >> kPagedKVPageShift];
+    };
 
     if constexpr (CacheInput::writes_cache) {
         // Decompose H256 as H4 over four independently transformed H64 groups. The existing
@@ -246,8 +254,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             const int grp      = pair - token * Groups;
             const int position = pos[token];
             if (position < split_start || position >= split_end) { continue; }
-            const int physical_page =
-                physical_pages_s[(position >> kPagedKVPageShift) - first_page];
+            const int physical_page = page_at(position);
             const int page_offset   = position & kPagedKVPageMask;
             const int d0            = grp * kKVCacheInt8Group + lane;
             const int d1            = d0 + 32;
@@ -541,7 +548,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         ninfer::ops::cp_commit();
     };
 
-    int physical_page = physical_pages_s[0];
+    int physical_page = page_at(first_tile);
     load_k_tile(first_tile, physical_page);
     issue_kv_tile(first_tile, physical_page);
     if (key_thread) { expand_k_tile(); }
@@ -555,10 +562,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             // Prefetch the next tile's packed keys now; see load_k_tile.
             if (kb + 1 < key_blocks) {
                 const int next_k0 = k0 + Bc;
-                load_k_tile(next_k0, (next_k0 & kPagedKVPageMask) == 0
-                                         ? physical_pages_s[(next_k0 >> kPagedKVPageShift) -
-                                                            first_page]
-                                         : physical_page);
+                load_k_tile(next_k0,
+                            (next_k0 & kPagedKVPageMask) == 0 ? page_at(next_k0) : physical_page);
             }
         }
 
@@ -730,7 +735,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         if (has_next) {
             const int next_k0 = k0 + Bc;
             if ((next_k0 & kPagedKVPageMask) == 0) {
-                physical_page = physical_pages_s[(next_k0 >> kPagedKVPageShift) - first_page];
+                physical_page = page_at(next_k0);
             }
             issue_kv_tile(next_k0, physical_page);
         }
