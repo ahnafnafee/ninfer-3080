@@ -158,7 +158,9 @@ class SpeedOfLightTests(unittest.TestCase):
             for role in ("gate", "up", "down")
         }
         artifact = fake_artifact(config, expensive)
-        _, _, selected_bytes = _model_work(artifact)
+        body_flops, head_flops, selected_bytes = _model_work(artifact)
+        assert body_flops == 240
+        assert head_flops == 64
         assert selected_bytes == 304
         assert selected_bytes == _model_work(fake_artifact(config))[2]
 
