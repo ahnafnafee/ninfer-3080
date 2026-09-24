@@ -1,6 +1,7 @@
 #include "core/arena.h"
 #include "core/paged_kv_cache.h"
 #include "ninfer/ops/kv_cache_append.h"
+#include "ninfer/ops/sigmoid_mul.h"
 #include "ninfer/ops/softmax_attention.h"
 #include "ops/kv_cache/d256_profile.h"
 #include "ops/kv_cache_e8_root_host.h"
@@ -2450,6 +2451,18 @@ ReductionCriterion attention_criterion(KvCacheStorage storage) {
     throw std::logic_error("unregistered causal-attention test storage");
 }
 
+// The gated route rounds to BF16 twice -- once on the attention result, once on the product with
+// the gate -- where the ungated route rounds once. The second rounding moves an element by at
+// most 2^-9 of itself, and the gate cannot enlarge an element, so 2^-9 is what both the
+// relative-L2 bound and the bound taken relative to the largest reference have to grow by. The
+// absolute floor is unchanged: it is there for elements near zero, which the extra rounding
+// cannot move by more than it already covers.
+ReductionCriterion gated_attention_criterion(ReductionCriterion criterion) {
+    criterion.relative_l2 += 0x1p-9;
+    criterion.gross_relative_to_max_reference += 0x1p-9;
+    return criterion;
+}
+
 int verify_attention(const std::string& label, const std::vector<double>& actual,
                      const std::vector<double>& reference, const ReductionCriterion& criterion) {
     if (std::getenv("NINFER_DUMP_ATTN_STATS") != nullptr) {
@@ -2988,6 +3001,67 @@ void validate_batch_case(const BatchAttentionCase& test_case) {
     }
 }
 
+// Handing the Op a gate must produce exactly what applying sigmoid_mul afterwards produces -- on
+// the route that folds the multiply into the reduce epilogue and on the routes that fall back to
+// the standalone kernel alike. Re-running the Op is safe: appending the same k/v to the same rows
+// again leaves the cache byte-identical, which the first run's cache check has just established.
+int verify_gated_attention(const std::string& label, const Geometry& geometry,
+                           const BatchAttentionCase& test_case, const Tensor& tq, const Tensor& tk,
+                           const Tensor& tv, const Tensor& tp, const Tensor& valid,
+                           const Tensor& table_rows, BatchDeviceCache& cache,
+                           const ops::CausalAttentionExecutionEnvelope& envelope,
+                           WorkspaceArena& workspace, Tensor& tout, GuardedDeviceBuffer& dout,
+                           const std::vector<std::uint16_t>& output_bits,
+                           const std::vector<double>& reference, ReductionCriterion criterion) {
+    const std::int32_t batch = static_cast<std::int32_t>(test_case.contexts.size());
+    const std::size_t bytes  = output_bits.size() * sizeof(std::uint16_t);
+    const auto gate_bits =
+        to_bf16_bits(make_bf16_values(output_bits.size(), test_case.seed + 97u, -3.0F, 3.0F));
+    const std::vector<std::uint16_t> canary(output_bits.size(), kOutputCanary);
+    GuardedDeviceBuffer dgate(bytes);
+    GuardedDeviceBuffer dexpected(bytes);
+    dgate.copy_from_host(gate_bits.data(), bytes);
+    dexpected.copy_from_host(canary.data(), bytes);
+    Tensor tgate(dgate.data(), DType::BF16, {kHeadDim, geometry.q_heads, test_case.width, batch});
+    Tensor texpected(dexpected.data(), DType::BF16,
+                     {kHeadDim, geometry.q_heads, test_case.width, batch});
+    // The reference is a second ungated run of the Op, not the first run's output: that separates
+    // "the gate is exact" from "the Op repeats itself", and only the first is what this check is
+    // about.
+    ops::causal_softmax_attention(tq, tk, tv, tp, valid, table_rows, op_geometry(geometry),
+                                  kAttentionScale, cache.view(), envelope, workspace, texpected,
+                                  nullptr);
+    cuda_synchronize();
+    int failures =
+        verify_exact((label + " ungated repeat").c_str(),
+                     copy_from_guarded<std::uint16_t>(dexpected, output_bits.size()), output_bits);
+    ops::sigmoid_mul(tgate, texpected, nullptr);
+    dout.copy_from_host(canary.data(), bytes);
+    ops::causal_softmax_attention(tq, tk, tv, tp, valid, table_rows, op_geometry(geometry),
+                                  kAttentionScale, cache.view(), envelope, workspace, tout, nullptr,
+                                  &tgate);
+    cuda_synchronize();
+    const auto gated_output = copy_from_guarded<std::uint16_t>(dout, output_bits.size());
+    failures += verify_exact((label + " fused gate").c_str(), gated_output,
+                             copy_from_guarded<std::uint16_t>(dexpected, output_bits.size()));
+    // Both checks above compare production against production, so an error shared by the
+    // attention result, the sigmoid or the BF16 boundary would pass them. This one does not: the
+    // gated output is qualified against the same FP64 attention oracle the ungated output is
+    // judged by, multiplied by a host sigmoid of the gate.
+    std::vector<double> gated_reference(reference.size());
+    for (std::size_t i = 0; i < gated_reference.size(); ++i) {
+        gated_reference[i] =
+            reference[i] / (1.0 + std::exp(-static_cast<double>(bf16_to_f32(gate_bits[i]))));
+    }
+    failures += verify_attention(label + " fused gate against the oracle",
+                                 bf16_bits_to_double(gated_output), gated_reference,
+                                 gated_attention_criterion(criterion));
+    failures += dgate.verify_guards((label + " fused gate input").c_str());
+    failures += dexpected.verify_guards((label + " fused gate reference").c_str());
+    failures += dout.verify_guards((label + " fused gate output").c_str());
+    return failures;
+}
+
 int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchAttentionCase& test_case) {
     validate_batch_case(test_case);
     const std::int32_t batch = static_cast<std::int32_t>(test_case.contexts.size());
@@ -3129,6 +3203,9 @@ int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchA
         std::cerr << label << ": workspace query/execution high-water mismatch\n";
         ++failures;
     }
+    failures += verify_gated_attention(
+        label, geometry, test_case, tq, tk, tv, tp, masked ? tvalid : Tensor{}, ttable_rows, cache,
+        envelope, workspace, tout, dout, output_bits, reference, attention_criterion(plan));
     return failures;
 }
 
@@ -3269,6 +3346,9 @@ int run_batch_case(const Geometry& geometry, KvCacheStorage storage,
         std::cerr << label << ": workspace query/execution high-water mismatch\n";
         ++failures;
     }
+    failures += verify_gated_attention(
+        label, geometry, test_case, tq, tk, tv, tp, masked ? tvalid : Tensor{}, ttable_rows, cache,
+        envelope, workspace, tout, dout, output_bits, reference, attention_criterion(storage));
     return failures;
 }
 

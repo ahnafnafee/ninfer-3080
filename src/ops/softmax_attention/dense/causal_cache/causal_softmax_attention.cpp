@@ -1,6 +1,8 @@
 // ninfer::ops - causal cached Softmax Attention validation and finite route dispatch.
 #include "ninfer/ops/softmax_attention.h"
 
+#include "ninfer/ops/sigmoid_mul.h"
+
 #include "core/layout.h"
 #include "core/device.h"
 #include "core/paged_kv_storage.h"
@@ -462,7 +464,7 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                               const Tensor& kv_table_rows, AttentionHeadGeometry geometry,
                               float scale, PagedKVBatchLayerView cache,
                               CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
-                              Tensor& out, cudaStream_t stream) {
+                              Tensor& out, cudaStream_t stream, const Tensor* gate) {
     constexpr const char* op = "causal_softmax_attention";
     validate_batched_attention_tensors(q, positions, valid_columns, kv_table_rows, out, cache,
                                        geometry, envelope, scale, op);
@@ -476,6 +478,14 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     require_shape(v, kHeadDim, kv_heads, width, batch, op, "v");
     require_contiguous_nonnull(k, op, "k");
     require_contiguous_nonnull(v, op, "v");
+    if (gate != nullptr) {
+        require_shape(*gate, kHeadDim, static_cast<std::int32_t>(q.ne[1]), width, batch, op,
+                      "gate");
+        require_contiguous_nonnull(*gate, op, "gate");
+        if (gate->dtype != DType::BF16) {
+            throw std::invalid_argument("causal_softmax_attention: gate must be BF16");
+        }
+    }
 
     auto scope = workspace.scope();
     const detail::CausalAttentionRoute route =
@@ -483,6 +493,7 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     if (route == detail::CausalAttentionRoute::ChunkedSmallT) {
         launch_chunked_small_t(q, k, v, positions, valid_columns, kv_table_rows, scale, cache,
                                envelope, workspace, out, stream);
+        if (gate != nullptr) { sigmoid_mul(*gate, out, stream); }
         return;
     }
     if (route == detail::CausalAttentionRoute::SmallT) {
@@ -490,13 +501,21 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
             detail::causal_attention_split_capacity(q.ne[1], width, cache.storage, envelope, batch);
         SmallTWorkspace partial =
             allocate_small_t_workspace(workspace, q.ne[1], width, splits, batch);
-        detail::causal_attention_small_t_launch(q, k, v, positions, valid_columns, kv_table_rows,
-                                                scale, cache, envelope, 0, width, partial.acc,
-                                                partial.m, partial.l, out, stream);
+        // Only the shared BF16/INT8 reducer carries a gate. The FP8, NVFP4 and K8V4 storages reach
+        // their own reduce kernels, so they take the standalone multiply like the routes that
+        // cannot fold it at all; every caller still sees one contract.
+        const bool fusable = cache.storage == KvCacheStorage::BFloat16 ||
+                             cache.storage == KvCacheStorage::Int8Group64;
+        detail::causal_attention_small_t_launch(
+            q, k, v, positions, valid_columns, kv_table_rows, scale, cache, envelope, 0, width,
+            partial.acc, partial.m, partial.l, out, stream,
+            (gate != nullptr && fusable) ? gate->data : nullptr);
+        if (gate != nullptr && !fusable) { sigmoid_mul(*gate, out, stream); }
         return;
     }
     detail::causal_attention_prompt_launch(q, k, v, positions, valid_columns, kv_table_rows, scale,
                                            cache, out, envelope.fast_prompt_kernel, stream);
+    if (gate != nullptr) { sigmoid_mul(*gate, out, stream); }
 }
 
 void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
