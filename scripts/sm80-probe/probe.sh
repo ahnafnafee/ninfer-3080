@@ -282,7 +282,7 @@ if (( ENGINE )); then
 fi
 
 # The op correctness suites that exercise the mma.sync / cp.async kernels, run on the real card. The
-# ctest names equal the target names, so one list drives both the build and the selection.
+# The list selects CTest entries by name; they all run from the ninfer_tests bundle built below.
 if (( TESTS )); then
   echo
   echo "=== TESTS: op correctness on this card ==="
@@ -290,8 +290,10 @@ if (( TESTS )); then
 ninfer_linear_topk_test ninfer_gated_delta_net_test ninfer_softmax_attention_test \
 ninfer_sparse_moe_test ninfer_attn_input_proj_test ninfer_gdn_input_proj_test \
 ninfer_rmsnorm_test ninfer_kv_cache_test ninfer_gdn_gating_proj_test"
-  # shellcheck disable=SC2086
-  cmake --build /root/build --target $TEST_TARGETS -j "$jobs" 2>&1 | tail -6
+  # The listed names are CTest entries. Each is an OBJECT library linked into the single
+  # ninfer_tests executable that CTest actually runs (`ninfer_tests <name>`), so build that
+  # bundle; building only the object targets leaves no binary to run. It compiles every test.
+  cmake --build /root/build --target ninfer_tests -j "$jobs" 2>&1 | tail -6
   [[ "${PIPESTATUS[0]}" -eq 0 ]] || { echo "TESTS_BUILD_FAILED"; exit 1; }
   pattern="^($(echo $TEST_TARGETS | tr ' ' '|'))\$"
   ctest --test-dir /root/build -j1 --output-on-failure -R "$pattern" 2>&1 | tee "$OUT/tests.txt" | tail -30
