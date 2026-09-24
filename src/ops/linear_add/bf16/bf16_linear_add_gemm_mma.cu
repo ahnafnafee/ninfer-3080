@@ -2,6 +2,7 @@
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
 
 #include "core/device.h"
+#include "ops/common/math.cuh"
 #include "ops/common/math.h"
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_gemm_mma.cuh"
@@ -21,8 +22,7 @@ struct Bf16LinearAddMmaOutputTile {
                                           float accumulator) const {
         __nv_bfloat16* destination =
             residual + static_cast<std::int64_t>(token) * leading_dim + row;
-        const float residual_value = __bfloat162float(*destination);
-        *destination               = __float2bfloat16_rn(accumulator + residual_value);
+        *destination = residual_add_bf16(accumulator, *destination);
     }
 };
 

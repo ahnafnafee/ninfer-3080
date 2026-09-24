@@ -57,6 +57,18 @@ __device__ __forceinline__ float softplus(float x) {
 __device__ __forceinline__ float softplus(float x) { return (x > 20.0f) ? x : log1pf(expf(x)); }
 #endif
 
+// A linear projection's accumulator added onto the bf16 residual stream. The NINFER_BF16_RESIDUAL_ADD
+// build option rounds the accumulator to bf16 and adds in bf16, which saves the widening of the
+// residual at the cost of a second rounding.
+__device__ __forceinline__ __nv_bfloat16 residual_add_bf16(float accumulator,
+                                                           __nv_bfloat16 residual) {
+#if defined(NINFER_BF16_RESIDUAL_ADD) && NINFER_BF16_RESIDUAL_ADD
+    return __hadd(__float2bfloat16_rn(accumulator), residual);
+#else
+    return __float2bfloat16_rn(accumulator + __bfloat162float(residual));
+#endif
+}
+
 __device__ __forceinline__ std::uint32_t pack_bf16x2(float lo, float hi) {
     std::uint32_t out;
     const std::uint32_t lo_bits = __float_as_uint(lo);

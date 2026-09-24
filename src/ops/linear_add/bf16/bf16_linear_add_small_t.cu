@@ -2,6 +2,7 @@
 #include "ops/linear_add/bf16/bf16_linear_add_plan.h"
 
 #include "core/device.h"
+#include "ops/common/math.cuh"
 #include "ops/linear/bf16/bf16_config.h"
 #include "ops/linear/bf16/bf16_simt.cuh"
 
@@ -22,8 +23,7 @@ struct Bf16LinearAddSmallTOutput {
     __device__ __forceinline__ void store(std::int32_t row, std::int32_t token,
                                           float accumulator) const {
         __nv_bfloat16* destination = residual + static_cast<std::int64_t>(token) * rows + row;
-        const float residual_value = __bfloat162float(*destination);
-        *destination               = __float2bfloat16_rn(accumulator + residual_value);
+        *destination               = residual_add_bf16(accumulator, *destination);
     }
 };
 

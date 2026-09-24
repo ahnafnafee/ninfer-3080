@@ -51,6 +51,11 @@ option(NINFER_SFU_SOFTPLUS
 if(NINFER_SFU_SOFTPLUS)
   add_compile_definitions(NINFER_SFU_SOFTPLUS=1)
 endif()
+option(NINFER_BF16_RESIDUAL_ADD
+       "Add BF16 linear projections onto the residual in bf16 instead of fp32" OFF)
+if(NINFER_BF16_RESIDUAL_ADD)
+  add_compile_definitions(NINFER_BF16_RESIDUAL_ADD=1)
+endif()
 # Windows only: device arenas from a D3D12 heap held resident, for --wddm-evictable-budget.
 option(NINFER_D3D12_RESIDENCY
        "On Windows, offer --wddm-evictable-budget: D3D12-resident device arenas" OFF)
