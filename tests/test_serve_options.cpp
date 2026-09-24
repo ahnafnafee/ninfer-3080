@@ -328,8 +328,13 @@ int main() {
                           disk.context_cache.disk_kv_capacity_bytes == (3ULL << 30U) &&
                           disk.context_cache.disk_kv_restore,
                       "disk tier options did not reach serving options");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--disk-kv-path", "/tmp/l3",
+                             "--disk-kv-directstorage"})
+                          .context_cache.disk_kv_directstorage,
+                      "--disk-kv-directstorage did not reach serving options");
     failures += check(defaults.context_cache.disk_kv_path.empty() &&
-                          !defaults.context_cache.disk_kv_restore,
+                          !defaults.context_cache.disk_kv_restore &&
+                          !defaults.context_cache.disk_kv_directstorage,
                       "the disk tier must be off by default");
     failures += check(!defaults.context_cache.rolling_retention &&
                           parse({"ninfer-serve", "model.ninfer", "--context-cache-policy",
@@ -343,6 +348,7 @@ int main() {
              {"--context-cache-policy", "lru"},
              {"--context-cache-policy", "rolling", "--no-prefix-reuse"},
              {"--disk-kv-restore"},
+             {"--disk-kv-directstorage"},
              {"--disk-kv-gib", "8"},
              {"--disk-kv-path", "/tmp/l3", "--disk-kv-gib", "0"},
              {"--disk-kv-path", "/tmp/l3", "--no-prefix-reuse"}}) {

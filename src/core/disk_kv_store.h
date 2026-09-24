@@ -90,6 +90,21 @@ public:
     // while it is being read.
     bool read_page(const DiskKVIdentity& id, std::span<std::byte> destination);
 
+    // A read that does not go through the mapping (DirectStorage): the payload's file offset and
+    // stored CRC. The slot is not evicted or reused until release_read.
+    struct ReadClaim {
+        std::uint32_t slot   = 0;
+        std::uint64_t offset = 0;
+        std::uint32_t crc    = 0;
+    };
+
+    [[nodiscard]] std::optional<ReadClaim> claim_read(const DiskKVIdentity& id);
+    // Checks bytes read for a claim against its CRC (when verification is on).
+    [[nodiscard]] bool claim_intact(const ReadClaim& claim,
+                                    std::span<const std::byte> payload) const noexcept;
+    // Ends a claim; an intact read refreshes the page's LRU stamp.
+    void release_read(const ReadClaim& claim, bool intact);
+
     [[nodiscard]] bool contains(const DiskKVIdentity& id) const;
     bool touch(const DiskKVIdentity& id);
     // Drops the page if it is live and not being read.

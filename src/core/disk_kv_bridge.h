@@ -10,6 +10,7 @@
 // engine configurations (speculative backend, proposal head, KV dtype) whose bytes differ for the
 // same tokens. A miss of any kind (never spilled, evicted, corrupt) makes the engine recompute.
 
+#include "core/direct_storage_reader.h"
 #include "core/disk_kv_store.h"
 
 #include <atomic>
@@ -63,6 +64,9 @@ public:
         // Total budget, split 65/25/10 across main/backend/state (85/15 without a backend).
         std::size_t capacity_bytes = 0;
         bool verify_crc            = true;
+        // Restore consecutive pages through DirectStorage (Windows builds with
+        // NINFER_DIRECTSTORAGE); a failed batch falls back to mapped reads.
+        bool direct_storage = false;
     };
 
     explicit DiskKVBridge(Options options);
@@ -149,8 +153,14 @@ private:
     // Index publication is batched: slots are self-describing and a lost index is rebuilt.
     static constexpr std::uint32_t kFlushInterval = 64;
 
+    // Reads a batch through DirectStorage; false leaves the caller to the mapped path.
+    [[nodiscard]] bool restore_pages_direct(const Family& target,
+                                            std::span<const DiskKVIdentity> ids,
+                                            std::span<std::byte> destination) const;
+
     Options options_;
     Family families_[3];
+    std::unique_ptr<DirectStorageReader> direct_reader_;
     mutable std::mutex stats_mutex_;
     mutable DiskKVBridgeStats stats_;
     std::atomic<std::uint32_t> flush_pending_{0};

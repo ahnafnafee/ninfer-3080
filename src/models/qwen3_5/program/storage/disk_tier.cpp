@@ -90,6 +90,7 @@ void ProgramImpl::open_disk_tier(const SequencePlanImpl& plan) {
         .backend_page_stride = backend_stride,
         .state_page_stride   = state_bytes,
         .capacity_bytes      = static_cast<std::size_t>(capacity),
+        .direct_storage      = plan.context_cache.disk_kv_directstorage,
     };
     try {
         disk_kv = std::make_unique<DiskKVBridge>(std::move(options));

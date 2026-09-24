@@ -8,6 +8,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
@@ -173,6 +174,39 @@ void concurrent_reads_survive_eviction(const std::filesystem::path& root) {
     check(mismatches.load() == 0, "no read returns bytes of a recycled slot");
 }
 
+// A claimed read (the DirectStorage path) reads the payload from the file at the claimed offset,
+// keeps the slot from eviction until released, and checks the bytes against the stored CRC.
+void claimed_reads(const std::filesystem::path& root) {
+    const DiskKVStore::Options options{
+        .path = (root / "claimed").string(), .slot_size = kSlot, .max_slots = 2};
+    DiskKVStore store(options);
+    const auto first = page(kSlot, 21);
+    check(store.upsert_page(id(1, 64), first) && store.upsert_page(id(2, 128), page(kSlot, 22)),
+          "claimed-read seeds stored");
+    const std::optional<DiskKVStore::ReadClaim> claim = store.claim_read(id(1, 64));
+    check(claim.has_value() && !store.claim_read(id(3, 192)).has_value(),
+          "a claim exists exactly for a stored page");
+    if (!claim) { return; }
+
+    std::vector<std::byte> bytes(kSlot);
+    std::FILE* file = std::fopen(options.path.c_str(), "rb");
+    const bool read = file != nullptr &&
+                      std::fseek(file, static_cast<long>(claim->offset), SEEK_SET) == 0 &&
+                      std::fread(bytes.data(), 1, bytes.size(), file) == bytes.size();
+    if (file != nullptr) { std::fclose(file); }
+    check(read && bytes == first && store.claim_intact(*claim, bytes),
+          "the claimed offset holds the page and its CRC matches");
+    std::vector<std::byte> torn = bytes;
+    torn[kSlot / 2] ^= std::byte{0x40};
+    check(!store.claim_intact(*claim, torn), "a torn claimed read fails its CRC");
+    check(!store.evict(id(1, 64)), "a claimed page is not evicted");
+    (void)store.upsert_page(id(4, 256), page(kSlot, 24));
+    check(store.contains(id(1, 64)) && !store.contains(id(2, 128)),
+          "LRU eviction skips the claimed page");
+    store.release_read(*claim, true);
+    check(store.evict(id(1, 64)), "a released page can be evicted");
+}
+
 } // namespace
 
 int main() {
@@ -182,12 +216,14 @@ int main() {
         corruption_is_a_miss(root);
         capacity_sizing(root);
         concurrent_reads_survive_eviction(root);
+        claimed_reads(root);
         std::filesystem::remove_all(root);
     } catch (const std::exception& error) {
         std::cerr << "disk KV store test: " << error.what() << '\n';
         return 1;
     }
     if (failures != 0) { return 1; }
-    std::cout << "disk KV store: LRU, persistence, corruption, sizing and concurrent reads ok\n";
+    std::cout << "disk KV store: LRU, persistence, corruption, sizing, concurrent and claimed "
+                 "reads ok\n";
     return 0;
 }

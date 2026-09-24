@@ -402,6 +402,30 @@ bool DiskKVStore::read_page(const DiskKVIdentity& id, std::span<std::byte> desti
     return intact;
 }
 
+std::optional<DiskKVStore::ReadClaim> DiskKVStore::claim_read(const DiskKVIdentity& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = index_.find(id);
+    if (found == index_.end() || !matches(header(found->second), id)) { return std::nullopt; }
+    const std::uint32_t slot = found->second;
+    ++readers_[slot];
+    return ReadClaim{.slot = slot, .offset = payload_offset(slot), .crc = header(slot).crc};
+}
+
+bool DiskKVStore::claim_intact(const ReadClaim& claim,
+                               std::span<const std::byte> payload) const noexcept {
+    return payload.size() == options_.slot_size &&
+           (!options_.verify_crc || crc32(payload) == claim.crc);
+}
+
+void DiskKVStore::release_read(const ReadClaim& claim, bool intact) {
+    std::lock_guard lock(mutex_);
+    --readers_[claim.slot];
+    if (intact) {
+        header(claim.slot).last_used = ++clock_;
+        index_dirty_                 = true;
+    }
+}
+
 bool DiskKVStore::contains(const DiskKVIdentity& id) const {
     std::lock_guard lock(mutex_);
     return index_.contains(id);

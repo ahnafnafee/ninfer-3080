@@ -84,7 +84,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
            "[--max-private-continuations N] [--max-shared-prefixes N] "
            "[--max-long-anchors-per-continuation N] [--max-cache-markers-per-request N] "
-           "[--disk-kv-path DIR] [--disk-kv-gib N] [--disk-kv-restore] [--first-token-logprobs] "
+           "[--disk-kv-path DIR] [--disk-kv-gib N] [--disk-kv-restore] [--disk-kv-directstorage] "
+           "[--first-token-logprobs] "
            "[--context-cache-policy default|rolling] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
@@ -149,7 +150,9 @@ std::string serve_usage_text(const char* argv0) {
            "--host-kv-mib uses MiB\n"
            "       --disk-kv-path DIR adds a disk tier: evicted continuations write their KV and "
            "StateImages there (per artifact and profile, --disk-kv-gib total, default 64) and "
-           "survive restarts; --disk-kv-restore seeds a new request's matching prefix from it\n"
+           "survive restarts; --disk-kv-restore seeds a new request's matching prefix from it; "
+           "--disk-kv-directstorage reads restores through DirectStorage (Windows builds with "
+           "NINFER_DIRECTSTORAGE)\n"
            "       --first-token-logprobs accepts Chat Completions top_logprobs (non-streaming) "
            "and reports the first generated token's log probability with its alternatives\n"
            "       --context-cache-policy rolling lets a capture that extends a resident "
@@ -357,6 +360,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.context_cache.disk_kv_capacity_bytes = gib << 30U;
         } else if (arg == "--disk-kv-restore") {
             options.context_cache.disk_kv_restore = true;
+        } else if (arg == "--disk-kv-directstorage") {
+            options.context_cache.disk_kv_directstorage = true;
         } else if (arg == "--context-cache-policy") {
             const std::string policy = require_value("--context-cache-policy");
             if (policy != "default" && policy != "rolling") {
@@ -576,9 +581,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         options.context_cache.host_kv_capacity_bytes = 0;
     }
     if (options.context_cache.disk_kv_path.empty() &&
-        (options.context_cache.disk_kv_restore ||
+        (options.context_cache.disk_kv_restore || options.context_cache.disk_kv_directstorage ||
          options.context_cache.disk_kv_capacity_bytes != 0)) {
-        throw std::invalid_argument("--disk-kv-restore and --disk-kv-gib need --disk-kv-path");
+        throw std::invalid_argument(
+            "--disk-kv-restore, --disk-kv-directstorage and --disk-kv-gib need --disk-kv-path");
     }
     if (!options.devices.empty() && device_explicit) {
         throw std::invalid_argument("--device and --devices are mutually exclusive");

@@ -57,6 +57,7 @@ DiskKVBridge::DiskKVBridge(Options options) : options_(std::move(options)) {
     if (family(DiskKVKind::MainKV).store == nullptr) {
         throw std::invalid_argument("disk KV budget does not hold one main KV page");
     }
+    if (options_.direct_storage) { direct_reader_ = DirectStorageReader::open(); }
     workers_.reserve(kWorkerCount);
     for (std::size_t i = 0; i < kWorkerCount; ++i) {
         workers_.emplace_back([this] { worker_loop(); });
@@ -239,11 +240,42 @@ bool DiskKVBridge::restore_page(const DiskKVIdentity& id, DiskKVKind kind,
     return read;
 }
 
+bool DiskKVBridge::restore_pages_direct(const Family& target, std::span<const DiskKVIdentity> ids,
+                                        std::span<std::byte> destination) const {
+    std::vector<DiskKVStore::ReadClaim> claims;
+    claims.reserve(ids.size());
+    std::vector<FileRangeRead> reads;
+    reads.reserve(ids.size());
+    for (std::size_t index = 0; index < ids.size(); ++index) {
+        const std::optional<DiskKVStore::ReadClaim> claim = target.store->claim_read(ids[index]);
+        if (!claim) { break; }
+        claims.push_back(*claim);
+        reads.push_back(FileRangeRead{
+            .offset      = claim->offset,
+            .destination = destination.subspan(index * target.stride, target.stride)});
+    }
+    bool intact = claims.size() == ids.size() && direct_reader_->read(target.store->path(), reads);
+    for (std::size_t index = 0; index < claims.size(); ++index) {
+        const bool page_intact =
+            intact && target.store->claim_intact(claims[index], reads[index].destination);
+        intact = intact && page_intact;
+        target.store->release_read(claims[index], page_intact);
+    }
+    return intact;
+}
+
 bool DiskKVBridge::restore_pages(std::span<const DiskKVIdentity> ids, DiskKVKind kind,
                                  std::span<std::byte> destination) const {
     const Family& target = family(kind);
     if (target.store == nullptr || destination.size() != ids.size() * target.stride) {
         return false;
+    }
+    if (direct_reader_ != nullptr && !ids.empty() &&
+        restore_pages_direct(target, ids, destination)) {
+        std::lock_guard lock(stats_mutex_);
+        stats_.restores += ids.size();
+        stats_.restore_bytes += destination.size();
+        return true;
     }
     constexpr std::size_t kReaders = 8;
     std::atomic<std::size_t> next{0};

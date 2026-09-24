@@ -137,6 +137,15 @@ int main() {
             const auto stats = bridge.stats();
             check(stats.restores == 2, "restore statistics count");
         }
+        if (!ninfer::DirectStorageReader::available_in_build()) {
+            DiskKVBridge::Options direct = options(root);
+            direct.direct_storage        = true;
+            bool refused                 = false;
+            try {
+                DiskKVBridge bridge(direct);
+            } catch (const std::runtime_error&) { refused = true; }
+            check(refused, "a build without DirectStorage refuses to open a DirectStorage bridge");
+        }
         std::filesystem::remove_all(root);
     } catch (const std::exception& error) {
         std::cerr << "disk KV bridge test: " << error.what() << '\n';

@@ -1141,6 +1141,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--disk-kv-path DIR` | disk tier under the Host tier; see [Disk tier](#disk-tier) | off |
 | `--disk-kv-gib N` | disk tier budget in GiB | `64` |
 | `--disk-kv-restore` | seed a new request's matching prefix from the disk tier | write-only |
+| `--disk-kv-directstorage` | read restores through Microsoft DirectStorage; Windows builds with `-DNINFER_DIRECTSTORAGE=ON` only, untested | mapped reads |
 | `--first-token-logprobs` | accept Chat Completions `top_logprobs` (`1..20`, non-streaming) and report the first generated token's log probability with that many alternatives under the raw next-token distribution; `logprobs: true` stays unsupported | off |
 | `--context-cache-policy default\|rolling` | `rolling`: within one cache session (a Responses `prompt_cache_key`), a capture that extends a resident checkpoint the request matched exactly inherits that resident's demand, so a conversation whose prompt only grows keeps rolling its frontier forward; with conversations sharing a prefix, one conversation's extension can evict the prefix the others use | `default` |
 | `--no-thinking` | disable thinking by default | thinking on |
@@ -1307,6 +1308,13 @@ eight threads and run on the engine thread, so other lanes pause during one; med
 restored. Without the flag the tier only writes. Writes of an evicted owner during admission proceed
 a batch at a time between decode rounds; an owner released elsewhere is written within 20 seconds,
 and shutdown writes for at most 60.
+
+On Windows, a build configured with `-DNINFER_DIRECTSTORAGE=ON` fetches the DirectStorage 1.3
+runtime and offers `--disk-kv-directstorage`: a restore then reads its pages into host memory
+through a DirectStorage queue, every page of a staging batch in flight at once, instead of copying
+from the mapped files. Each page is still checked against its CRC, and a batch that fails or does
+not complete within 10 seconds falls back to the mapped reads. This path has been checked to compile
+against Windows headers but has not been run.
 
 ## Execution behavior
 

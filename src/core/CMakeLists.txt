@@ -9,6 +9,7 @@ add_library(ninfer_core STATIC
   host_kv_arena.cpp
   disk_kv_store.cpp
   disk_kv_bridge.cpp
+  direct_storage_reader.cpp
   token_logprobs.cpp
   paged_kv_cache.cpp
   linear_attention_state.cpp
@@ -24,4 +25,7 @@ ninfer_cuda_archive(ninfer_core)
 target_link_libraries(ninfer_core PUBLIC ${NINFER_CUDART_TARGET} CUDA::nvtx3 Threads::Threads CUDA::cuda_driver)
 if(WIN32 AND NINFER_D3D12_RESIDENCY)
   target_link_libraries(ninfer_core PUBLIC d3d12 dxgi)
+endif()
+if(WIN32 AND NINFER_DIRECTSTORAGE)
+  target_link_libraries(ninfer_core PUBLIC ninfer_directstorage)
 endif()

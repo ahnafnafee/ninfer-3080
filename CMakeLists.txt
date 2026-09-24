@@ -62,6 +62,27 @@ option(NINFER_D3D12_RESIDENCY
 if(WIN32 AND NINFER_D3D12_RESIDENCY)
   add_compile_definitions(NINFER_D3D12_RESIDENCY=1)
 endif()
+# Windows only: disk-tier restores through Microsoft DirectStorage, for --disk-kv-directstorage.
+# dstorage.dll is delay-loaded, so a binary that never asks for DirectStorage runs without it.
+option(NINFER_DIRECTSTORAGE
+       "On Windows, offer --disk-kv-directstorage: disk-tier restores through DirectStorage" OFF)
+if(WIN32 AND NINFER_DIRECTSTORAGE)
+  include(FetchContent)
+  FetchContent_Declare(directstorage
+    URL "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.DirectStorage/1.3.0"
+    DOWNLOAD_NAME "directstorage.1.3.0.zip")
+  FetchContent_MakeAvailable(directstorage)
+  add_library(ninfer_directstorage INTERFACE)
+  target_include_directories(ninfer_directstorage INTERFACE
+    "${directstorage_SOURCE_DIR}/native/include")
+  target_link_libraries(ninfer_directstorage INTERFACE
+    "${directstorage_SOURCE_DIR}/native/lib/x64/dstorage.lib" delayimp)
+  target_link_options(ninfer_directstorage INTERFACE "/DELAYLOAD:dstorage.dll")
+  set(NINFER_DIRECTSTORAGE_DLLS
+    "${directstorage_SOURCE_DIR}/native/bin/x64/dstorage.dll"
+    "${directstorage_SOURCE_DIR}/native/bin/x64/dstoragecore.dll")
+  add_compile_definitions(NINFER_DIRECTSTORAGE=1)
+endif()
 # The largest attention units end a build on one single-threaded ptxas. --split-compile lets nvcc
 # optimize one unit on several threads; 0 means every core, which a parallel ninja multiplies by its
 # job count, so a bound is usually what is wanted.

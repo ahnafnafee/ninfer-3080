@@ -187,6 +187,9 @@ struct ContextCacheOptions {
     // those KV pages and the StateImage at E and prefills only [E, prompt). Off leaves the tier
     // write-only.
     bool disk_kv_restore = false;
+    // Restore reads go through Microsoft DirectStorage (Windows builds with NINFER_DIRECTSTORAGE);
+    // any other build refuses it at load. A failed batch falls back to mapped reads.
+    bool disk_kv_directstorage = false;
     // Retention for one long-lived conversation whose prompt only grows: a capture that extends a
     // resident the request matched exactly at that resident's frontier inherits the resident's
     // demand, so rolling the frontier forward is not valued against its own history. Off by

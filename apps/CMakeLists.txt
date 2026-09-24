@@ -18,3 +18,11 @@ add_executable(ninfer-perplexity
 ninfer_internal_includes(ninfer-perplexity)
 target_link_libraries(ninfer-perplexity PRIVATE
   ninfer_engine ninfer_product_logging ninfer::json)
+
+if(WIN32 AND NINFER_DIRECTSTORAGE)
+  foreach(app IN ITEMS ninfer ninfer-serve)
+    add_custom_command(TARGET ${app} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NINFER_DIRECTSTORAGE_DLLS}
+              $<TARGET_FILE_DIR:${app}>)
+  endforeach()
+endif()
