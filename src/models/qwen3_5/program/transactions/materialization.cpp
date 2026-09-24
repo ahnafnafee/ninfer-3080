@@ -330,8 +330,10 @@ ProgramImpl::reserve_materialization(AdmissionCandidate&& plan, PreparedPromptDa
             .vision_plan        = std::move(request_plan.vision),
             .vision             = nullptr,
             .capture_groups     = std::move(request_plan.capture_groups),
-            .base               = request_plan.reuse_base,
-            .cursor             = request_plan.reuse_base,
+            // A root starts from an empty sequence; a disk-restorable prefix is seeded later.
+            .base                  = request_plan.reuse == ReusePath::Root ? 0U : request_plan.reuse_base,
+            .cursor                = request_plan.reuse == ReusePath::Root ? 0U : request_plan.reuse_base,
+            .disk_restore_frontier = request_plan.disk_restore_frontier,
             .prompt_tokens      = prompt_tokens,
             .initial_mtp_extent = initial_mtp_extent,
             .elapsed_seconds    = 0.0,
@@ -1699,6 +1701,11 @@ void ProgramImpl::publish_pressure_work(MaterializationTransaction::PressureWork
 
 void ProgramImpl::abort_pressure_work(MaterializationTransaction::PressureWork& work) noexcept {
     try {
+        if (work.disk_spill) {
+            // Queued writes borrow the owner, which outlives this abort only as long as they do.
+            if (owner_spill_in_flight(*work.disk_spill)) { disk_kv->wait_idle(); }
+            work.disk_spill.reset();
+        }
         if (work.completed) { return; }
         for (auto& change : work.state_changes) {
             if (change.transfer) {
@@ -1734,7 +1741,7 @@ ProgramImpl::release_materialization_victim(MaterializationTransaction& transact
     }
 
     out.delta.removed = owner_exclusive_resources(continuation_states[index]);
-    release_continuation_slot_strict(index);
+    release_continuation_slot_strict(index, disk_kv != nullptr);
     if (transaction.root_waiting_for_victim && transaction.root_continuation_index == index) {
         continuation_slots[index].role      = ContinuationSlotRole::ReservedMaterialization;
         transaction.root_waiting_for_victim = false;
@@ -1878,10 +1885,23 @@ ProgramImpl::progress_materialization_transaction(runtime::CancellationFlagView 
 
     if (pressure_transition.phase == PressureTransitionPhase::HostReleases) {
         if (transaction.cancel_pending) {
+            // A disk write in flight still reads its owner; the claim returns only after it lands.
+            for (std::size_t position = 0; position < transaction.victim_count; ++position) {
+                MaterializationTransaction::PressureWork& work = transaction.pressure[position];
+                if (!work.disk_spill) { continue; }
+                work.disk_spill->stopped = true;
+                if (!progress_owner_spill(continuation_states[transaction.victim_indices[position]],
+                                          *work.disk_spill)) {
+                    out.status = runtime::ContextTransactionStatus::InProgress;
+                    return out;
+                }
+                work.disk_spill.reset();
+            }
             abort_transaction();
             return out;
         }
-        for (std::size_t position = 0; position < transaction.shared_victim_count; ++position) {
+        for (std::size_t& position = transaction.shared_host_release_cursor;
+             position < transaction.shared_victim_count; ++position) {
             MaterializationTransaction::PressureWork& work = transaction.shared_pressure[position];
             if (work.option.evicts_continuation) {
                 const std::uint32_t index      = transaction.shared_victim_indices[position];
@@ -1918,9 +1938,43 @@ ProgramImpl::progress_materialization_transaction(runtime::CancellationFlagView 
                 publish_pressure_host_releases(work);
             }
         }
-        for (std::size_t position = 0; position < transaction.victim_count; ++position) {
+        for (std::size_t& position = transaction.host_release_cursor;
+             position < transaction.victim_count; ++position) {
             MaterializationTransaction::PressureWork& work = transaction.pressure[position];
             if (work.option.evicts_continuation) {
+                // An evicted owner is first written to the disk tier, a bounded batch per step, so
+                // decoding continues between batches.
+                if (disk_kv) {
+                    const std::uint32_t index = transaction.victim_indices[position];
+                    if (index >= continuation_capacity ||
+                        continuation_slots[index].role != ContinuationSlotRole::Catalogued ||
+                        continuation_slots[index].generation !=
+                            transaction.victim_generations[position]) {
+                        throw std::logic_error("disk spill victim changed while claimed");
+                    }
+                    const SequenceState& victim = continuation_states[index];
+                    if (!work.disk_spill) { work.disk_spill.emplace(plan_owner_spill(victim)); }
+                    DiskOwnerSpill& spill = *work.disk_spill;
+                    bool written          = false;
+                    try {
+                        written = progress_owner_spill(victim, spill);
+                    } catch (const std::exception&) {
+                        // The tier is best effort: settle what was queued and evict regardless.
+                        disk_kv->wait_idle();
+                        written = true;
+                    }
+                    if (!written) {
+                        // A write that stops advancing must not hold admission forever: stage no
+                        // more, let what is queued land, and evict with the shorter chain.
+                        if (std::chrono::steady_clock::now() - spill.last_progress >
+                            std::chrono::seconds(15)) {
+                            spill.stopped = true;
+                        }
+                        out.status = runtime::ContextTransactionStatus::InProgress;
+                        return out;
+                    }
+                    work.disk_spill.reset();
+                }
                 const PhysicalReleaseResult released =
                     release_materialization_victim(transaction, position);
                 if (released.status != runtime::ConsumeStatus::Consumed ||

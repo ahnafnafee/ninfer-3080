@@ -210,12 +210,13 @@ bool ProgramImpl::can_release_continuation_slot_strict(std::uint32_t index) cons
     return true;
 }
 
-void ProgramImpl::release_continuation_slot_strict(std::uint32_t index) noexcept {
+void ProgramImpl::release_continuation_slot_strict(std::uint32_t index,
+                                                   bool written_to_disk) noexcept {
     try {
         if (!can_release_continuation_slot_strict(index)) { std::terminate(); }
     } catch (...) { std::terminate(); }
     SequenceState& sequence = continuation_states[index];
-    release_sequence_kv_strict(sequence);
+    release_sequence_kv_strict(sequence, written_to_disk);
     release_sequence_state_strict(sequence);
     retire_continuation_slot(index);
 }
@@ -1498,10 +1499,12 @@ void ProgramImpl::release_active_sequence_kv_strict(SequenceState& sequence) noe
     if (host_kv_extents) { (void)host_kv_extents->release_unreferenced(); }
 }
 
-void ProgramImpl::release_sequence_kv_strict(SequenceState& sequence) noexcept {
+void ProgramImpl::release_sequence_kv_strict(SequenceState& sequence,
+                                             bool written_to_disk) noexcept {
     if (!sequence.kv || !text_kv_addresses || !text_kv_addresses->can_release(sequence.kv->text)) {
         std::terminate();
     }
+    if (!written_to_disk) { spill_released_owner(sequence); }
     if (sequence.kv->backend &&
         (!backend_kv_addresses || !backend_kv_addresses->can_release(*sequence.kv->backend))) {
         std::terminate();

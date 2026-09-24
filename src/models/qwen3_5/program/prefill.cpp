@@ -658,6 +658,17 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         sequence.rebuild_work       = request_plan.root_rebuild_work;
         sequence.rebuild_tail_begin = request_plan.root_rebuild_tail_begin;
 
+        if (staged.disk_restore_frontier != 0) {
+            bool restored = false;
+            try {
+                restored =
+                    restore_prefix_from_disk(sequence, staged, staged.disk_restore_frontier);
+            } catch (const std::exception&) {
+                // The tier is best effort: whatever failed, the prompt is recomputed.
+            }
+            if (!restored) { staged.hidden_replay_tokens = staged.disk_restore_frontier; }
+        }
+
         if (is_masked_draft_backend(speculative_backend)) {
             if (!dflash || !io.dflash_decode || (backend_kv_cache() && !sequence.kv->backend)) {
                 throw std::logic_error("DFlash prefill state is incomplete");
@@ -987,10 +998,18 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
     if (staged.pending_capture_offer != 0) {
         throw std::logic_error("prefill cannot advance while a capture offer is pending");
     }
-    const runtime::BeginSummary summary{.prompt_tokens        = staged.prompt_tokens,
-                                        .reused_prompt_tokens = staged.base,
-                                        .prefix_reuse_path    = staged.reuse};
+    const runtime::BeginSummary summary{
+        .prompt_tokens        = staged.prompt_tokens,
+        .reused_prompt_tokens = staged.disk_restore_frontier != 0 ? staged.disk_restore_frontier
+                                                                  : staged.base,
+        .prefix_reuse_path    = staged.reuse};
     std::uint32_t processed_prompt_tokens = 0;
+    // After a failed disk restore the admitted prefix is recomputed without being reported.
+    const auto reported_tokens = [&staged, &processed_prompt_tokens] {
+        const std::uint32_t hidden = std::min(staged.hidden_replay_tokens, processed_prompt_tokens);
+        staged.hidden_replay_tokens -= hidden;
+        return processed_prompt_tokens - hidden;
+    };
     const auto started                    = Clock::now();
     try {
         if (staged.next_capture < staged.capture_groups.size() &&
@@ -1149,7 +1168,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                         staged.pending_capture_offer = next_capture_offer_id_;
                         return runtime::PrefillStepResult{
                             .summary                 = summary,
-                            .processed_prompt_tokens = processed_prompt_tokens,
+                            .processed_prompt_tokens = reported_tokens(),
                             .timing                  = timing.finish(),
                         };
                     }
@@ -1167,7 +1186,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                     std::chrono::duration<double>(Clock::now() - started).count();
                 return runtime::PrefillStepResult{
                     .summary                 = summary,
-                    .processed_prompt_tokens = processed_prompt_tokens,
+                    .processed_prompt_tokens = reported_tokens(),
                     .timing                  = timing.finish(),
                 };
             }
@@ -1267,7 +1286,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         return runtime::PrefillStepResult{
             .summary = summary,
             .round   = runtime::GeneratedRound{.tokens = std::span<const TokenId>(host_tokens, 1)},
-            .processed_prompt_tokens = processed_prompt_tokens,
+            .processed_prompt_tokens = reported_tokens(),
             .complete                = true,
             .timing                  = timing.finish(),
         };

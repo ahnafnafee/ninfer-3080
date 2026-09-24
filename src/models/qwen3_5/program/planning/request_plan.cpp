@@ -84,6 +84,12 @@ runtime::PrefillWork scheduled_prefill_work(std::uint32_t begin, std::uint32_t e
     return work;
 }
 
+// A root admitted on a disk-restorable prefix recomputes that prefix if the restore fails, so its
+// service budget covers the prompt from the start.
+std::uint32_t service_work_base(const AdmissionCandidateImpl& plan) noexcept {
+    return plan.disk_restore_frontier != 0 ? 0U : plan.reuse_base;
+}
+
 std::uint64_t projected_service_work(const runtime::RequestPlanSummary& summary,
                                      std::uint32_t reuse_base, std::uint32_t prefill_chunk,
                                      std::size_t prefill_splits,
@@ -561,6 +567,16 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
         throw std::logic_error("published DFlash checkpoint is not materializable");
     }
 
+    // A root with no resident prefix may find one on the disk tier. It stays a root, starting
+    // from an empty sequence; the restorable frontier only becomes its reuse base.
+    if (plan->reuse == ReusePath::Root && base.summary.publish_continuation) {
+        if (const std::optional<std::uint32_t> frontier =
+                disk_restorable_frontier(base, prompt, plan->summary.prompt_tokens)) {
+            plan->disk_restore_frontier = *frontier;
+            plan->reuse_base            = *frontier;
+        }
+    }
+
     const std::optional<RewriteCheckpointSpec>& desired = base.rewrite_checkpoint;
     const bool can_retain_rewrite =
         desired && source != nullptr &&
@@ -721,8 +737,9 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
 
     const std::size_t prefill_splits = plan->vision ? plan->vision->uses.size() : 0ULL;
     plan->summary.service_work_quanta =
-        projected_service_work(plan->summary, plan->reuse_base, prefill_chunk, prefill_splits,
-                               plan->capture_groups, prompt.identity.rewrite_execution_frontiers);
+        projected_service_work(plan->summary, service_work_base(*plan), prefill_chunk,
+                               prefill_splits, plan->capture_groups,
+                               prompt.identity.rewrite_execution_frontiers);
     std::uint64_t remaining_vision_items   = 0;
     std::uint64_t remaining_vision_patches = 0;
     if (plan->vision) {
@@ -807,6 +824,21 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
     const detail::PhysicalResources source_resources =
         source != nullptr ? owner_exclusive_resources(*source) : detail::PhysicalResources{};
     plan->source_resources = source_resources;
+    if (plan->disk_restore_frontier != 0) {
+        // Priced as a Host restore of the same prefix, so a resident candidate of similar reach
+        // still wins; the disk read itself is not modeled.
+        add_state_transfer(runtime::ContextTransferDirection::HostToDevice);
+        add_kv_transfer(runtime::ContextResourceClass::MainKV,
+                        runtime::ContextTransferDirection::HostToDevice, *text_kv_pages,
+                        pages_for_tokens(plan->disk_restore_frontier));
+        const std::uint32_t backend_frontier =
+            backend_frontier_at(speculative_backend, plan->disk_restore_frontier);
+        if (backend_kv_pages && backend_frontier != 0) {
+            add_kv_transfer(runtime::ContextResourceClass::BackendKV,
+                            runtime::ContextTransferDirection::HostToDevice, *backend_kv_pages,
+                            pages_for_tokens(backend_frontier));
+        }
+    }
     if (source != nullptr || shared_source != nullptr) {
         const StateImageHandle selected =
             source != nullptr ? selected_state(*source, plan->reuse, plan->selected_checkpoint)
@@ -1260,8 +1292,9 @@ void ProgramImpl::select_shared_captures(AdmissionCandidate& candidate,
 
     const std::size_t prefill_splits = plan.vision ? plan.vision->uses.size() : 0ULL;
     plan.summary.service_work_quanta =
-        projected_service_work(plan.summary, plan.reuse_base, prefill_chunk, prefill_splits,
-                               plan.capture_groups, prompt.identity.rewrite_execution_frontiers);
+        projected_service_work(plan.summary, service_work_base(plan), prefill_chunk,
+                               prefill_splits, plan.capture_groups,
+                               prompt.identity.rewrite_execution_frontiers);
     std::uint64_t vision_items   = 0;
     std::uint64_t vision_patches = 0;
     if (plan.vision) {

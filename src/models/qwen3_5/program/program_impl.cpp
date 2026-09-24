@@ -431,6 +431,8 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         }
     }
 
+    open_disk_tier(plan);
+
     io = qwen3_5::RoundState(backing, plan.persistent.round);
     if (io.mtp.has_value() != (speculative_backend == SpeculativeBackend::Mtp)) {
         throw std::logic_error("round-state MTP extension does not match the sequence plan");
@@ -539,6 +541,7 @@ void ProgramImpl::synchronize_transfer_streams() const {
 }
 
 ProgramImpl::~ProgramImpl() noexcept {
+    flush_disk_tier();
     for (std::size_t rank = 0; rank < transfer_streams.size(); ++rank) {
         (void)cudaStreamSynchronize(transfer_streams[rank]);
         (void)cudaStreamSynchronize(compute_streams[rank]);

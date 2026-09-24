@@ -1122,6 +1122,9 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--max-shared-prefixes N` | shared stable-prefix descriptor capacity | `max-concurrency` |
 | `--max-long-anchors-per-continuation N` | private long-anchor limit per continuation | `2` |
 | `--max-cache-markers-per-request N` | caller marker input-complexity bound | `4` |
+| `--disk-kv-path DIR` | disk tier under the Host tier; see [Disk tier](#disk-tier) | off |
+| `--disk-kv-gib N` | disk tier budget in GiB | `64` |
+| `--disk-kv-restore` | seed a new request's matching prefix from the disk tier | write-only |
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
 | `--cors` | permissive browser CORS headers | off |
@@ -1262,6 +1265,30 @@ decode Host/device-wait microseconds per round, boundary, and maintenance; use J
 Intervals with context materialization or retention activity are retained even when they contain no
 token execution; only fully idle intervals are omitted. Downstream measurement should prefer the
 raw counters and seconds over rounded stderr rates.
+
+### Disk tier
+
+`--disk-kv-path DIR` adds a disk tier under the Host tier. When a private continuation is evicted,
+by pressure or by the catalog limit, it is written there before its memory is released: its KV pages
+as a prefix chain, the StateImage at its endpoint, and the tail page and StateImage of its rewrite
+seam and of its three earliest long anchors. The continuations still resident at shutdown are
+written the same way. Pages are keyed by the prefix digest at their last token and by the execution
+profile, so an identical prefix is stored once, and the files survive restarts. Each artifact gets
+its own subdirectory and each KV format, stride and YaRN setting its own files, so one model or
+profile never restores another's KV. `--disk-kv-gib` (default 64) is the total budget, split
+65/25/10 across Main KV, Backend KV and StateImages (85/15 without a backend); the least recently
+used page goes first. The files are sparse until written, and a torn page fails its CRC and reads as
+a miss.
+
+With `--disk-kv-restore`, a request with no resident prefix looks for the longest frontier `E` on
+disk whose StateImage and KV chain match its own prompt, is admitted as reusing `E`, and has `[0, E)`
+copied into its sequence before prefill starts at `E`; under MTP the StateImage's hidden state
+extends the draft KV to `E`. A restore is abandoned after 8 seconds, and any miss or failure falls
+back to recomputing the prompt, so a result never depends on the disk contents. Restores read with
+eight threads and run on the engine thread, so other lanes pause during one; media prompts are never
+restored. Without the flag the tier only writes. Writes of an evicted owner during admission proceed
+a batch at a time between decode rounds; an owner released elsewhere is written within 20 seconds,
+and shutdown writes for at most 60.
 
 ## Execution behavior
 

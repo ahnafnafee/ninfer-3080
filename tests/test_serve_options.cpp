@@ -322,6 +322,29 @@ int main() {
     failures += check(disabled_cache_capacity_rejected,
                       "root-only server mode accepted context-cache capacity options");
 
+    const ServeOptions disk = parse({"ninfer-serve", "model.ninfer", "--disk-kv-path", "/tmp/l3",
+                                     "--disk-kv-gib", "3", "--disk-kv-restore"});
+    failures += check(disk.context_cache.disk_kv_path == "/tmp/l3" &&
+                          disk.context_cache.disk_kv_capacity_bytes == (3ULL << 30U) &&
+                          disk.context_cache.disk_kv_restore,
+                      "disk tier options did not reach serving options");
+    failures += check(defaults.context_cache.disk_kv_path.empty() &&
+                          !defaults.context_cache.disk_kv_restore,
+                      "the disk tier must be off by default");
+    for (const auto& invalid : std::vector<std::vector<std::string>>{
+             {"--disk-kv-restore"},
+             {"--disk-kv-gib", "8"},
+             {"--disk-kv-path", "/tmp/l3", "--disk-kv-gib", "0"},
+             {"--disk-kv-path", "/tmp/l3", "--no-prefix-reuse"}}) {
+        std::vector<std::string> args{"ninfer-serve", "model.ninfer"};
+        args.insert(args.end(), invalid.begin(), invalid.end());
+        bool rejected = false;
+        try {
+            (void)parse(args);
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "an inconsistent disk tier configuration was accepted");
+    }
+
     failures += check(!parse({"ninfer-serve", "model.ninfer"}).auto_prefix_grid,
                       "automatic prefix grid was on without --auto-prefix-grid");
     failures +=

@@ -84,6 +84,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
            "[--max-private-continuations N] [--max-shared-prefixes N] "
            "[--max-long-anchors-per-continuation N] [--max-cache-markers-per-request N] "
+           "[--disk-kv-path DIR] [--disk-kv-gib N] [--disk-kv-restore] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] "
@@ -142,6 +143,9 @@ std::string serve_usage_text(const char* argv0) {
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
            "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
            "--host-kv-mib uses MiB\n"
+           "       --disk-kv-path DIR adds a disk tier: evicted continuations write their KV and "
+           "StateImages there (per artifact and profile, --disk-kv-gib total, default 64) and "
+           "survive restarts; --disk-kv-restore seeds a new request's matching prefix from it\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
            "control tokens count toward the request output limit\n"
            "       --thinking-budget-message replaces the end-of-thinking notice a request gets "
@@ -328,6 +332,19 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             }
             options.context_cache.host_kv_capacity_bytes = static_cast<std::size_t>(mib << 20);
             context_capacity_explicit                    = true;
+        } else if (arg == "--disk-kv-path") {
+            options.context_cache.disk_kv_path = require_value("--disk-kv-path");
+            if (options.context_cache.disk_kv_path.empty()) {
+                throw std::invalid_argument("--disk-kv-path must not be empty");
+            }
+        } else if (arg == "--disk-kv-gib") {
+            const std::uint64_t gib = parse_u64(require_value("--disk-kv-gib"), "disk-kv-gib");
+            if (gib == 0 || gib > (std::numeric_limits<std::uint64_t>::max() >> 30U)) {
+                throw std::invalid_argument("--disk-kv-gib must be positive and in range");
+            }
+            options.context_cache.disk_kv_capacity_bytes = gib << 30U;
+        } else if (arg == "--disk-kv-restore") {
+            options.context_cache.disk_kv_restore = true;
         } else if (arg == "--max-private-continuations") {
             options.context_cache.max_private_continuations =
                 static_cast<std::uint32_t>(parse_nonnegative_int(
@@ -532,9 +549,17 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             throw std::invalid_argument(
                 "--no-prefix-reuse cannot be combined with --auto-prefix-grid");
         }
+        if (!options.context_cache.disk_kv_path.empty()) {
+            throw std::invalid_argument("--no-prefix-reuse cannot be combined with --disk-kv-path");
+        }
         options.context_cache.enabled                = false;
         options.context_cache.host_state_slots       = 0;
         options.context_cache.host_kv_capacity_bytes = 0;
+    }
+    if (options.context_cache.disk_kv_path.empty() &&
+        (options.context_cache.disk_kv_restore ||
+         options.context_cache.disk_kv_capacity_bytes != 0)) {
+        throw std::invalid_argument("--disk-kv-restore and --disk-kv-gib need --disk-kv-path");
     }
     if (!options.devices.empty() && device_explicit) {
         throw std::invalid_argument("--device and --devices are mutually exclusive");

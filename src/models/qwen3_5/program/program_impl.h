@@ -2,6 +2,7 @@
 #include "models/qwen3_5/program/internal.h"
 
 #include "core/arena.h"
+#include "core/disk_kv_bridge.h"
 #include "core/gdn_replay_records.h"
 #include "core/host_kv_arena.h"
 #include "ninfer/ops/gdn_replay.h"
@@ -23,6 +24,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <array>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -252,6 +254,8 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
     std::uint64_t destination_epoch = 0;
     runtime::PrefillWork root_rebuild_work;
     std::uint32_t root_rebuild_tail_begin = 0;
+    // A root whose prefix [0, frontier) the disk tier can restore; zero otherwise.
+    std::uint32_t disk_restore_frontier   = 0;
     bool text_retained_tail_release       = false;
     bool backend_retained_tail_release    = false;
 };
@@ -419,6 +423,11 @@ struct RequestControl {
         std::uint64_t pending_capture_offer = 0;
         std::uint32_t base                  = 0;
         std::uint32_t cursor                = 0;
+        // A root admitted on a disk-restorable prefix reports that frontier as reused whether or
+        // not the restore succeeds; after a failed restore the prefill recomputes [0, frontier)
+        // and keeps those tokens out of its reports, so the admitted suffix stays exact.
+        std::uint32_t disk_restore_frontier = 0;
+        std::uint32_t hidden_replay_tokens  = 0;
         std::uint32_t prompt_tokens         = 0;
         std::uint32_t initial_mtp_extent    = 0;
         double elapsed_seconds              = 0.0;
@@ -624,6 +633,16 @@ public:
     std::unique_ptr<execution::StageRuntime> stage_runtime;
     std::unique_ptr<qwen3_5::HostStatePool> host_state_images;
     std::unique_ptr<StateImageStore> state_store;
+    // Disk (L3) tier, null unless configured. Its staging lives in its own pinned arena and state
+    // pool, so the tier takes nothing from the Host tier's capacity. The bridge is declared after
+    // everything its queued writes borrow, so it drains them before that memory is released.
+    std::unique_ptr<HostKVArena> disk_staging_arena;
+    std::optional<HostKVAllocation> disk_main_staging;
+    std::optional<HostKVAllocation> disk_backend_staging;
+    std::unique_ptr<qwen3_5::HostStatePool> disk_state_staging_pool;
+    std::optional<qwen3_5::HostStateSlotHandle> disk_state_staging;
+    std::unique_ptr<DiskKVBridge> disk_kv;
+    bool disk_kv_restore = false;
     // ReplaySSM records and their fold, for the first state shard; the rest, on other devices, are
     // in the `extra_` vectors.
     std::optional<GdnReplayRecords> replay_records;
@@ -764,6 +783,30 @@ private:
         std::uint8_t timer_mask    = 0;
     };
 
+    // An evicted owner's disk write, resumable across transaction steps: the KV prefix chains, the
+    // endpoint StateImage, and the tail page and StateImage of its rewrite seam and earliest long
+    // anchors. Items are staged a batch at a time through the tier's own staging memory.
+    struct DiskSpillItem {
+        DiskKVKind kind         = DiskKVKind::MainKV;
+        std::uint32_t frontier  = 0; // the digest frontier that keys the item
+        std::uint32_t page      = 0; // KV row page for KV items
+        StateImageHandle state;
+    };
+
+    struct DiskOwnerSpill {
+        std::vector<DiskSpillItem> items;
+        std::size_t next = 0;
+        DiskKVKind batch_kind = DiskKVKind::MainKV;
+        std::vector<DiskKVIdentity> batch_ids;
+        std::vector<std::span<const std::byte>> batch_bytes;
+        std::size_t batch_submitted = 0;
+        std::vector<SpillTicket> tickets;
+        std::uint64_t written      = 0;
+        std::uint64_t deduplicated = 0;
+        bool stopped               = false;
+        std::chrono::steady_clock::time_point last_progress = std::chrono::steady_clock::now();
+    };
+
     struct MaterializationTransaction {
         struct KVRestorePage {
             LogicalKVPageHandle logical;
@@ -797,6 +840,7 @@ private:
             bool checkpoint_drop_published = false;
             bool mutation_published        = false;
             std::uint64_t spill_pages      = 0;
+            std::optional<DiskOwnerSpill> disk_spill;
         };
 
         std::uint64_t id = 0;
@@ -817,6 +861,9 @@ private:
         std::vector<MaterializationVictimResult> pressure_results;
         std::size_t pressure_cursor = 0;
         std::size_t victim_count    = 0;
+        // Host releases resume here while an evicted owner is still being written to disk.
+        std::size_t host_release_cursor        = 0;
+        std::size_t shared_host_release_cursor = 0;
         std::vector<std::uint32_t> shared_victim_indices;
         std::vector<std::uint64_t> shared_victim_generations;
         std::vector<bool> shared_victim_released;
@@ -1114,6 +1161,26 @@ private:
         std::vector<runtime::CheckpointRecoveryAlternativeWork>& alternatives,
         PressureRecoveryScratch& scratch, std::uint64_t& projection_work) const;
     void publish_checkpoint_drop(SequenceState& sequence, runtime::CheckpointRef checkpoint);
+    // Disk tier (storage/disk_tier.cpp).
+    void open_disk_tier(const SequencePlanImpl& plan);
+    [[nodiscard]] DiskKVIdentity disk_identity(const qwen3_5::detail::PrefixShortlistDigests& digests,
+                                               std::uint32_t frontier) const;
+    [[nodiscard]] DiskOwnerSpill plan_owner_spill(const SequenceState& sequence) const;
+    // One bounded step of an owner's disk write; true once every item is written or skipped.
+    [[nodiscard]] bool progress_owner_spill(const SequenceState& sequence, DiskOwnerSpill& spill);
+    [[nodiscard]] static bool owner_spill_in_flight(const DiskOwnerSpill& spill) noexcept;
+    // Writes an owner released outside a materialization; what is not queued by the deadline stays
+    // unwritten and costs a recompute later.
+    void spill_owner_to_disk(const SequenceState& sequence,
+                             std::chrono::steady_clock::time_point deadline) noexcept;
+    void spill_released_owner(const SequenceState& sequence) noexcept;
+    void flush_disk_tier() noexcept;
+    [[nodiscard]] std::optional<std::uint32_t>
+    disk_restorable_frontier(const RequestBasePlanImpl& base, const PreparedPromptData& prompt,
+                             std::uint32_t prompt_tokens) const;
+    [[nodiscard]] bool restore_prefix_from_disk(SequenceState& sequence,
+                                                RequestControl::Prefill& staged,
+                                                std::uint32_t frontier);
     [[nodiscard]] PrefillProgress wrap_prefill(std::uint32_t lane, runtime::PrefillStepResult step);
     [[nodiscard]] PendingBatch wrap_pending(std::span<const std::uint32_t> lanes,
                                             const runtime::BatchedGeneratedRound& round);
@@ -1122,7 +1189,8 @@ private:
     [[nodiscard]] const SequenceState& active_sequence(std::uint32_t lane) const;
     [[nodiscard]] std::optional<std::uint32_t> allocate_continuation_slot() noexcept;
     [[nodiscard]] bool can_release_continuation_slot_strict(std::uint32_t index) const;
-    void release_continuation_slot_strict(std::uint32_t index) noexcept;
+    void release_continuation_slot_strict(std::uint32_t index,
+                                          bool written_to_disk = false) noexcept;
     void release_continuation_slot_best_effort(std::uint32_t index) noexcept;
     void retire_continuation_slot(std::uint32_t index) noexcept;
     void clear_execution_failure_lanes(std::span<const std::uint32_t> lanes) noexcept;
@@ -1222,7 +1290,8 @@ private:
                           std::uint32_t backend_tokens = 0);
     void release_sequence_growth_entitlement(SequenceState& sequence) noexcept;
     void release_active_sequence_kv_strict(SequenceState& sequence) noexcept;
-    void release_sequence_kv_strict(SequenceState& sequence) noexcept;
+    void release_sequence_kv_strict(SequenceState& sequence,
+                                    bool written_to_disk = false) noexcept;
     void release_sequence_kv(SequenceState& sequence) noexcept;
     void commit_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
                             std::uint32_t backend_tokens = 0);

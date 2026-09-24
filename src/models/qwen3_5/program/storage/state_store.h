@@ -201,6 +201,14 @@ public:
         return require(handle).content_epoch;
     }
 
+    // The Host replica's bytes, or nothing when the image has no Host replica.
+    [[nodiscard]] std::optional<qwen3_5::HostStateImageConstView>
+    host_view(StateImageHandle handle) const {
+        const Object& object = require(handle);
+        if (host_ == nullptr || !object.host_slot) { return std::nullopt; }
+        return host_->view(*object.host_slot);
+    }
+
     [[nodiscard]] std::uint32_t source_pins(StateImageHandle handle) const {
         return require(handle).source_pins;
     }

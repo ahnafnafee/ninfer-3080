@@ -177,6 +177,16 @@ struct ContextCacheOptions {
     std::optional<std::uint32_t> max_long_anchors_per_continuation;
     // Input-complexity bound; this does not reserve checkpoint storage.
     std::optional<std::uint32_t> max_cache_markers_per_request;
+    // Disk (L3) tier under the Host tier. An empty path disables it. With a path, an evicted
+    // private continuation writes its KV prefix chain and its endpoint, rewrite and early anchor
+    // StateImages to per-family files there, keyed by the prefix digest, and they persist across
+    // restarts; the Engine keeps them apart per artifact and execution profile.
+    std::filesystem::path disk_kv_path;
+    std::uint64_t disk_kv_capacity_bytes = 0; // zero with a path selects 64 GiB
+    // Read side: a request with no resident prefix that finds [0, E) restorable on disk seeds
+    // those KV pages and the StateImage at E and prefills only [E, prompt). Off leaves the tier
+    // write-only.
+    bool disk_kv_restore = false;
 };
 
 struct ContextCostOptions {

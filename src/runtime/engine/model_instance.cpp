@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -101,6 +102,22 @@ std::vector<std::size_t> free_bytes_by_rank(const DeviceContext& device,
     return out;
 }
 
+// Disk-tier pages are keyed by token digests, which say nothing about the weights that produced
+// them: each artifact gets its own directory so one model can never restore another's KV.
+EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
+                                        const artifact::ArtifactId& artifact) {
+    EngineOptions scoped = options;
+    if (scoped.context_cache.disk_kv_path.empty()) { return scoped; }
+    std::string name = "artifact_";
+    for (const std::byte byte : artifact) {
+        char hex[3];
+        std::snprintf(hex, sizeof(hex), "%02x", static_cast<unsigned>(byte));
+        name += hex;
+    }
+    scoped.context_cache.disk_kv_path /= name;
+    return scoped;
+}
+
 } // namespace
 
 EngineOptions normalize_engine_options(EngineOptions options) {
@@ -141,6 +158,9 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         cache.max_shared_prefixes               = 0;
         cache.max_long_anchors_per_continuation = 0;
         cache.max_cache_markers_per_request     = cache.max_cache_markers_per_request.value_or(4U);
+        // Without a catalog no continuation is ever evicted or restored.
+        cache.disk_kv_path.clear();
+        cache.disk_kv_restore = false;
         return options;
     }
 
@@ -230,7 +250,9 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
                 context_cost_hardware_class(device.props.name, device.props.major, device.props.minor),
             .prefill_signature = signature},
         options.context_cost.preset_path);
-    auto planner    = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
+    auto planner = models::qwen3_5::make_sequence_planner(
+        instance->parameters, device,
+        artifact_scoped_disk_tier(options, instance->model->info().artifact_id));
     const std::vector<std::size_t> free_by_rank =
         free_bytes_by_rank(device, options.wddm_evictable_budget,
                            instance->model->storage_stats().device_capacity_bytes);
