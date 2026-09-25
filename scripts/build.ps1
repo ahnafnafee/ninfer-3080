@@ -7,11 +7,17 @@
 #   12.8's host_config.h rejects outright - it accepts 1910-1949. If a VS 2026 cl.exe wins on
 #   PATH you get a wall of host_config errors that say nothing about the compiler version.
 #
-#   CUDA 12.8, forced through CUDACXX. If an older toolkit is also installed it is picked up from
-#   PATH instead and the configure step fails the CMakeLists version guard.
+#   CUDA 12.8 or newer, forced through CUDACXX. If an older toolkit is also installed it is picked
+#   up from PATH instead and the configure step fails the CMakeLists version guard. The oldest
+#   installed toolkit that satisfies the guard wins, so 12.8 stays preferred over 13.x; a CUDACXX
+#   already set in the environment is used as given.
 #
 #   The Ninja generator. MSBuild's CUDA integration needs CUDA_PATH_V12_8, which the CUDA
 #   installer does not always set; without it CudaToolkitDir resolves empty and every .cu fails.
+#
+#   vcpkg's CMake toolchain. FFmpeg and libcurl come from vcpkg.json on Windows, so configure
+#   needs CMAKE_TOOLCHAIN_FILE: taken from the environment when set, else from VCPKG_ROOT or a
+#   vcpkg.exe on PATH.
 #
 # Running this from a plain PowerShell prompt is fine: it imports the BuildTools environment
 # itself rather than requiring a Developer Prompt.
@@ -50,6 +56,10 @@ $BuildBenchmarks = $Benchmarks -or $Package
 $VcVarsCandidates = @(
     'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat',
     'C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat',
+    # VS 2022 IDE editions are 64-bit and install under Program Files, not Program Files (x86).
+    'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat',
+    'C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat',
+    'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat',
     'C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat',
     'C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat',
     'C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat'
@@ -64,17 +74,33 @@ MSVC 14.50 is rejected by CUDA 12.8.
 "@
 }
 
-$CudaCandidates = @(
-    'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin\nvcc.exe',
-    'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin\nvcc.exe'
-)
-$Nvcc = $CudaCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+$CudaRoot = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
+if ($env:CUDACXX -and (Test-Path -LiteralPath $env:CUDACXX)) {
+    $Nvcc = $env:CUDACXX
+} else {
+    $Nvcc = Get-ChildItem -LiteralPath $CudaRoot -Directory -Filter 'v*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^v(\d+\.\d+)$' -and [version]$Matches[1] -ge [version]'12.8' } |
+        Sort-Object { [version]$_.Name.Substring(1) } |
+        ForEach-Object { Join-Path $_.FullName 'bin\nvcc.exe' } |
+        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+}
 if (-not $Nvcc) {
     throw @"
-No CUDA 12.8+ toolkit found. Looked in:
-$($CudaCandidates -join "`n")
+No CUDA 12.8+ toolkit found under $CudaRoot.
 CMakeLists requires CUDA >= 12.8. Set CUDACXX yourself if your toolkit lives elsewhere.
 "@
+}
+
+# Read before vcvars64 runs, so a user's own vcpkg wins over one the VS environment may export.
+$VcpkgArgs = @()
+if (-not $env:CMAKE_TOOLCHAIN_FILE) {
+    $VcpkgExe = Get-Command vcpkg.exe -ErrorAction SilentlyContinue
+    $VcpkgRoot = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } elseif ($VcpkgExe) { Split-Path -Parent $VcpkgExe.Source }
+    if (-not $VcpkgRoot) {
+        throw 'vcpkg not found. Set VCPKG_ROOT to a vcpkg checkout: FFmpeg and libcurl come from vcpkg on Windows.'
+    }
+    $VcpkgArgs = @("-DCMAKE_TOOLCHAIN_FILE=$(Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake')",
+                   '-DVCPKG_TARGET_TRIPLET=x64-windows')
 }
 
 # vcvars64.bat only exports into its own cmd process, so run it and copy the result back.
@@ -101,7 +127,7 @@ try {
     # that begins with "-D", and cmake then sees the literal "$Arch".
     $BenchmarksOption = if ($BuildBenchmarks) { 'ON' } else { 'OFF' }
     cmake -S . -B $BuildDir -G Ninja '-DCMAKE_BUILD_TYPE=Release' "-DCMAKE_CUDA_ARCHITECTURES=$Arch" `
-          "-DNINFER_BUILD_BENCHMARKS=$BenchmarksOption"
+          "-DNINFER_BUILD_BENCHMARKS=$BenchmarksOption" @VcpkgArgs
     if ($LASTEXITCODE -ne 0) { throw "configure failed ($LASTEXITCODE)" }
 
     $buildArgs = @('--build', $BuildDir)
