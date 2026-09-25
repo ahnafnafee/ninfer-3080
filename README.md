@@ -64,17 +64,35 @@ Tokens per second. "Nearly full" is one request whose prompt fills about 92% of 
 - **The desktop moves the ceiling.** The monitor's share of the card varied from 0.4 to 1.3 GB during
   these runs. At the high end the 64K MTP window does not fit, and `ninfer-switch` starts it at 56K.
 
-### KV cache quality
+### Perplexity (KV cache quality)
 
-Perplexity on the repository's fixed corpus (`--quick`, 4,096-token context, 2,048 stride, 261,223
-scored tokens). Lower is better.
+The two KV caches the profiles use, scored by `ninfer-perplexity` on the repository's fixed corpus
+`ninfer-ppl-1m-v1` in `--quick` mode: one stream from each of four domains, a 4,096-token context and a
+2,048-token stride, 261,223 scored tokens per run. Lower is better.
 
-| KV cache | Perplexity | Tokens per GiB of KV |
-|---|---:|---:|
-| `rk4v4` | 5.887 | 59,900 |
-| `rk2v4-e8` | 6.088 (+3.4%) | 77,700 |
+| Domain | Scored tokens | `rk4v4` | `rk2v4-e8` | Change |
+|---|---:|---:|---:|---:|
+| English reference | 65,328 | 8.034 | 8.308 | +3.4% |
+| English long-form | 65,484 | 9.378 | 9.608 | +2.5% |
+| Chinese reference | 65,513 | 8.266 | 8.604 | +4.1% |
+| NInfer C++/CUDA code | 64,898 | 1.910 | 1.982 | +3.7% |
+| **Overall** | **261,223** | **5.887** | **6.088** | **+3.4%** |
 
-`rk2v4-e8` buys 30% more context for a small quality cost. Use `mtp48` when that trade is not worth it.
+| KV cache | Mean NLL | Tokens per GiB of KV | Scoring speed | Run time |
+|---|---:|---:|---:|---:|
+| `rk4v4` | 1.7728 | 59,900 | 1,108 tok/s | 4.2 min |
+| `rk2v4-e8` | 1.8063 | 77,700 | 1,088 tok/s | 4.4 min |
+
+`rk2v4-e8` buys 30% more context for a 3.4% rise in perplexity, spread evenly across domains. Use
+`mtp48` (`rk4v4`) when that trade is not worth it. Every window starts from empty state, so this
+measures quality within a 4K context; it does not test recall across a long one.
+
+To reproduce, with `--kv-dtype` set to the cache under test:
+
+```powershell
+.\build-ninja\apps\ninfer-perplexity.exe models\Ternary-Bonsai-2-27B-Heretic-ninfer.ninfer `
+  --corpus eval\corpora\perplexity-1m\manifest.json --quick --kv-dtype rk2v4-e8 --gdn-state-fp16
+```
 
 ### Other engines on the same card
 
