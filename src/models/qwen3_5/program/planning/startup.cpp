@@ -981,9 +981,18 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
         // Definitions remain per execution profile, but only one executable is instantiated for
         // each reachable node-topology class. These bounds cover the largest profile installed in
         // each class and the driver/module state materialized while qualifying all definitions.
+        const auto& text_attention = *impl->parameters->model.config().text.attention;
+        const ops::AttentionHeadGeometry attention_geometry{
+            static_cast<std::int32_t>(text_attention.head_dim),
+            static_cast<std::int32_t>(text_attention.num_attention_heads),
+            static_cast<std::int32_t>(text_attention.num_key_value_heads)};
         if (impl->speculative_backend == SpeculativeBackend::None) {
-            impl->graph_allowance_bytes = checked_mul(12ULL * kMiB, impl->max_concurrency,
-                                                      "ordinary exact-b graph allowance");
+            impl->graph_allowance_bytes = checked_mul(
+                graph_topology_allowance(
+                    ordinary_graph_profiles(impl->capacity, attention_geometry, impl->kv_storage),
+                    [](GraphExecutionProfile) { return 12ULL * kMiB; },
+                    "ordinary graph allowance"),
+                impl->max_concurrency, "ordinary exact-b graph allowance");
         } else if (impl->speculative_backend == SpeculativeBackend::Mtp) {
             // Adaptive MTP captures one graph set per verification width it can select.
             const std::uint32_t first_window = impl->mtp_policy == MtpDraftPolicy::Adaptive
@@ -993,7 +1002,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
             for (std::uint32_t verify_window = first_window; verify_window <= impl->draft_window;
                  ++verify_window) {
                 const auto profiles =
-                    mtp_graph_profiles(impl->capacity, verify_window, impl->draft_window);
+                    mtp_graph_profiles(impl->capacity, verify_window, impl->draft_window,
+                                       attention_geometry, impl->kv_storage);
                 per_batch_allowance = checked_add(
                     per_batch_allowance,
                     graph_topology_allowance(

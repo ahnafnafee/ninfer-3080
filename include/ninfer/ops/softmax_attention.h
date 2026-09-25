@@ -196,6 +196,18 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
     std::int32_t max_tokens);
 
 /**
+ * Return the kernel family a cached causal attention call of `width` query rows for each of
+ * `batch_size` sequences resolves to over `envelope`: 0 small-T, 1 chunked small-T, 2 prompt.
+ * Families launch different node sequences, so CUDA Graph planners keep calls whose families
+ * differ out of one executable.
+ */
+[[nodiscard]] int causal_softmax_attention_route_family(AttentionHeadGeometry geometry,
+                                                        KvCacheStorage cache_storage,
+                                                        CausalAttentionExecutionEnvelope envelope,
+                                                        std::int32_t batch_size,
+                                                        std::int32_t width);
+
+/**
  * Return the prompt-route width granule of one registered head geometry on the current device.
  * A single-sequence call whose width is a multiple of the granule launches whole waves of prompt
  * CTAs, so a caller that splits a long prompt into such calls leaves no SM idle behind a partial

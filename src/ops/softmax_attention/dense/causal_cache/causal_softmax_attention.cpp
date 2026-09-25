@@ -396,6 +396,23 @@ const char* causal_attention_route_name(CausalAttentionRoute route) {
 
 } // namespace detail
 
+int causal_softmax_attention_route_family(AttentionHeadGeometry geometry,
+                                          KvCacheStorage cache_storage,
+                                          CausalAttentionExecutionEnvelope envelope,
+                                          std::int32_t batch_size, std::int32_t width) {
+    require_causal_geometry(geometry, "causal_softmax_attention route family");
+    switch (detail::causal_attention_resolve_route(geometry.query_heads, width, batch_size,
+                                                   cache_storage, envelope)) {
+    case detail::CausalAttentionRoute::SmallT:
+        return 0;
+    case detail::CausalAttentionRoute::ChunkedSmallT:
+        return 1;
+    case detail::CausalAttentionRoute::Prompt:
+        return 2;
+    }
+    return 2;
+}
+
 std::int32_t causal_softmax_attention_prompt_wave_tokens(AttentionHeadGeometry geometry) {
     require_causal_geometry(geometry, "causal_softmax_attention prompt wave");
     int device          = 0;

@@ -311,8 +311,15 @@ void ProgramImpl::prepare_graphs() {
                                         fast_prefill_kernel};
     };
 
+    const auto& text_attention = *parameters.model.config().text.attention;
+    const ops::AttentionHeadGeometry attention_geometry{
+        static_cast<std::int32_t>(text_attention.head_dim),
+        static_cast<std::int32_t>(text_attention.num_attention_heads),
+        static_cast<std::int32_t>(text_attention.num_key_value_heads)};
+
     if (speculative_backend == SpeculativeBackend::None) {
-        const auto ordinary_profiles = ordinary_graph_profiles(capacity);
+        const auto ordinary_profiles =
+            ordinary_graph_profiles(capacity, attention_geometry, kv_storage);
         validate_graph_profiles(ordinary_profiles, capacity - 1, "ordinary");
         const std::uint32_t ordinary_batch_limit = max_concurrency;
         execution::OrdinaryBatchContext ordinary_state{
@@ -351,10 +358,18 @@ void ProgramImpl::prepare_graphs() {
         const std::uint32_t first_window = mtp_policy == MtpDraftPolicy::Adaptive
                                                ? mtp_minimum_adaptive_window(draft_window)
                                                : draft_window;
+        // A width's planned classes stay below this stride, so no two widths share a class.
+        constexpr std::uint32_t kMtpClassesPerWidth = 64;
         for (std::uint32_t verify_window = first_window; verify_window <= draft_window;
              ++verify_window) {
-            const auto planned_profiles = mtp_graph_profiles(capacity, verify_window, draft_window);
+            const auto planned_profiles = mtp_graph_profiles(capacity, verify_window, draft_window,
+                                                             attention_geometry, kv_storage);
             validate_graph_profiles(planned_profiles, capacity - 1, "MTP");
+            for (const GraphExecutionProfile& planned : planned_profiles) {
+                if (planned.topology_class >= kMtpClassesPerWidth) {
+                    throw std::logic_error("MTP graph profiles exceed the classes of one width");
+                }
+            }
             qwen3_5::MtpDecodeState frame = io.mtp_decode->verification_view(verify_window);
             execution::MtpBatchContext mtp_state{execution_core(),
                                                  decoder->text_kv,
@@ -383,7 +398,8 @@ void ProgramImpl::prepare_graphs() {
                     profile.max_execution_frontier = planned.max;
                     profile.verify_window          = verify_window;
                     profile.topology_class =
-                        (verify_window * 2U + planned.topology_class) * max_concurrency +
+                        (verify_window * kMtpClassesPerWidth + planned.topology_class) *
+                            max_concurrency +
                         (batch_size - 1U);
                     execution::capture_mtp_decode_batch(
                         mtp_state, static_cast<std::int32_t>(batch_size), verify_window,

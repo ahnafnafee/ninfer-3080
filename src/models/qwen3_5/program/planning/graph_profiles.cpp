@@ -1,7 +1,10 @@
 #include "models/qwen3_5/program/planning/graph_profiles.h"
+#include "ninfer/ops/softmax_attention.h"
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace ninfer::models::qwen3_5::detail {
 namespace {
@@ -57,37 +60,63 @@ bool verify_uses_chunked_small_t(std::uint32_t draft_window, std::uint32_t batch
     return max_visible_keys > prompt_visible_limit;
 }
 
-// Largest target size that still resolves away from ChunkedSmallT for this verify width, or zero
-// when the route does not depend on the target at all. Found by bisecting
-// verify_uses_chunked_small_t itself, which is monotone in max_visible_keys, so a planner that
-// needs to break its frontier at the route flip never restates the route table to do it.
-std::uint32_t verify_route_flip_target(std::uint32_t draft_window) {
-    constexpr std::uint32_t kUnbounded = std::numeric_limits<std::uint32_t>::max();
-    if (!verify_uses_chunked_small_t(draft_window, 1U, kUnbounded)) { return 0U; }
-    std::uint32_t prompt_side  = 0U;
-    std::uint32_t chunked_side = kUnbounded;
-    while (chunked_side - prompt_side > 1U) {
-        const std::uint32_t mid = prompt_side + (chunked_side - prompt_side) / 2U;
-        if (verify_uses_chunked_small_t(draft_window, 1U, mid)) {
-            chunked_side = mid;
+// The attention route family of a call of `columns` query columns whose visible keys end at
+// `target`, as the op resolves it.
+int route_family(ops::AttentionHeadGeometry attention, KvCacheStorage storage,
+                 std::uint32_t columns, std::uint32_t target) {
+    return ops::causal_softmax_attention_route_family(attention, storage,
+                                                      {1U, std::max(target, 1U)}, 1,
+                                                      static_cast<std::int32_t>(columns));
+}
+
+int verify_route_family(ops::AttentionHeadGeometry attention, KvCacheStorage storage,
+                        std::uint32_t verify_window, std::uint32_t target) {
+    return route_family(attention, storage, verify_window + 1U, target);
+}
+
+// Largest target that still takes the route of the smallest one, or zero when the route does
+// not change up to `capacity`. The route flips at most once as the target grows (prompt below a
+// storage's cutoff, small-T or chunked small-T above), so bisection finds the flip.
+std::uint32_t verify_route_flip_target(ops::AttentionHeadGeometry attention, KvCacheStorage storage,
+                                       std::uint32_t verify_window, std::uint32_t capacity) {
+    const int first = verify_route_family(attention, storage, verify_window, 1U);
+    if (verify_route_family(attention, storage, verify_window, capacity) == first) { return 0U; }
+    std::uint32_t same_side  = 1U;
+    std::uint32_t other_side = capacity;
+    while (other_side - same_side > 1U) {
+        const std::uint32_t mid = same_side + (other_side - same_side) / 2U;
+        if (verify_route_family(attention, storage, verify_window, mid) == first) {
+            same_side = mid;
         } else {
-            prompt_side = mid;
+            other_side = mid;
         }
     }
-    return prompt_side;
+    return same_side;
 }
 
 } // namespace
 
-std::vector<GraphExecutionProfile> ordinary_graph_profiles(std::uint32_t capacity) {
+std::vector<GraphExecutionProfile> ordinary_graph_profiles(std::uint32_t capacity,
+                                                           ops::AttentionHeadGeometry attention,
+                                                           KvCacheStorage storage) {
     // E+1 is the one-token visible window. Early ranges limit empty producer CTAs; later ranges
     // follow measured split-policy transitions until the producer grid reaches its fixed cap.
-    return graph_profiles_through(capacity - 1, {127, 511, 2047, 4095, 8197, 16389, 32767});
+    std::vector<GraphExecutionProfile> profiles =
+        graph_profiles_through(capacity - 1, {127, 511, 2047, 4095, 8197, 16389, 32767});
+    // A BF16 cache takes the prompt kernel up to 128 visible keys (the first range) and small-T
+    // past it, so the class is the route: an executable cannot be updated across the change.
+    for (GraphExecutionProfile& profile : profiles) {
+        profile.topology_class =
+            static_cast<std::uint32_t>(route_family(attention, storage, 1U, profile.max + 1U));
+    }
+    return profiles;
 }
 
 std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
                                                       std::uint32_t verify_window,
-                                                      std::uint32_t draft_window) {
+                                                      std::uint32_t draft_window,
+                                                      ops::AttentionHeadGeometry attention,
+                                                      KvCacheStorage storage) {
     if (verify_window == 0 || draft_window < verify_window || capacity == 0) { return {}; }
     // Bound the final AR window E+V+K at split-policy transitions until the grid reaches its cap.
     std::vector<std::uint32_t> ends;
@@ -112,30 +141,47 @@ std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
     }
     // instantiate_graph_family builds one executable per topology class and installs the other
     // profiles of that class through an in-place update, which cannot cross a change of node
-    // count. Past a verify width of six the attention route turns on the envelope visible-key
-    // count, so the frontier breaks where the route flips and the class follows the same
-    // predicate.
-    const std::uint32_t flip_target = verify_route_flip_target(verify_window);
+    // count. The attention route turns on the visible-key count where the storage sets a prompt
+    // cutoff (BF16 below 128 keys at four columns, the INT8 family below 256 past eight columns),
+    // so the frontier breaks where the route flips and the class is the profile's route.
+    const std::uint32_t flip_target =
+        verify_route_flip_target(attention, storage, verify_window, capacity);
     if (flip_target != 0U) { add_shifted(flip_target, verify_window + 1); }
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
 
     std::vector<GraphExecutionProfile> profiles = graph_profiles_through(capacity - 1, ends);
     // Past eight verify columns the small-T attention runs in chunks whose launches change with the
-    // window in more places than that flip, and an in-place update across them fails at startup
-    // (MTP with 10 or 15 drafts). Those widths give every profile its own executable, as DFlash2
-    // does.
+    // window in more places than the route flip, and an in-place update across them fails at
+    // startup (MTP with 10 or 15 drafts). Those widths give every profile its own executable, as
+    // DFlash2 does.
     constexpr std::uint32_t kSmallTColumns = 8;
-    for (std::size_t index = 0; index < profiles.size(); ++index) {
-        GraphExecutionProfile& profile = profiles[index];
-        if (verify_window + 1U > kSmallTColumns) {
-            profile.topology_class = static_cast<std::uint32_t>(index);
-            continue;
+    if (verify_window + 1U > kSmallTColumns) {
+        for (std::size_t index = 0; index < profiles.size(); ++index) {
+            profiles[index].topology_class = static_cast<std::uint32_t>(index);
         }
-        const std::uint32_t target_max = static_cast<std::uint32_t>(std::min<std::uint64_t>(
-            capacity, static_cast<std::uint64_t>(profile.max) + verify_window + 1ULL));
-        profile.topology_class =
-            verify_uses_chunked_small_t(verify_window, 1U, target_max) ? 1U : 0U;
+        return profiles;
+    }
+    // Otherwise profiles share an executable when every attention call they capture takes the same
+    // route: the target verify and the MTP batch (verify_window + 1 columns up to max + V + 1) and
+    // each autoregressive draft step (one column up to max + V + 2 + step), the envelopes
+    // mtp_causal_attention_envelopes gives them.
+    const auto visible = [capacity](std::uint64_t value) {
+        return static_cast<std::uint32_t>(std::min<std::uint64_t>(capacity, value));
+    };
+    std::vector<std::vector<int>> signatures;
+    for (GraphExecutionProfile& profile : profiles) {
+        std::vector<int> signature{verify_route_family(
+            attention, storage, verify_window,
+            visible(static_cast<std::uint64_t>(profile.max) + verify_window + 1ULL))};
+        for (std::uint32_t step = 0; step + 1 < draft_window; ++step) {
+            signature.push_back(route_family(
+                attention, storage, 1U,
+                visible(static_cast<std::uint64_t>(profile.max) + verify_window + step + 2ULL)));
+        }
+        const auto found = std::find(signatures.begin(), signatures.end(), signature);
+        profile.topology_class = static_cast<std::uint32_t>(found - signatures.begin());
+        if (found == signatures.end()) { signatures.push_back(std::move(signature)); }
     }
     return profiles;
 }
