@@ -90,25 +90,48 @@ function Start-Server([string]$name, $cfg) {
         throw "port $($cfg.port) is taken by $($o.Process.ProcessName) (pid $($o.Process.Id)); set NINFER_PORT or ""port"" in profiles"
     }
     New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+    Write-Host "starting $name ($($p.note))"
+    # The desktop's own share of the card moves by several hundred MB, so a window that fit when the
+    # profile was measured can be refused later. NInfer refuses before loading anything else, so
+    # stepping --max-context and --kv-capacity down by 8K and retrying is cheap; nothing else retries.
+    $ctx = [array]::IndexOf($argv, '--max-context')
+    $cap = [array]::IndexOf($argv, '--kv-capacity')
+    while ($true) {
+        if (Invoke-Launch $name $exe $argv $cfg) { return }
+        $refused = (Test-Path -LiteralPath $Log) -and (Select-String -LiteralPath $Log -Pattern 'runtime reservation requires' -Quiet)
+        if (-not $refused -or $ctx -lt 0 -or [int]$argv[$ctx + 1] -le 16384) { break }
+        $smaller = [int]$argv[$ctx + 1] - 8192
+        $argv[$ctx + 1] = "$smaller"
+        if ($cap -ge 0 -and $argv[$cap + 1] -ne 'auto') { $argv[$cap + 1] = "$smaller" }
+        Write-Host "  not enough free VRAM for that window; retrying with $smaller tokens" -ForegroundColor Yellow
+    }
+    Write-Host "failed to start $name; last log lines:" -ForegroundColor Red
+    if (Test-Path -LiteralPath $Log) { Get-Content -LiteralPath $Log -Tail 8 | ForEach-Object { "  $_" } }
+    exit 1
+}
+
+function Invoke-Launch([string]$name, [string]$exe, [string[]]$argv, $cfg) {
     $quoted = (@($exe) + $argv | ForEach-Object { if ($_ -match '[\s"&|<>^]') { '"' + $_ + '"' } else { $_ } }) -join ' '
     # cmd /s strips exactly the outer quotes, so the inner ones survive and both streams share one log.
     $proc = Start-Process -FilePath $env:ComSpec -ArgumentList "/d /s /c `"$quoted > `"$Log`" 2>&1`"" -WindowStyle Hidden -PassThru
     [ordered]@{ profile = $name; pid = $proc.Id; started = (Get-Date).ToString('o'); port = $cfg.port } |
         ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding utf8
-    Write-Host "starting $name ($($p.note))"
     $shown = $null
     for ($i = 0; $i -lt 300; $i++) {
-        if (Test-Ready $cfg) { Write-Host "serving $name on http://127.0.0.1:$($cfg.port)/v1"; return }
-        if ($proc.HasExited) { break }
+        if (Test-Ready $cfg) {
+            $ctx = [array]::IndexOf($argv, '--max-context')
+            $window = if ($ctx -ge 0) { " with a $($argv[$ctx + 1])-token window" }
+            Write-Host "serving $name on http://127.0.0.1:$($cfg.port)/v1$window"
+            return $true
+        }
+        if ($proc.HasExited) { return $false }
         if ($i % 5 -eq 4 -and (Test-Path -LiteralPath $Log)) {
             $last = Get-Content -LiteralPath $Log -Tail 1
             if ($last -and $last -ne $shown) { Write-Host ('  ' + $last.Substring(0, [math]::Min(110, $last.Length))); $shown = $last }
         }
         Start-Sleep 1
     }
-    Write-Host "failed to start $name; last log lines:" -ForegroundColor Red
-    if (Test-Path -LiteralPath $Log) { Get-Content -LiteralPath $Log -Tail 8 | ForEach-Object { "  $_" } }
-    exit 1
+    $false
 }
 
 function Show-Status($cfg) {
