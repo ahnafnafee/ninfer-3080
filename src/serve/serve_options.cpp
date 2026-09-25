@@ -75,7 +75,8 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
-           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
+           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--kv-headroom-mib N] "
+           "[--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--fast-prefill-kernel] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] [--device-profile auto|off|calibrate] [--device-profile-path FILE] "
@@ -126,7 +127,7 @@ std::string serve_usage_text(const char* argv0) {
            "larger media is downscaled\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
-           " MiB of sizing headroom\n"
+           " MiB of sizing headroom; --kv-headroom-mib sets another amount (10 GB cards need less)\n"
            "       --prefill-cublas hands wide prefill GEMMs to cuBLAS: a large prefill speedup for a "
            "small perplexity cost (docs/performance.md), off by default, and it wants a larger "
            "--prefill-chunk to pay; --no-prefill-cublas-projections keeps the attention and GDN "
