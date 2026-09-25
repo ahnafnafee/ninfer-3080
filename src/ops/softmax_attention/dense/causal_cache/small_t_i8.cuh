@@ -26,6 +26,7 @@
 #include "ops/kv_cache/int8_g64_codec.cuh"
 
 #include <cstdint>
+#include <type_traits>
 
 namespace ninfer::ops {
 
@@ -49,9 +50,15 @@ namespace ninfer::ops {
 // are expanded to their INT8 codes (kv_cache_packed_key_expand16), and are stored into the tile
 // just before the tile barrier; which warps expand them, and when, depends on the row-tile count
 // (see LoaderKeys). The K tile is idle during PV, so this adds no shared memory and no barrier.
+//
+// EarlyFetch moves the rest of the next tile the same way: its value codes, both scale rows and,
+// for INT8 keys, the key codes are loaded into registers at the top of the iteration and stored
+// into the arena after PV. Otherwise they are issued as cp.async after the tile barrier, where
+// their DRAM latency overlaps PV alone.
 template <typename Geometry, int TokenTile, int WarpsPerCta, int MinBlocksPerSm, int KeyBlock,
           bool DynamicArena, bool MultiBatch, bool Masked, typename CacheInput,
-          bool PackedValues = false, KvKeyCoding Keys = KvKeyCoding::Int8>
+          bool PackedValues = false, KvKeyCoding Keys = KvKeyCoding::Int8, bool PvF16 = false,
+          int QkSplit = 1, bool EarlyFetch = false>
 __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     void causal_attention_small_t_i8_tiled_kernel(
         const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, std::int8_t* cache_k_i8,
@@ -82,8 +89,13 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     // A split stages up to 64 page IDs, enough for a 262,144-key window in this split
     // geometry; a split that spans more pages reads the block table directly.
     constexpr int PageIds         = 64;
-    constexpr int ProducerThreads = RowTiles * 32;
+    // QkSplit producer warps share each row tile, each scoring its slice of the key tile; their row
+    // maxima meet in shared memory. With every warp a producer, all of them dequantize V first.
+    constexpr int ProducerWarps   = RowTiles * QkSplit;
+    constexpr int ProducerThreads = ProducerWarps * 32;
     constexpr int VLoaderThreads  = Threads - ProducerThreads;
+    constexpr int QKNtWarp        = QKNt / QkSplit;
+    constexpr bool SharedDequant  = VLoaderThreads == 0;
     constexpr float Log2E         = 1.4426950408889634074f;
     constexpr unsigned FullMask   = 0xffffffffu;
 
@@ -93,6 +105,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     static_assert(Wc % RowTiles == 0);
     static_assert(PVNtPerWarp == 2 || PVNtPerWarp == 4 || PVNtPerWarp == 8 || PVNtPerWarp == 16);
     static_assert(QKKs == Groups * GroupKc);
+    static_assert(QkSplit == 1 || (QkSplit == 2 && DynamicArena && QKNt % 2 == 0));
+    static_assert(ProducerWarps <= Wc);
 
     // Keep Q in a compact dedicated tile so the producer can reload one
     // 64-dimension group at a time instead of carrying all eight fragments in
@@ -114,6 +128,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     __shared__ __align__(16) __half k_scale_s[Bc * Groups];
     __shared__ __align__(16) __half v_scale_s[Bc * Groups];
     __shared__ std::int32_t physical_pages_s[PageIds];
+    __shared__ float split_max_s[QkSplit > 1 ? QkSplit * Br : 1];
     // A packed value row occupies only the leading D/2 bytes of its D-byte slot, so that key's
     // eight G32 scales live in the upper half of its own slot. Placing them per key rather than in
     // one block matters because the staged rows keep the full D stride. Static shared memory is
@@ -373,8 +388,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 
     float q_scale_r0[Groups];
     float q_scale_r1[Groups];
-    if (warp < RowTiles) {
-        const int producer_row0 = warp * 16 + gid;
+    if (warp < ProducerWarps) {
+        const int producer_row0 = (warp % RowTiles) * 16 + gid;
 #pragma unroll
         for (int g = 0; g < Groups; ++g) {
             q_scale_r0[g] =
@@ -470,6 +485,80 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         }
     };
 
+    constexpr int CodeChunks          = Bc * (D / 16);
+    constexpr int CodeChunksPerThread = (CodeChunks + Threads - 1) / Threads;
+    using ValueChunk                  = std::conditional_t<PackedValues, int2, int4>;
+    using ValueScaleRow               = std::conditional_t<PackedValues, int4, int2>;
+    static_assert(!EarlyFetch || Bc <= Threads);
+    ValueChunk v_next[EarlyFetch ? CodeChunksPerThread : 1];
+    int4 k_next[EarlyFetch && !PackedKeys ? CodeChunksPerThread : 1];
+    int2 k_scale_next{};
+    ValueScaleRow v_scale_next{};
+    auto fetch_next_tile = [&](int tile_k0, int page) {
+        if constexpr (EarlyFetch) {
+            if (tid < Bc) {
+                const int key = tile_k0 + tid;
+                k_scale_next  = int2{};
+                v_scale_next  = ValueScaleRow{};
+                if (key >= split_start && key < split_end) {
+                    const std::int64_t off = kv_cache_int8_quant_scale_index<Geometry>(
+                        page, kv_head, 0, key & kPagedKVPageMask);
+                    k_scale_next = load_vec<int2>(&cache_k_scale[off]);
+                    if constexpr (PackedValues) {
+                        v_scale_next = load_vec<int4>(&cache_v_scale[kv_cache_int4_value_scale_index<
+                            Geometry>(page, kv_head, 0, key & kPagedKVPageMask)]);
+                    } else {
+                        v_scale_next = load_vec<int2>(&cache_v_scale[off]);
+                    }
+                }
+            }
+#pragma unroll
+            for (int i = 0; i < CodeChunksPerThread; ++i) {
+                const int chunk = tid + i * Threads;
+                v_next[i]       = ValueChunk{};
+                if constexpr (!PackedKeys) { k_next[i] = int4{}; }
+                if (chunk < CodeChunks) {
+                    const int key_l = chunk / (D / 16);
+                    const int d     = (chunk - key_l * (D / 16)) * 16;
+                    const int key   = tile_k0 + key_l;
+                    if (key >= split_start && key < split_end) {
+                        if constexpr (PackedValues) {
+                            v_next[i] = load_vec<int2>(
+                                reinterpret_cast<const std::uint8_t*>(cache_v_i8) +
+                                kv_cache_int4_value_code_index<Geometry>(page, kv_head, d >> 1,
+                                                                         key & kPagedKVPageMask));
+                        }
+                        const std::int64_t off = kv_cache_int8_quant_code_index<Geometry>(
+                            page, kv_head, d, key & kPagedKVPageMask);
+                        if constexpr (!PackedValues) { v_next[i] = load_vec<int4>(&cache_v_i8[off]); }
+                        if constexpr (!PackedKeys) { k_next[i] = load_vec<int4>(&cache_k_i8[off]); }
+                    }
+                }
+            }
+        }
+    };
+    auto store_next_tile = [&]() {
+        if constexpr (EarlyFetch) {
+            if (tid < Bc) {
+                store_vec(&k_scale_s[tid * Groups], k_scale_next);
+                store_vec(value_scale_row(tid), v_scale_next);
+            }
+#pragma unroll
+            for (int i = 0; i < CodeChunksPerThread; ++i) {
+                const int chunk = tid + i * Threads;
+                if (chunk < CodeChunks) {
+                    const int key_l = chunk / (D / 16);
+                    const int dc    = chunk - key_l * (D / 16);
+                    store_vec(&v_i8[key_l * D + (PackedValues ? dc * 8 : dc * 16)], v_next[i]);
+                    if constexpr (!PackedKeys) {
+                        store_vec(&k_i8[key_l * D + causal_small_t_tc_swz(key_l, dc * 8) * 2],
+                                  k_next[i]);
+                    }
+                }
+            }
+        }
+    };
+
     auto issue_kv_tile = [&](int tile_k0, int physical_page) {
         for (int key_l = tid; key_l < Bc; key_l += Threads) {
             const int key = tile_k0 + key_l;
@@ -557,25 +646,62 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     ninfer::ops::cp_wait<0>();
     __syncthreads();
 
+    const auto dequant_v = [&](int k0, int first, int stride) {
+#pragma unroll 1
+        for (int chunk = first; chunk < Bc * (D / 8); chunk += stride) {
+            const int key_l = chunk / (D / 8);
+            const int dc    = chunk - key_l * (D / 8);
+            const int d     = dc * 8;
+            const int key   = k0 + key_l;
+            __half* dst     = &v_f16[key_l * D + causal_small_t_tc_swz(key_l, d)];
+            if (key >= split_start && key < split_end) {
+                // The lanes of one value group read the same scale: a shared-memory broadcast,
+                // where a shuffle from a computed lane costs an out-of-line call.
+                const int grp  = PackedValues ? (d >> 5) : (d >> 6);
+                const float vs = __half2float(value_scale_row(key_l)[grp]);
+                // f16 loaders, because dst is __half* and this tile feeds mma_f16. The bf16
+                // loaders are the same width, so using them here compiles and silently
+                // reinterprets every value.
+                if constexpr (PackedValues) {
+                    store_vec(dst, kv_cache_int4_dequant_f16x8_from(
+                                       reinterpret_cast<const std::uint8_t*>(v_i8) + key_l * D +
+                                           (d >> 1),
+                                       vs));
+                } else {
+                    store_vec(dst, kv_cache_int8_dequant_f16x8_from(&v_i8[key_l * D + d], vs));
+                }
+            } else {
+                store_vec(dst, make_int4(0, 0, 0, 0));
+            }
+        }
+    };
+
     for (int kb = 0; kb < key_blocks; ++kb) {
-        const int k0 = first_tile + kb * Bc;
-        if constexpr (PackedKeys) {
-            // Prefetch the next tile's packed keys now; see load_k_tile.
-            if (kb + 1 < key_blocks) {
+        const int k0        = first_tile + kb * Bc;
+        const bool has_next = kb + 1 < key_blocks;
+        if constexpr (PackedKeys || EarlyFetch) {
+            // Prefetch the next tile now; see load_k_tile and EarlyFetch.
+            if (has_next) {
                 const int next_k0 = k0 + Bc;
-                load_k_tile(next_k0,
-                            (next_k0 & kPagedKVPageMask) == 0 ? page_at(next_k0) : physical_page);
+                const int next_page =
+                    (next_k0 & kPagedKVPageMask) == 0 ? page_at(next_k0) : physical_page;
+                load_k_tile(next_k0, next_page);
+                fetch_next_tile(next_k0, next_page);
             }
         }
 
-        // One warp per row tile produces P and alpha while the remaining warps
+        if constexpr (SharedDequant) { dequant_v(k0, tid, Threads); }
+
+        // Producer warps (QkSplit per row tile) produce P and alpha while any remaining warps
         // stream/dequant V.
-        if (warp < RowTiles) {
-            const int producer_row_base = warp * 16;
+        if (warp < ProducerWarps) {
+            const int producer_row_base = (warp % RowTiles) * 16;
+            const int key_part          = warp / RowTiles;
+            const int nt_base           = key_part * QKNtWarp;
             __half* p_sw                = &p_s[producer_row_base * Bc];
-            float score[QKNt][4];
+            float score[QKNtWarp][4];
 #pragma unroll
-            for (int nt = 0; nt < QKNt; ++nt) {
+            for (int nt = 0; nt < QKNtWarp; ++nt) {
                 score[nt][0] = 0.0f;
                 score[nt][1] = 0.0f;
                 score[nt][2] = 0.0f;
@@ -597,12 +723,12 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 }
 
 #pragma unroll
-                for (int nt = 0; nt < QKNt; ++nt) {
+                for (int nt = 0; nt < QKNtWarp; ++nt) {
                     int c0 = 0, c1 = 0, c2 = 0, c3 = 0;
 #pragma unroll
                     for (int kk = 0; kk < GroupKc; ++kk) {
                         const int k    = g * GroupKc + kk;
-                        const int brow = nt * 8 + b_rin;
+                        const int brow = (nt_base + nt) * 8 + b_rin;
                         const int bcol = k * 16 + b_koff;
                         unsigned bf[2];
                         ldmatrix_x2(
@@ -611,7 +737,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                         mma_s8(c0, c1, c2, c3, af[kk][0], af[kk][1], af[kk][2], af[kk][3], bf[0],
                                bf[1]);
                     }
-                    const int keya = nt * 8 + 2 * lid;
+                    const int keya = (nt_base + nt) * 8 + 2 * lid;
                     const int keyb = keya + 1;
                     const float ka  = __half2float(k_scale_s[keya * Groups + g]);
                     const float kb2 = __half2float(k_scale_s[keyb * Groups + g]);
@@ -631,8 +757,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             const int qabs1 = (row1 < RowCount) ? pos[token1] : -1;
             float bm0 = -CUDART_INF_F, bm1 = -CUDART_INF_F;
 #pragma unroll
-            for (int nt = 0; nt < QKNt; ++nt) {
-                const int col0 = nt * 8 + 2 * lid;
+            for (int nt = 0; nt < QKNtWarp; ++nt) {
+                const int col0 = (nt_base + nt) * 8 + 2 * lid;
                 const int col1 = col0 + 1;
                 const int key0 = k0 + col0;
                 const int key1 = k0 + col1;
@@ -657,6 +783,20 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             }
             bm0 = warp_max<4>(bm0, FullMask);
             bm1 = warp_max<4>(bm1, FullMask);
+            if constexpr (QkSplit > 1) {
+                // Both key parts of a row tile need the row maximum over the whole key tile; only
+                // the producer warps meet at this barrier.
+                if (lid == 0) {
+                    split_max_s[key_part * Br + row0] = bm0;
+                    split_max_s[key_part * Br + row1] = bm1;
+                }
+                asm volatile("bar.sync 1, %0;\n" ::"r"(ProducerThreads) : "memory");
+#pragma unroll
+                for (int part = 0; part < QkSplit; ++part) {
+                    bm0 = fmaxf(bm0, split_max_s[part * Br + row0]);
+                    bm1 = fmaxf(bm1, split_max_s[part * Br + row1]);
+                }
+            }
 
             const float nm0    = fmaxf(m0, bm0);
             const float nm1    = fmaxf(m1, bm1);
@@ -665,8 +805,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 
             float bl0 = 0.0f, bl1 = 0.0f;
 #pragma unroll
-            for (int nt = 0; nt < QKNt; ++nt) {
-                const int col0  = nt * 8 + 2 * lid;
+            for (int nt = 0; nt < QKNtWarp; ++nt) {
+                const int col0  = (nt_base + nt) * 8 + 2 * lid;
                 const int col1  = col0 + 1;
                 const float p00 = (nm0 > -CUDART_INF_F && score[nt][0] > -CUDART_INF_F)
                                       ? exp2_approx((score[nt][0] - nm0) * Log2E)
@@ -692,53 +832,28 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             bl0 = warp_sum<4>(bl0, FullMask);
             bl1 = warp_sum<4>(bl1, FullMask);
 
+            // Each key part keeps its own share of the row sums; the maxima are shared, so the
+            // shares add up after the loop.
             l0 = l0 * alpha0 + bl0;
             l1 = l1 * alpha1 + bl1;
             m0 = nm0;
             m1 = nm1;
-            if (lid == 0) {
+            if (lid == 0 && key_part == 0) {
                 alpha_s[row0] = alpha0;
                 alpha_s[row1] = alpha1;
             }
-        } else {
-#pragma unroll 1
-            for (int chunk = loader_tid; chunk < Bc * (D / 8); chunk += VLoaderThreads) {
-                const int key_l = chunk / (D / 8);
-                const int dc    = chunk - key_l * (D / 8);
-                const int d     = dc * 8;
-                const int key   = k0 + key_l;
-                __half* dst     = &v_f16[key_l * D + causal_small_t_tc_swz(key_l, d)];
-                if (key >= split_start && key < split_end) {
-                    // The lanes of one value group read the same scale: a shared-memory broadcast,
-                    // where a shuffle from a computed lane costs an out-of-line call.
-                    const int grp  = PackedValues ? (d >> 5) : (d >> 6);
-                    const float vs = __half2float(value_scale_row(key_l)[grp]);
-                    // f16 loaders, because dst is __half* and this tile feeds mma_f16. The bf16
-                    // loaders are the same width, so using them here compiles and silently
-                    // reinterprets every value.
-                    if constexpr (PackedValues) {
-                        store_vec(dst, kv_cache_int4_dequant_f16x8_from(
-                                           reinterpret_cast<const std::uint8_t*>(v_i8) +
-                                               key_l * D + (d >> 1),
-                                           vs));
-                    } else {
-                        store_vec(dst, kv_cache_int8_dequant_f16x8_from(&v_i8[key_l * D + d], vs));
-                    }
-                } else {
-                    store_vec(dst, make_int4(0, 0, 0, 0));
-                }
-            }
+        } else if constexpr (!SharedDequant) {
+            dequant_v(k0, loader_tid, VLoaderThreads);
             if (kb + 1 < key_blocks) { expand_k_tile(); }
         }
         __syncthreads();
 
-        const bool has_next = kb + 1 < key_blocks;
         if (has_next) {
             const int next_k0 = k0 + Bc;
             if ((next_k0 & kPagedKVPageMask) == 0) {
                 physical_page = page_at(next_k0);
             }
-            issue_kv_tile(next_k0, physical_page);
+            if constexpr (!EarlyFetch) { issue_kv_tile(next_k0, physical_page); }
         }
 
         const int consumer_tile     = warp % RowTiles;
@@ -758,6 +873,9 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 #pragma unroll
         for (int n = 0; n < PVNtPerWarp; ++n) {
             const int global_n = consumer_slice * PVNtPerWarp + n;
+            // PvF16: this tile's products are summed in FP16 (P is at most one after the running
+            // maximum and a tile spans at most 64 keys) and folded into the FP32 accumulator once.
+            unsigned tile_acc[2] = {0u, 0u};
 #pragma unroll
             for (int k = 0; k < PVKs; ++k) {
                 unsigned pf[4];
@@ -771,17 +889,52 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 const int vcol = global_n * 8;
                 ldmatrix_x2_t(vf[0], vf[1],
                               smem_addr(&v_f16[vrow * D + causal_small_t_tc_swz(vrow, vcol)]));
-                mma_f16(acc[n][0], acc[n][1], acc[n][2], acc[n][3], pf[0], pf[1], pf[2], pf[3],
-                        vf[0], vf[1]);
+                if constexpr (PvF16) {
+                    mma_f16_f16acc(tile_acc[0], tile_acc[1], pf[0], pf[1], pf[2], pf[3], vf[0],
+                                   vf[1]);
+                } else {
+                    mma_f16(acc[n][0], acc[n][1], acc[n][2], acc[n][3], pf[0], pf[1], pf[2],
+                            pf[3], vf[0], vf[1]);
+                }
+            }
+            if constexpr (PvF16) {
+                const float2 top    = __half22float2(*reinterpret_cast<const __half2*>(&tile_acc[0]));
+                const float2 bottom = __half22float2(*reinterpret_cast<const __half2*>(&tile_acc[1]));
+                acc[n][0] += top.x;
+                acc[n][1] += top.y;
+                acc[n][2] += bottom.x;
+                acc[n][3] += bottom.y;
             }
         }
         if (has_next) {
             commit_k_tile();
-            ninfer::ops::cp_wait<0>();
+            if constexpr (EarlyFetch) {
+                store_next_tile();
+            } else {
+                ninfer::ops::cp_wait<0>();
+            }
         }
         __syncthreads();
     }
 
+    if constexpr (QkSplit > 1) {
+        // Fold the key parts' row sums into part zero's warps.
+        __syncthreads();
+        if (warp < ProducerWarps && lid == 0) {
+            const int row0 = (warp % RowTiles) * 16 + gid;
+            split_max_s[(warp / RowTiles) * Br + row0]     = l0;
+            split_max_s[(warp / RowTiles) * Br + row0 + 8] = l1;
+        }
+        __syncthreads();
+        if (warp < RowTiles && lid == 0) {
+            const int row0 = warp * 16 + gid;
+#pragma unroll
+            for (int part = 1; part < QkSplit; ++part) {
+                l0 += split_max_s[part * Br + row0];
+                l1 += split_max_s[part * Br + row0 + 8];
+            }
+        }
+    }
     if (warp < RowTiles && lid == 0) {
         const int row0 = warp * 16 + gid;
         const int row1 = row0 + 8;

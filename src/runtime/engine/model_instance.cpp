@@ -1,5 +1,9 @@
 #include "runtime/engine/model_instance.h"
+#include "calibration/device_calibration.h"
 #include "core/arena.h"
+#include "ops/common/device_route.h"
+#include "runtime/engine/context_cache/context_cost.h"
+#include "runtime/engine/device_profile.h"
 #include "artifact/reader.h"
 #include "artifact/formats.h"
 #include "core/startup.h"
@@ -7,11 +11,16 @@
 #include "models/qwen3_5/measurement.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <string>
 #include <chrono>
 #include <cstdio>
 #include <set>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace ninfer::runtime {
 namespace {
@@ -214,8 +223,74 @@ ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
 
 ModelInstance::~ModelInstance() = default;
 
+namespace {
+
+// Installs each rank's GPU route profile before any Op runs (see EngineOptions::device_profile).
+// A device with no measured profile is calibrated once, in this process, before the weights claim
+// its memory; the result goes to the profile file for the next start.
+void install_device_route_profile_on(const EngineOptions& options, int device) {
+    if (options.device_profile == "off") {
+        ops::install_device_route_profile(device, nullptr);
+        return;
+    }
+    const bool calibrate = options.device_profile == "calibrate";
+    if (!calibrate && options.device_profile != "auto") {
+        throw std::invalid_argument("device_profile must be auto, off or calibrate");
+    }
+    cudaDeviceProp props{};
+    CUDA_CHECK(cudaGetDeviceProperties(&props, device));
+    const std::string hardware_class = context_cost_hardware_class(props.name, props.major, props.minor);
+    const int multiprocessors        = props.multiProcessorCount;
+    const std::filesystem::path path = options.device_profile_path.empty()
+                                           ? default_device_profile_path()
+                                           : options.device_profile_path;
+    std::optional<ops::DeviceRouteProfile> profile;
+    if (!calibrate) {
+        try {
+            profile = find_device_route_profile(hardware_class, multiprocessors, path);
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "[engine] device profile %s ignored: %s\n", path.string().c_str(),
+                         error.what());
+        }
+    }
+    if (!profile) {
+        std::fprintf(stderr, "[engine] calibrating routes for %s (%d SMs)\n", hardware_class.c_str(),
+                     multiprocessors);
+        int previous = 0;
+        CUDA_CHECK(cudaGetDevice(&previous));
+        CUDA_CHECK(cudaSetDevice(device));
+        ops::install_device_route_profile(device, nullptr);
+        calibration::CalibrationOptions calibration_options;
+        profile = calibration::calibrate_device_routes(calibration_options);
+        CUDA_CHECK(cudaSetDevice(previous));
+        profile->hardware_class = hardware_class;
+        try {
+            upsert_device_route_profile_atomic(path, *profile);
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "[engine] device profile not saved to %s: %s\n",
+                         path.string().c_str(), error.what());
+        }
+    }
+    std::fprintf(stderr, "[engine] device profile %s: %zu routed keys (%s)\n", hardware_class.c_str(),
+                 profile->routes.size(), profile->origin.c_str());
+    ops::install_device_route_profile(
+        device, std::make_shared<const ops::DeviceRouteProfile>(std::move(*profile)));
+}
+
+void install_device_route_profile_for(const EngineOptions& options, const DeviceContext& device) {
+    std::vector<int> installed;
+    for (const int id : device.device_ids()) {
+        if (std::find(installed.begin(), installed.end(), id) != installed.end()) { continue; }
+        install_device_route_profile_on(options, id);
+        installed.push_back(id);
+    }
+}
+
+} // namespace
+
 ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& device) {
     validate_options(requested);
+    install_device_route_profile_for(requested, device);
     const auto start = Clock::now();
     // Every later stage of startup checks its options against the ones the model was loaded with, so
     // the stage split is decided once, here, and carried in the options from then on.

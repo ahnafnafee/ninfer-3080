@@ -11,6 +11,10 @@ add_executable(ninfer-serve serve/main.cpp)
 ninfer_internal_includes(ninfer-serve)
 target_link_libraries(ninfer-serve PRIVATE ninfer_serve ninfer_product_logging)
 
+add_executable(ninfer-calibrate calibrate/main.cpp)
+ninfer_internal_includes(ninfer-calibrate)
+target_link_libraries(ninfer-calibrate PRIVATE ninfer_calibration ninfer_runtime_support)
+
 add_executable(ninfer-perplexity
   perplexity/main.cpp
   perplexity/corpus.cpp

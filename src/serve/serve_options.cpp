@@ -78,7 +78,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--fast-prefill-kernel] [--log-stats-interval-ms N] [--device N] "
-           "[--context-cost-presets FILE] "
+           "[--context-cost-presets FILE] [--device-profile auto|off|calibrate] [--device-profile-path FILE] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
@@ -135,9 +135,9 @@ std::string serve_usage_text(const char* argv0) {
            "are matched against the sequence so far and what followed is proposed; it is exact, and "
            "0 (the default) disables it\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
-           "       --fast-prefill-kernel prefills an INT8-G64 KV cache with the fast prompt-attention "
-           "kernel (FP16 PV per 64-key tile) and rounds --prefill-chunk down to whole attention "
-           "waves; off by default\n"
+           "       --fast-prefill-kernel prefills an int8 or rk* KV cache with the fast "
+           "prompt-attention kernel (FP16 PV per 64-key tile) and rounds --prefill-chunk down to "
+           "whole attention waves; off by default\n"
            "       --auto-prefix-grid offers shared candidates on a token grid so unrelated "
            "callers whose prompts start alike share a cached prefix without any client hint; a grid "
            "frontier is only published once two callers have both asked for it\n"
@@ -299,6 +299,17 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.first_token_logprobs = true;
         } else if (arg == "--fast-prefill-kernel") {
             options.fast_prefill_kernel = true;
+        } else if (arg == "--device-profile") {
+            options.device_profile = require_value("--device-profile");
+            if (options.device_profile != "auto" && options.device_profile != "off" &&
+                options.device_profile != "calibrate") {
+                throw std::invalid_argument("--device-profile must be auto, off or calibrate");
+            }
+        } else if (arg == "--device-profile-path") {
+            options.device_profile_path = require_value("--device-profile-path");
+            if (options.device_profile_path.empty()) {
+                throw std::invalid_argument("--device-profile-path must not be empty");
+            }
         } else if (arg == "--context-cost-presets") {
             options.context_cost_presets = require_value("--context-cost-presets");
             if (options.context_cost_presets.empty()) {

@@ -4,6 +4,7 @@ add_subdirectory(artifact)
 add_subdirectory(text)
 add_subdirectory(media)
 add_subdirectory(ops)
+add_subdirectory(calibration)
 add_subdirectory(models)
 add_subdirectory(runtime)
 

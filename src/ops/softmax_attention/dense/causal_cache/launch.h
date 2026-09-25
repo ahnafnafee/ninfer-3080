@@ -18,6 +18,11 @@ enum class CausalAttentionRoute { SmallT, ChunkedSmallT, Prompt };
 // block divides it.
 inline constexpr std::int32_t kPromptWaveRows = 128;
 
+// Whether a prompt call on this storage takes the fast kernel (register-resident rows, FP16 PV per
+// 64-key tile): when the caller asks for it (--fast-prefill-kernel), else as NINFER_PROMPT_FAST=0|1
+// or the device profile's "attn_prompt_fast" says. Storages outside the INT8 family never do.
+[[nodiscard]] bool causal_attention_prompt_fast_kernel(KvCacheStorage storage, bool requested);
+
 struct CausalSmallTInvocation {
     const Tensor* valid_columns = nullptr;
     const Tensor* table_rows    = nullptr;

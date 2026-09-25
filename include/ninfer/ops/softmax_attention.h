@@ -205,6 +205,18 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
 causal_softmax_attention_prompt_wave_tokens(AttentionHeadGeometry geometry);
 
 /**
+ * Return the prefill chunk, a multiple of 128 near `requested` (from half of it to 256 tokens
+ * above it), whose prompt-attention grid wastes the least of its last wave on the current device:
+ * a chunk is ceil(chunk / rows) row blocks of every query head, one CTA per SM, where `rows` is
+ * 128 for the fast kernel (requested, or chosen by NINFER_PROMPT_FAST or the device profile) and
+ * 64 for the INT8-family standard kernel. The nearest chunk wins a tie. Other storages keep the
+ * requested chunk.
+ */
+[[nodiscard]] std::int32_t causal_softmax_attention_prompt_aligned_chunk(
+    AttentionHeadGeometry geometry, KvCacheStorage storage, bool fast_prompt_kernel,
+    std::int32_t requested);
+
+/**
  * Non-causal grouped-query attention over persistent context plus one live query block.
  *
  * The registered profile is D=128, Hq=32, Hkv=8 (group 4), scale=1/sqrt(128), T=1..16, and

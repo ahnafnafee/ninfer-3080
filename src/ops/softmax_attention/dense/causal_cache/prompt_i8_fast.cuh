@@ -22,6 +22,13 @@
 //     bounded by 64 * 127 * max_scale; a tile whose largest V scale could exceed the FP16 range
 //     decodes V with its scales divided by an exact power of two and multiplies the partial back.
 //   * CTAs are issued longest-first so a causal prompt's heaviest row blocks do not form the tail.
+//   * PackedValues serves rk8v4's value plane: two signed int4 codes per byte over a G32 scale. A
+//     byte-pair ldmatrix.trans lane then holds four dimensions of two keys, which decode into the
+//     B fragments of four n8 tiles (dimensions 4c+r of each 32-dimension group, r = 0..3); keys
+//     are the INT8 G64 codes the int8 cache stores, so QK is shared.
+//   * Keys selects a packed key plane (rk4v4, rk4v4-e8, rk2v4-e8). Its codes for the next tile are
+//     loaded into registers where the INT8 path issues its copy and expanded into that stage's
+//     INT8 K tile after this tile's PV, so QK is unchanged.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -40,23 +47,37 @@ inline constexpr int kCausalPromptI8FastGroups = kCausalPromptHeadDim / kKVCache
 inline constexpr int kCausalPromptI8FastTileBytes = kCausalPromptI8FastBc * kCausalPromptHeadDim;
 inline constexpr int kCausalPromptI8FastScaleBytes =
     kCausalPromptI8FastBc * kCausalPromptI8FastGroups * static_cast<int>(sizeof(__half));
-inline constexpr int kCausalPromptI8FastStageBytes =
-    2 * kCausalPromptI8FastTileBytes + 2 * kCausalPromptI8FastScaleBytes;
+
+// One pipeline stage: the K codes, the V codes (half as many bytes when packed), then the G64 key
+// scales and the value scales (G64, or G32 when packed).
+template <bool PackedValues>
+struct CausalPromptI8FastStage {
+    static constexpr int VGroups =
+        PackedValues ? kCausalPromptHeadDim / kKVCacheInt4ValueGroup : kCausalPromptI8FastGroups;
+    static constexpr int VRowBytes    = kCausalPromptHeadDim / (PackedValues ? 2 : 1);
+    static constexpr int VTileBytes   = kCausalPromptI8FastBc * VRowBytes;
+    static constexpr int VScaleBytes  = kCausalPromptI8FastBc * VGroups * static_cast<int>(sizeof(__half));
+    static constexpr int KScaleOffset = kCausalPromptI8FastTileBytes + VTileBytes;
+    static constexpr int Bytes        = KScaleOffset + kCausalPromptI8FastScaleBytes + VScaleBytes;
+};
+inline constexpr int kCausalPromptI8FastStageBytes = CausalPromptI8FastStage<false>::Bytes;
 
 // Each warp owns 16 query rows. Eight warps fill an SM's register file; four warps serve
 // launches too narrow to occupy every SM with 128-row CTAs.
-template <int Warps>
+template <int Warps, bool PackedValues = false>
 struct CausalPromptI8FastShape {
     static_assert(Warps == 4 || Warps == 8);
     static constexpr int Threads   = Warps * 32;
     static constexpr int Br        = Warps * 16;
     static constexpr int QBytes    = Br * kCausalPromptHeadDim;
-    static constexpr int SmemBytes = QBytes + 2 * kCausalPromptI8FastStageBytes;
+    static constexpr int SmemBytes = QBytes + 2 * CausalPromptI8FastStage<PackedValues>::Bytes;
 };
 
 // A 64-key FP16 partial is bounded by 64 * 127 * max_scale (every probability is at most one).
-// Keeping max_scale at or below 8 leaves that bound, with FP16 rounding slack, under 65504.
-inline constexpr float kCausalPromptI8FastF16PartialScaleLimit = 8.0f;
+// Keeping max_scale at or below 8 leaves that bound, with FP16 rounding slack, under 65504. An
+// int4 code is at most 8 in magnitude, so the packed coding allows scales up to 64.
+inline constexpr float kCausalPromptI8FastF16PartialScaleLimit       = 8.0f;
+inline constexpr float kCausalPromptI8FastPackedF16PartialScaleLimit = 64.0f;
 
 static_assert(kCausalPromptI8FastBc == kPagedKVPageSize);
 static_assert(kCausalPromptI8FastGroups == 4);
@@ -90,9 +111,28 @@ __device__ __forceinline__ void causal_prompt_i8_fast_decode_v_pair(unsigned cod
     odd                   = load_vec<unsigned>(&vo);
 }
 
-template <typename Geometry, typename Metadata, int Warps>
+// One ldmatrix.trans b16 lane of a packed int4 [key][d/2] tile holds dimensions 4c..4c+3 of keys k
+// and k+1, one nibble each (low nibble first, byte order: k lo pair, k hi pair, k+1 lo, k+1 hi).
+// Returns, for r = 0..3, the FP16 B-fragment half {V[k][4c+r], V[k+1][4c+r]}, each code widened
+// exactly and multiplied once by its key's represented group scale.
+__device__ __forceinline__ void causal_prompt_i8_fast_decode_v_quad(unsigned codes, unsigned scales,
+                                                                    unsigned (&out)[4]) {
+    // Signed nibble ^ 8 is code + 8; 0x6400 | nibble is the FP16 value 1024 + nibble.
+    const unsigned biased = codes ^ 0x88888888u;
+    const __half2 offset  = __float2half2_rn(1032.0f);
+    const __half2 s2      = load_vec<__half2>(&scales);
+#pragma unroll
+    for (int r = 0; r < 4; ++r) {
+        const unsigned widened = ((biased >> (4 * r)) & 0x000F000Fu) | 0x64006400u;
+        const __half2 value    = __hmul2(__hsub2(load_vec<__half2>(&widened), offset), s2);
+        out[r]                 = load_vec<unsigned>(&value);
+    }
+}
+
+template <typename Geometry, typename Metadata, int Warps, bool PackedValues = false,
+          KvKeyCoding Keys = KvKeyCoding::Int8>
 __global__ __launch_bounds__(
-    CausalPromptI8FastShape<Warps>::Threads,
+    CausalPromptI8FastShape<Warps, PackedValues>::Threads,
     1) void causal_attention_prompt_i8_fast_kernel(const __nv_bfloat16* __restrict__ q,
                                                    const std::int8_t* __restrict__ cache_k,
                                                    const std::int8_t* __restrict__ cache_v,
@@ -104,7 +144,12 @@ __global__ __launch_bounds__(
                                                    std::int32_t width) {
     constexpr int D             = kCausalPromptHeadDim;
     constexpr int DB16          = D / 2;
-    using Shape                 = CausalPromptI8FastShape<Warps>;
+    using Shape                 = CausalPromptI8FastShape<Warps, PackedValues>;
+    using Stage                 = CausalPromptI8FastStage<PackedValues>;
+    constexpr int VGroups       = Stage::VGroups;
+    constexpr int VRowBytes     = Stage::VRowBytes;
+    constexpr bool PackedKeys   = Keys != KvKeyCoding::Int8;
+    static_assert(!PackedKeys || PackedValues, "packed keys pair with packed values");
     constexpr int Threads       = Shape::Threads;
     constexpr int Br            = Shape::Br;
     constexpr int Bc            = kCausalPromptI8FastBc;
@@ -196,40 +241,102 @@ __global__ __launch_bounds__(
     }
 
     const auto stage_base = [&](int stage) {
-        return smem_raw + Shape::QBytes + stage * kCausalPromptI8FastStageBytes;
+        return smem_raw + Shape::QBytes + stage * Stage::Bytes;
     };
 
-    // One tile is one physical page of this KV head: 16 KiB of K codes, 16 KiB of V codes and
-    // their G64 scales, all contiguous in the cache. Keys past the CTA's last visible key are
-    // zero-filled so masked columns stay finite.
+    constexpr int KChunks          = Bc * (D / 16);
+    constexpr int KChunksPerThread = KChunks / Threads;
+    static_assert(KChunks % Threads == 0);
+    using KeyChunk = KvPackedKeyChunk<PackedKeys ? Keys : KvKeyCoding::Lloyd4>;
+    KeyChunk k_packed[PackedKeys ? KChunksPerThread : 1];
+    // Packed keys past the last visible key keep their placeholder's expansion: their scales are
+    // zero-filled and their scores masked.
+    const auto commit_keys = [&](int kb) {
+        if constexpr (PackedKeys) {
+            std::int8_t* k_s = reinterpret_cast<std::int8_t*>(stage_base(kb & 1));
+#pragma unroll
+            for (int i = 0; i < KChunksPerThread; ++i) {
+                const int chunk = tid + i * Threads;
+                const int key   = chunk >> 4;
+                const int c     = chunk & 15;
+                store_vec(k_s + key * D + ((c ^ (key & 7)) << 4),
+                          kv_cache_packed_key_expand16<Keys>(k_packed[i]));
+            }
+        }
+    };
+
+    // One tile is one physical page of this KV head: 16 KiB of K codes, 16 KiB of V codes (8 KiB
+    // packed) and their scales, all contiguous in the cache. Keys past the CTA's last visible key
+    // are zero-filled so masked columns stay finite.
     const auto issue_tile = [&](int kb) {
         unsigned char* base = stage_base(kb & 1);
         std::int8_t* k_s    = reinterpret_cast<std::int8_t*>(base);
         std::int8_t* v_s    = k_s + kCausalPromptI8FastTileBytes;
-        __half* ks_s        = reinterpret_cast<__half*>(v_s + kCausalPromptI8FastTileBytes);
+        __half* ks_s        = reinterpret_cast<__half*>(base + Stage::KScaleOffset);
         __half* vs_s        = ks_s + Bc * Groups;
         const int page      = block_table[kb];
         const int valid     = min(Bc, max_query_abs + 1 - kb * Bc);
-        const std::int64_t code_base =
-            kv_cache_int8_quant_code_index<Geometry>(page, kv_head, 0, 0);
+        if constexpr (PackedKeys) {
 #pragma unroll
-        for (int i = 0; i < kCausalPromptI8FastTileBytes / 16 / Threads; ++i) {
-            const int chunk        = tid + i * Threads;
-            const int key          = chunk >> 4;
-            const int c            = chunk & 15;
-            const int dst          = key * D + ((c ^ (key & 7)) << 4);
-            const int bytes        = key < valid ? 16 : 0;
-            const std::int64_t src = code_base + key * D + c * 16;
-            cp_async_zfill<16, Cache::cg>(k_s + dst, cache_k + src, bytes);
-            cp_async_zfill<16, Cache::cg>(v_s + dst, cache_v + src, bytes);
+            for (int i = 0; i < KChunksPerThread; ++i) {
+                const int chunk = tid + i * Threads;
+                const int key   = chunk >> 4;
+                k_packed[i]     = KeyChunk{};
+                if (key < valid) {
+                    k_packed[i] = load_vec<KeyChunk>(
+                        reinterpret_cast<const std::uint8_t*>(cache_k) +
+                        kv_cache_packed_key_chunk_index<Geometry, Keys>(page, kv_head,
+                                                                        (chunk & 15) * 16, key));
+                }
+            }
+        } else {
+            const std::int64_t code_base =
+                kv_cache_int8_quant_code_index<Geometry>(page, kv_head, 0, 0);
+#pragma unroll
+            for (int i = 0; i < kCausalPromptI8FastTileBytes / 16 / Threads; ++i) {
+                const int chunk        = tid + i * Threads;
+                const int key          = chunk >> 4;
+                const int c            = chunk & 15;
+                const int dst          = key * D + ((c ^ (key & 7)) << 4);
+                const int bytes        = key < valid ? 16 : 0;
+                const std::int64_t src = code_base + key * D + c * 16;
+                cp_async_zfill<16, Cache::cg>(k_s + dst, cache_k + src, bytes);
+                if constexpr (!PackedValues) {
+                    cp_async_zfill<16, Cache::cg>(v_s + dst, cache_v + src, bytes);
+                }
+            }
         }
-        if (tid < 2 * Bc) {
-            const int key = tid & (Bc - 1);
-            const std::int64_t src =
-                kv_cache_int8_quant_scale_index<Geometry>(page, kv_head, 0, key);
-            const __half* scales = tid < Bc ? cache_k_scale : cache_v_scale;
-            __half* dst          = (tid < Bc ? ks_s : vs_s) + key * Groups;
-            cp_async_zfill<8>(dst, scales + src, key < valid ? 8 : 0);
+        if constexpr (PackedValues) {
+            const std::int64_t value_base =
+                kv_cache_int4_value_code_index<Geometry>(page, kv_head, 0, 0);
+#pragma unroll
+            for (int i = 0; i < Stage::VTileBytes / 16 / Threads; ++i) {
+                const int chunk = tid + i * Threads;
+                const int key   = chunk >> 3;
+                const int c     = chunk & 7;
+                cp_async_zfill<16, Cache::cg>(v_s + key * VRowBytes + ((c ^ (key & 7)) << 4),
+                                              cache_v + value_base + key * VRowBytes + c * 16,
+                                              key < valid ? 16 : 0);
+            }
+        }
+        if (tid < Bc) {
+            cp_async_zfill<8>(ks_s + tid * Groups,
+                              cache_k_scale +
+                                  kv_cache_int8_quant_scale_index<Geometry>(page, kv_head, 0, tid),
+                              tid < valid ? 8 : 0);
+        } else if (tid < 2 * Bc) {
+            const int key = tid - Bc;
+            if constexpr (PackedValues) {
+                cp_async_zfill<16>(vs_s + key * VGroups,
+                                   cache_v_scale + kv_cache_int4_value_scale_index<Geometry>(
+                                                       page, kv_head, 0, key),
+                                   key < valid ? 16 : 0);
+            } else {
+                cp_async_zfill<8>(vs_s + key * VGroups,
+                                  cache_v_scale +
+                                      kv_cache_int8_quant_scale_index<Geometry>(page, kv_head, 0, key),
+                                  key < valid ? 8 : 0);
+            }
         }
         cp_commit();
     };
@@ -250,11 +357,15 @@ __global__ __launch_bounds__(
     const int qabs0         = row0 < rows ? base_pos + q0 + row0 : -1;
     const int qabs1         = row1 < rows ? base_pos + q0 + row1 : -1;
 
-    float acc[DBlocks][2][4];
+    // INT8 values: [16-dimension block][even/odd n8 tile]; packed values: [G32 group][r] where
+    // tile r of a group holds its dimensions 4c+r. Both are 128 floats per lane.
+    constexpr int AccOuter = PackedValues ? VGroups : DBlocks;
+    constexpr int AccInner = PackedValues ? 4 : 2;
+    float acc[AccOuter][AccInner][4];
 #pragma unroll
-    for (int b = 0; b < DBlocks; ++b) {
+    for (int b = 0; b < AccOuter; ++b) {
 #pragma unroll
-        for (int p = 0; p < 2; ++p) {
+        for (int p = 0; p < AccInner; ++p) {
 #pragma unroll
             for (int i = 0; i < 4; ++i) { acc[b][p][i] = 0.0f; }
         }
@@ -279,8 +390,7 @@ __global__ __launch_bounds__(
         if (!warp_active || k0 > warp_max_qabs) { return; }
         const unsigned char* base  = stage_base(kb & 1);
         const __nv_bfloat16* k_b16 = reinterpret_cast<const __nv_bfloat16*>(base);
-        const __half* ks_s =
-            reinterpret_cast<const __half*>(base + 2 * kCausalPromptI8FastTileBytes);
+        const __half* ks_s = reinterpret_cast<const __half*>(base + Stage::KScaleOffset);
         const __half* vs_s = ks_s + Bc * Groups;
 
         float score[QKNt][4];
@@ -377,23 +487,90 @@ __global__ __launch_bounds__(
         // Every probability is at most one, so a 64-key FP16 partial is bounded by
         // 64 * 127 * max_scale. A tile whose largest V scale exceeds the limit decodes V with its
         // scales divided by an exact power of two and multiplies the partial back at promotion.
-        static_assert(Bc * Groups == 32 * 8);
-        const uint4 v8 = load_vec<uint4>(&vs_s[8 * lane]);
-        const __half2 vmax2 =
-            __hmax2(__hmax2(__habs2(load_vec<__half2>(&v8.x)), __habs2(load_vec<__half2>(&v8.y))),
-                    __hmax2(__habs2(load_vec<__half2>(&v8.z)), __habs2(load_vec<__half2>(&v8.w))));
+        static_assert(Bc * VGroups % (32 * 8) == 0);
+        __half2 vmax2 = __float2half2_rn(0.0f);
+#pragma unroll
+        for (int part = 0; part < Bc * VGroups / (32 * 8); ++part) {
+            const uint4 v8 = load_vec<uint4>(&vs_s[8 * (lane + 32 * part)]);
+            vmax2          = __hmax2(
+                vmax2, __hmax2(__hmax2(__habs2(load_vec<__half2>(&v8.x)),
+                                       __habs2(load_vec<__half2>(&v8.y))),
+                               __hmax2(__habs2(load_vec<__half2>(&v8.z)),
+                                       __habs2(load_vec<__half2>(&v8.w)))));
+        }
         const float vmax = warp_max(fmaxf(__low2float(vmax2), __high2float(vmax2)), FullMask);
-        tile_shift       = 0;
-        if (vmax > kCausalPromptI8FastF16PartialScaleLimit) {
-            while (ldexpf(vmax, -tile_shift) > kCausalPromptI8FastF16PartialScaleLimit) {
-                ++tile_shift;
-            }
+        constexpr float limit = PackedValues ? kCausalPromptI8FastPackedF16PartialScaleLimit
+                                             : kCausalPromptI8FastF16PartialScaleLimit;
+        tile_shift = 0;
+        if (vmax > limit) {
+            while (ldexpf(vmax, -tile_shift) > limit) { ++tile_shift; }
         }
         tile_live = true;
     };
 
+    const auto pv_packed = [&](int kb) {
+        const unsigned char* base = stage_base(kb & 1);
+        const std::int8_t* v_s =
+            reinterpret_cast<const std::int8_t*>(base) + kCausalPromptI8FastTileBytes;
+        const __half* vs_s =
+            reinterpret_cast<const __half*>(base + Stage::KScaleOffset) + Bc * Groups;
+        const __half2 mul   = __float2half2_rn(ldexpf(1.0f, -tile_shift));
+        const float unscale = ldexpf(1.0f, tile_shift);
+#pragma unroll
+        for (int grp = 0; grp < VGroups; ++grp) {
+            unsigned h[4][2];
+#pragma unroll
+            for (int r = 0; r < 4; ++r) { h[r][0] = h[r][1] = 0u; }
+#pragma unroll
+            for (int j = 0; j < PVKs; ++j) {
+                // Group scales of the keys each lane supplies: (2t, 2t+1) and (8+2t, 9+2t).
+                const int key = j * 16 + 2 * lid;
+                __half2 lo =
+                    __halves2half2(vs_s[key * VGroups + grp], vs_s[(key + 1) * VGroups + grp]);
+                __half2 hi = __halves2half2(vs_s[(key + 8) * VGroups + grp],
+                                            vs_s[(key + 9) * VGroups + grp]);
+                if (tile_shift != 0) {
+                    lo = __hmul2(lo, mul);
+                    hi = __hmul2(hi, mul);
+                }
+                // Matrices: keys 16j+0..7, then 16j+8..15, of this group's 16-byte chunk.
+                const int row = j * 16 + ((lane >> 3) & 1) * 8 + (lane & 7);
+                unsigned r0, r1;
+                ldmatrix_x2_t(r0, r1, smem_addr(&v_s[row * VRowBytes + ((grp ^ (row & 7)) << 4)]));
+                unsigned b_lo[4], b_hi[4];
+                causal_prompt_i8_fast_decode_v_quad(r0, load_vec<unsigned>(&lo), b_lo);
+                causal_prompt_i8_fast_decode_v_quad(r1, load_vec<unsigned>(&hi), b_hi);
+#pragma unroll
+                for (int r = 0; r < 4; ++r) {
+                    causal_prompt_i8_fast_mma_f16_acc(h[r][0], h[r][1], pa[j][0], pa[j][1],
+                                                      pa[j][2], pa[j][3], b_lo[r], b_hi[r]);
+                }
+            }
+#pragma unroll
+            for (int r = 0; r < 4; ++r) {
+                float (&a)[4] = acc[grp][r];
+                float2 r0     = __half22float2(load_vec<__half2>(&h[r][0]));
+                float2 r1     = __half22float2(load_vec<__half2>(&h[r][1]));
+                if (tile_shift != 0) {
+                    r0.x *= unscale;
+                    r0.y *= unscale;
+                    r1.x *= unscale;
+                    r1.y *= unscale;
+                }
+                a[0] = __fmaf_rn(a[0], tile_alpha0, r0.x);
+                a[1] = __fmaf_rn(a[1], tile_alpha0, r0.y);
+                a[2] = __fmaf_rn(a[2], tile_alpha1, r1.x);
+                a[3] = __fmaf_rn(a[3], tile_alpha1, r1.y);
+            }
+        }
+    };
+
     const auto pv = [&](int kb) {
         if (!tile_live) { return; }
+        if constexpr (PackedValues) {
+            pv_packed(kb);
+            return;
+        }
         const std::int8_t* v_s =
             reinterpret_cast<const std::int8_t*>(stage_base(kb & 1)) + kCausalPromptI8FastTileBytes;
         const __half* vs_s =
@@ -479,6 +656,7 @@ __global__ __launch_bounds__(
 
     // Every warp publishes one tile per barrier; the next tile's copy overlaps this tile's math.
     issue_tile(0);
+    commit_keys(0);
 #pragma unroll 1
     for (int kb = 0; kb < key_blocks; ++kb) {
         cp_wait<0>();
@@ -486,21 +664,40 @@ __global__ __launch_bounds__(
         if (kb + 1 < key_blocks) { issue_tile(kb + 1); }
         qk_softmax(kb);
         pv(kb);
+        if (kb + 1 < key_blocks) { commit_keys(kb + 1); }
     }
 
     running_l0         = warp_sum<4>(running_l0, FullMask);
     running_l1         = warp_sum<4>(running_l1, FullMask);
     const float inv_l0 = running_l0 > 0.0f ? __frcp_rn(running_l0) : 0.0f;
     const float inv_l1 = running_l1 > 0.0f ? __frcp_rn(running_l1) : 0.0f;
-    // Even n8 tiles hold dimensions 16b + 2n and odd tiles 16b + 2n + 1, so lane (g, t) owns the
-    // four contiguous dimensions 16b + 4t .. 16b + 4t + 3 of its two rows.
+    if constexpr (PackedValues) {
+        // Tile r of group g holds dimensions 32g + 4n + r, so lane (g, t) owns the eight
+        // contiguous dimensions 32g + 8t .. 32g + 8t + 7 of its two rows: columns 2t (first four)
+        // and 2t + 1 (last four) of the four tiles.
 #pragma unroll
-    for (int b = 0; b < DBlocks; ++b) {
-        const int d0 = b * 16 + 4 * lid;
-        store_row(row0, d0, acc[b][0][0] * inv_l0, acc[b][1][0] * inv_l0, acc[b][0][1] * inv_l0,
-                  acc[b][1][1] * inv_l0);
-        store_row(row1, d0, acc[b][0][2] * inv_l1, acc[b][1][2] * inv_l1, acc[b][0][3] * inv_l1,
-                  acc[b][1][3] * inv_l1);
+        for (int grp = 0; grp < AccOuter; ++grp) {
+            const int d0 = grp * 32 + 8 * lid;
+            store_row(row0, d0, acc[grp][0][0] * inv_l0, acc[grp][1][0] * inv_l0,
+                      acc[grp][2][0] * inv_l0, acc[grp][3][0] * inv_l0);
+            store_row(row0, d0 + 4, acc[grp][0][1] * inv_l0, acc[grp][1][1] * inv_l0,
+                      acc[grp][2][1] * inv_l0, acc[grp][3][1] * inv_l0);
+            store_row(row1, d0, acc[grp][0][2] * inv_l1, acc[grp][1][2] * inv_l1,
+                      acc[grp][2][2] * inv_l1, acc[grp][3][2] * inv_l1);
+            store_row(row1, d0 + 4, acc[grp][0][3] * inv_l1, acc[grp][1][3] * inv_l1,
+                      acc[grp][2][3] * inv_l1, acc[grp][3][3] * inv_l1);
+        }
+    } else {
+        // Even n8 tiles hold dimensions 16b + 2n and odd tiles 16b + 2n + 1, so lane (g, t) owns
+        // the four contiguous dimensions 16b + 4t .. 16b + 4t + 3 of its two rows.
+#pragma unroll
+        for (int b = 0; b < DBlocks; ++b) {
+            const int d0 = b * 16 + 4 * lid;
+            store_row(row0, d0, acc[b][0][0] * inv_l0, acc[b][1][0] * inv_l0,
+                      acc[b][0][1] * inv_l0, acc[b][1][1] * inv_l0);
+            store_row(row1, d0, acc[b][0][2] * inv_l1, acc[b][1][2] * inv_l1,
+                      acc[b][0][3] * inv_l1, acc[b][1][3] * inv_l1);
+        }
     }
 }
 

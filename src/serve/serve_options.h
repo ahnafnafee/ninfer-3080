@@ -42,6 +42,8 @@ struct ServeOptions {
     std::uint32_t prefill_chunk        = 1024;
     bool fast_prefill_kernel           = false;
     std::filesystem::path context_cost_presets;
+    std::string device_profile = "auto";
+    std::filesystem::path device_profile_path;
     std::uint32_t log_stats_interval_ms    = 5000; // 0 disables periodic Engine throughput logs
     std::size_t max_request_bytes          = kDefaultMaxRequestBytes;
     std::size_t media_cache_bytes          = kDefaultMediaCacheBytes;

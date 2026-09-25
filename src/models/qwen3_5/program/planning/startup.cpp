@@ -23,6 +23,7 @@
 #include "ninfer/ops/softmax_attention.h"
 #include "ninfer/ops/speculative_round.h"
 #include <algorithm>
+#include <cstdlib>
 #include <initializer_list>
 #include <limits>
 #include <stdexcept>
@@ -1084,19 +1085,24 @@ ops::RopeYarn planned_rope_yarn(const execution::Parameters& parameters,
     return {static_cast<float>(options.max_context) / static_cast<float>(native), native};
 }
 
-// Every chunk but a prompt's last one has the effective width, so with the fast prefill kernel it
-// is rounded down to whole prompt-attention waves, keeping each full chunk's attention free of a
-// partial last wave.
+// Every chunk but a prompt's last one has the effective width, so it is chosen near the request
+// where the prompt-attention grid of this device leaves the least of a last wave idle.
+// NINFER_PREFILL_ALIGN=0 keeps the requested chunk.
 std::uint32_t effective_prefill_chunk(const execution::Parameters& parameters,
                                       const EngineOptions& options) {
     const std::uint32_t requested = std::min(options.prefill_chunk, options.max_context);
-    if (!options.fast_prefill_kernel) { return requested; }
-    const auto& attention = *parameters.model.config().text.attention;
-    const auto wave = static_cast<std::uint32_t>(ops::causal_softmax_attention_prompt_wave_tokens(
+    static const bool align = [] {
+        const char* value = std::getenv("NINFER_PREFILL_ALIGN");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!align) { return requested; }
+    const auto& attention         = *parameters.model.config().text.attention;
+    const auto aligned            = static_cast<std::uint32_t>(ops::causal_softmax_attention_prompt_aligned_chunk(
         {static_cast<std::int32_t>(attention.head_dim),
          static_cast<std::int32_t>(attention.num_attention_heads),
-         static_cast<std::int32_t>(attention.num_key_value_heads)}));
-    return requested < wave ? requested : requested / wave * wave;
+         static_cast<std::int32_t>(attention.num_key_value_heads)},
+        options.kv_cache, options.fast_prefill_kernel, static_cast<std::int32_t>(requested)));
+    return std::min(aligned, options.max_context);
 }
 
 std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>

@@ -10,6 +10,7 @@
 #include "ops/linear/t2/t2_a8.h"
 
 #include "core/device.h"
+#include "ops/common/device_route.h"
 #include "ops/common/rowsplit_a8_mma.cuh"
 #include "ops/linear/t2/t2_prefill_i8.cuh"
 #include "ops/linear/t2/t2_small_t_i8.cuh"
@@ -21,6 +22,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -97,7 +99,14 @@ SmallBand small_band() {
 
 enum class Route : std::uint8_t { None, SmallT, Prefill };
 
+// A device profile's "t2_i8_route" entry names the route per width: "small" (the small-T kernel,
+// at most kT2I8MaxColumns columns) or "tile" (the prefill GEMM). One entry serves every input width
+// because the activations are quantized once, for the route of their width, and shared by the
+// projections that read them.
 Route route(std::int32_t tokens) {
+    const std::string_view routed = device_route_schedule("t2_i8_route", tokens);
+    if (routed == "small" && tokens >= 1 && tokens <= kT2I8MaxColumns) { return Route::SmallT; }
+    if (routed == "tile" && tokens >= 1) { return Route::Prefill; }
     const SmallBand band = small_band();
     if (tokens >= band.lo && tokens <= band.hi) { return Route::SmallT; }
     if (tokens >= t2_a8_min_tokens()) { return Route::Prefill; }
@@ -149,6 +158,52 @@ void small_gemm(const T2A8Activations& x, SmallColumns span, const SmallParent<E
 using SmallSchedule8  = T2SmallTI8Schedule<8, 1, 1, 2, 4, 2>;
 using SmallSchedule16 = T2SmallTI8Schedule<8, 1, 2, 2, 4, 2>;
 using SmallSchedule32 = T2SmallTI8Schedule<4, 1, 4, 2, 3, 2>;
+// Alternatives a device profile can route to ("t2_i8_small/<rows>x<K>"): other row counts per CTA,
+// K-warp splits, ring depths and code words per lane, for parts whose SM count or memory system
+// moves the balance the RTX 3090 tables above were measured at.
+using SmallScheduleR16C8W1  = T2SmallTI8Schedule<8, 1, 1, 2, 4, 1>;
+using SmallScheduleR16C8S3  = T2SmallTI8Schedule<8, 1, 1, 3, 4, 2>;
+using SmallScheduleR32C8    = T2SmallTI8Schedule<8, 2, 1, 2, 4, 2>;
+using SmallScheduleR32C8K4  = T2SmallTI8Schedule<4, 1, 1, 2, 4, 2>;
+using SmallScheduleR16C16W1 = T2SmallTI8Schedule<8, 1, 2, 2, 4, 1>;
+using SmallScheduleR32C16   = T2SmallTI8Schedule<4, 1, 2, 2, 4, 2>;
+using SmallScheduleR16C32   = T2SmallTI8Schedule<8, 1, 4, 2, 3, 2>;
+using SmallScheduleR32C16K8 = T2SmallTI8Schedule<8, 2, 2, 2, 4, 2>;
+
+// The span's schedule by profile name; false when the name is unknown or cannot take the span.
+template <class Epilogue>
+bool small_named(std::string_view schedule, const T2A8Activations& x, SmallColumns span,
+                 const SmallParent<Epilogue>& first, const SmallParent<Epilogue>* second,
+                 cudaStream_t stream) {
+    const auto take = [&]<class Schedule>() {
+        if (span.cols > Schedule::kColumns || (first.weight->n % Schedule::kRows) != 0 ||
+            (second != nullptr && (second->weight->n % Schedule::kRows) != 0) ||
+            (x.input_rows % Schedule::kSlabK) != 0) {
+            return false;
+        }
+        small_gemm<Schedule>(x, span, first, second, stream);
+        return true;
+    };
+    if (schedule == "r16c8") { return take.template operator()<SmallSchedule8>(); }
+    if (schedule == "r16c16") { return take.template operator()<SmallSchedule16>(); }
+    if (schedule == "r32c32") { return take.template operator()<SmallSchedule32>(); }
+    if (schedule == "r16c8w1") { return take.template operator()<SmallScheduleR16C8W1>(); }
+    if (schedule == "r16c8s3") { return take.template operator()<SmallScheduleR16C8S3>(); }
+    if (schedule == "r32c8") { return take.template operator()<SmallScheduleR32C8>(); }
+    if (schedule == "r32c8k4") { return take.template operator()<SmallScheduleR32C8K4>(); }
+    if (schedule == "r16c16w1") { return take.template operator()<SmallScheduleR16C16W1>(); }
+    if (schedule == "r32c16") { return take.template operator()<SmallScheduleR32C16>(); }
+    if (schedule == "r16c32") { return take.template operator()<SmallScheduleR16C32>(); }
+    if (schedule == "r32c16k8") { return take.template operator()<SmallScheduleR32C16K8>(); }
+    return false;
+}
+
+// "t2_i8_small/4096+12288x5120" for a launch over two parents, "t2_i8_small/5120x17408" for one.
+std::string small_route_key(const Weight& first, const Weight* second, std::int32_t input_rows) {
+    std::string key = "t2_i8_small/" + std::to_string(first.n);
+    if (second != nullptr) { key += "+" + std::to_string(second->n); }
+    return key + "x" + std::to_string(input_rows);
+}
 
 // Launches of at most 32 columns each: from 33 columns the weights stream once per launch, and six
 // launches (192 columns) still beat the A16 route and the prefill GEMM's 256-column tile on the
@@ -156,8 +211,12 @@ using SmallSchedule32 = T2SmallTI8Schedule<4, 1, 4, 2, 3, 2>;
 template <class Epilogue>
 void small_route(const T2A8Activations& x, const SmallParent<Epilogue>& first,
                  const SmallParent<Epilogue>* second, cudaStream_t stream) {
+    const std::string key =
+        small_route_key(*first.weight, second != nullptr ? second->weight : nullptr, x.input_rows);
     for (std::int32_t col0 = 0; col0 < x.tokens; col0 += kT2I8LaunchColumns) {
         const SmallColumns span{col0, std::min(kT2I8LaunchColumns, x.tokens - col0)};
+        const std::string_view routed = device_route_schedule(key, span.cols);
+        if (!routed.empty() && small_named(routed, x, span, first, second, stream)) { continue; }
         if (span.cols <= 8) {
             small_gemm<SmallSchedule8>(x, span, first, second, stream);
         } else if (span.cols <= 16) {
@@ -393,6 +452,34 @@ std::size_t t2_a8_activation_bytes(std::int32_t input_rows, std::int32_t max_tok
                                     round(static_cast<std::size_t>(kT2I8MaxColumns) *
                                           static_cast<std::size_t>(input_rows / a8::kGroup) *
                                           sizeof(__half)));
+    }
+    // A device profile can route widths away from the default bands; cover what it routes.
+    if (installed_device_route_profile() != nullptr) {
+        std::int32_t widest_small = 0;
+        std::int32_t widest_tile  = 0;
+        for (std::int32_t tokens = 1; tokens <= max_tokens; ++tokens) {
+            const Route taken = route(tokens);
+            if (taken == Route::SmallT) { widest_small = tokens; }
+            if (taken == Route::Prefill) { widest_tile = tokens; }
+        }
+        if (widest_small != 0) {
+            bytes = std::max(bytes, round(static_cast<std::size_t>(widest_small) *
+                                          static_cast<std::size_t>(input_rows)) +
+                                        round(static_cast<std::size_t>(kT2I8MaxColumns) *
+                                              static_cast<std::size_t>(input_rows / a8::kGroup) *
+                                              sizeof(__half)));
+        }
+        if (widest_tile != 0 && prefill_tile()) {
+            const std::size_t columns = static_cast<std::size_t>(tile_columns(widest_tile));
+            bytes = std::max(bytes, round(columns * static_cast<std::size_t>(input_rows)) +
+                                        round(columns *
+                                              static_cast<std::size_t>(input_rows /
+                                                                       T2PrefillI8::kGroupK) *
+                                              sizeof(__half)));
+        } else if (widest_tile != 0) {
+            bytes = std::max(bytes, a8::activation_workspace_bytes(
+                                        input_rows, (widest_tile + 511) / 512 * 512));
+        }
     }
     return bytes;
 }

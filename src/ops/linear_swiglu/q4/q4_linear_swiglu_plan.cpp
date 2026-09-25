@@ -6,6 +6,8 @@
 #include "core/layout.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_kernels.h"
 
+#include "ops/common/device_route.h"
+
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -183,6 +185,21 @@ Q4LinearSwiGluPlan q4_linear_swiglu_resolve_plan(const Q4LinearSwiGluProblem& pr
     if (!q4_linear_swiglu_admits(problem)) {
         throw std::invalid_argument(
             "q4 linear_swiglu: exact problem or column count is not admitted");
+    }
+    // Materialized needs a workspace sized from the compiled bands, so profiles choose among the
+    // workspace-free schedules only.
+    using Id = Q4LinearSwiGluScheduleId;
+    static constexpr std::array<DeviceRouteCandidate<Id>, 6> kCandidates{{
+        {"gemv_pair", Id::GemvPair, 1},
+        {"small_t_tiled", Id::SmallTTiled, 32},
+        {"split_half_pair_c40", Id::MmaSplitHalfPairR32C40, 0},
+        {"split_half_pair_c48", Id::MmaSplitHalfPairR32C48, 0},
+        {"split_half_pair_c128", Id::MmaSplitHalfPairR32C128, 0},
+        {"split_half_pair_c128_tail", Id::MmaSplitHalfPairR32C128Tail, 0},
+    }};
+    if (const auto* routed = routed_candidate<Id>("q4_linear_swiglu/34816x17408x5120",
+                                                  problem.cols, kCandidates)) {
+        return {routed->id, 0};
     }
 
     for (const RouteSpec& route : kRoutes) {

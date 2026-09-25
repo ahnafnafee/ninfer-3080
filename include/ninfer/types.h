@@ -315,6 +315,13 @@ struct EngineOptions {
     std::size_t cuda_graph_allowance_bytes = 0;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
+    // Per-GPU route profile (ops/common/device_route.h). "auto" installs the profile measured for
+    // this device -- from device_profile_path, then from the table compiled into the binary -- and
+    // calibrates a device that has none once, storing the result at device_profile_path; "off"
+    // keeps the compiled routes; "calibrate" measures anew. An empty path selects the user cache
+    // ($NINFER_DEVICE_PROFILES, else $XDG_CACHE_HOME or ~/.cache, /ninfer/device-profiles.json).
+    std::string device_profile = "auto";
+    std::filesystem::path device_profile_path;
     StartupObserver startup_observer;
 };
 

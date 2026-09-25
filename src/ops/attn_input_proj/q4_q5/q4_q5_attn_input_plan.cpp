@@ -2,12 +2,16 @@
 #include "ops/attn_input_proj/q4_q5/q4_q5_attn_input_plan.h"
 
 #include "ops/attn_input_proj/q4_q5/q4_q5_attn_input_kernels.h"
+#include "ops/common/device_route.h"
+
 #include <array>
 #include <limits>
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
+
+constexpr std::string_view kQ4Q5AttnInputRouteKey = "q4_q5_attn_input/5120x6144x1024";
 
 constexpr std::int32_t kAnyCols = std::numeric_limits<std::int32_t>::max();
 
@@ -146,6 +150,20 @@ Q4Q5AttnInputPlan q4_q5_attn_input_resolve_plan(const Q4Q5AttnInputProblem& prob
     if (!q4_q5_attn_input_admits(problem)) {
         throw std::invalid_argument(
             "Q4/Q5 attention input: exact problem or column count is not admitted");
+    }
+    using Id = Q4Q5AttnInputScheduleId;
+    static constexpr std::array<DeviceRouteCandidate<Id>, 7> kCandidates{{
+        {"parent_split_fixed", Id::ParentSplitFixed, 12},
+        {"small_t_mma", Id::SmallTMma, 32},
+        {"grouped_r32_c32_s4", Id::GroupedHomogeneousPairMmaR32C32S4, 0},
+        {"grouped_r32_c64_s4", Id::GroupedHomogeneousPairMmaR32C64S4, 0},
+        {"mixed_r32_c64_s3", Id::MixedR32C64S3, 0},
+        {"pair_r32_c64_s3", Id::PairR32C64S3, 0},
+        {"mixed_r64_c128_s2", Id::MixedR64C128S2, 0},
+    }};
+    if (const auto* routed =
+            routed_candidate<Id>(kQ4Q5AttnInputRouteKey, problem.cols, kCandidates)) {
+        return {routed->id};
     }
 
 #if defined(NINFER_SM8X_COMPAT)

@@ -463,11 +463,24 @@ __global__ __launch_bounds__(kExpertThreads, 1) void sparse_moe_prefill_small_ro
     }
 }
 
-constexpr int kRtx5090SmCount = 170;
 // Upper bound on the persistent grid. The routed GEMMs stride their work list by gridDim.x,
 // so any grid is correct; this caps the launch when the work list is long.
 constexpr int kPrefillMaxBlocksPerSm = 32;
-constexpr int kPrefillMaxBlocks      = kPrefillMaxBlocksPerSm * kRtx5090SmCount;
+
+int prefill_max_blocks() {
+    static const int blocks = [] {
+        int device = 0;
+        int sms    = 0;
+        if (cudaGetDevice(&device) != cudaSuccess ||
+            cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device) != cudaSuccess ||
+            sms <= 0) {
+            cudaGetLastError();
+            sms = 170;
+        }
+        return kPrefillMaxBlocksPerSm * sms;
+    }();
+    return blocks;
+}
 
 // The narrow routed gate/up ships in both depths and the route picks one. A job is one nonempty
 // column tile of one expert, so more than one job per touched expert means an expert's rows
@@ -1945,8 +1958,8 @@ void sparse_moe_prefill_launch(const Tensor& x, const SparseMoeWeights& weights,
             assignments / route_job_bn + (nvfp4 ? std::min(kExperts, assignments) : kExperts);
         const int routed_gate_work   = max_route_jobs * (kIntermediate / (kExpertBM / 2));
         const int routed_down_work   = max_route_jobs * (kHidden / kExpertBM);
-        const int routed_gate_blocks = std::min(routed_gate_work, kPrefillMaxBlocks);
-        const int routed_down_blocks = std::min(routed_down_work, kPrefillMaxBlocks);
+        const int routed_gate_blocks = std::min(routed_gate_work, prefill_max_blocks());
+        const int routed_down_blocks = std::min(routed_down_work, prefill_max_blocks());
         if (!fused_route) {
             sparse_moe_prefill_scan_kernel<<<1, kExpertThreads, 0, stream>>>(
                 tile_counts, tile_bases, offsets, route_job_experts, route_job_columns,

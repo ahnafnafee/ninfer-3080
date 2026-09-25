@@ -3,7 +3,10 @@
 
 #include "ops/linear_add/q5/q5_linear_add_kernels.h"
 
+#include "ops/common/device_route.h"
+
 #include <array>
+#include <string>
 #include <limits>
 #include <stdexcept>
 
@@ -243,6 +246,23 @@ bool q5_linear_add_admits(const Q5LinearAddProblem& problem) noexcept {
 Q5LinearAddPlan q5_linear_add_resolve_plan(const Q5LinearAddProblem& problem) {
     if (!q5_linear_add_admits(problem)) {
         throw std::invalid_argument("q5 linear_add: exact problem or column count is not admitted");
+    }
+    using Id = Q5LinearAddScheduleId;
+    static constexpr std::array<DeviceRouteCandidate<Id>, 9> kCandidates{{
+        {"split2_exact", Id::Split2ExactResidual, 10},
+        {"small_t_mma", Id::SmallTMmaResidual, 32},
+        {"mma_r64_c16", Id::MmaResidualR64C16, 0},
+        {"mma_r64_c24", Id::MmaResidualR64C24, 0},
+        {"mma_r64_c32", Id::MmaResidualR64C32, 0},
+        {"mma_r64_c64", Id::MmaResidualR64C64, 0},
+        {"mma_r64_c32_s3", Id::MmaResidualR64C32S3, 0},
+        {"mma_r64_c32_s4", Id::MmaResidualR64C32S4, 0},
+        {"mma_r64_c128", Id::MmaResidualR64C128, 0},
+    }};
+    const std::string key = "q5_linear_add/" + std::to_string(problem.rows) + "x" +
+                            std::to_string(problem.k);
+    if (const auto* routed = routed_candidate<Id>(key, problem.cols, kCandidates)) {
+        return {routed->id, 0};
     }
 
     const auto resolve_from = [&](const auto& routes) -> Q5LinearAddPlan {

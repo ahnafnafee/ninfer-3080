@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -405,6 +406,41 @@ std::int32_t causal_softmax_attention_prompt_wave_tokens(AttentionHeadGeometry g
     // and kPromptWaveRows is a multiple of every prompt kernel's row block.
     const std::int32_t row_blocks = std::max(1, multiprocessors / geometry.query_heads);
     return row_blocks * detail::kPromptWaveRows;
+}
+
+std::int32_t causal_softmax_attention_prompt_aligned_chunk(AttentionHeadGeometry geometry,
+                                                          KvCacheStorage storage,
+                                                          bool fast_prompt_kernel,
+                                                          std::int32_t requested) {
+    require_causal_geometry(geometry, "causal_softmax_attention prompt chunk");
+    constexpr std::int32_t kGranule = 128;
+    if (requested < 2 * kGranule || !kv_cache_is_int8_family(storage)) { return requested; }
+    const std::int32_t rows =
+        detail::causal_attention_prompt_fast_kernel(storage, fast_prompt_kernel) ? detail::kPromptWaveRows
+                                                                                 : 64;
+    int device              = 0;
+    int multiprocessors     = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CUDA_CHECK(cudaDeviceGetAttribute(&multiprocessors, cudaDevAttrMultiProcessorCount, device));
+    if (multiprocessors <= 0) { return requested; }
+    const auto efficiency = [&](std::int32_t chunk) {
+        const std::int64_t ctas  = static_cast<std::int64_t>((chunk + rows - 1) / rows) *
+                                  geometry.query_heads;
+        const std::int64_t waves = (ctas + multiprocessors - 1) / multiprocessors;
+        return static_cast<double>(ctas) / static_cast<double>(waves * multiprocessors);
+    };
+    std::int32_t best   = requested;
+    double best_filled  = efficiency(requested);
+    const std::int32_t lo = std::max(kGranule, requested / 2 / kGranule * kGranule);
+    for (std::int32_t chunk = lo; chunk <= requested + 2 * kGranule; chunk += kGranule) {
+        const double filled = efficiency(chunk);
+        const bool nearer   = std::abs(chunk - requested) < std::abs(best - requested);
+        if (filled > best_filled + 1e-9 || (filled > best_filled - 1e-9 && nearer)) {
+            best        = chunk;
+            best_filled = filled;
+        }
+    }
+    return best;
 }
 
 std::size_t causal_softmax_attention_workspace_capacity_bytes(

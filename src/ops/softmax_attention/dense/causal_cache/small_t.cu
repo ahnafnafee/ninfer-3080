@@ -3,19 +3,58 @@
 #include "ops/softmax_attention/dense/causal_cache/launch.h"
 
 #include "core/paged_kv_storage.h"
+#include "ops/common/device_route.h"
 #include "ops/common/math.h"
 #include "ops/kv_cache/d256_profile.h"
 #include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t_bf16.cuh"
-#include "ops/softmax_attention/dense/causal_cache/small_t_i8.cuh"
+#include "ops/softmax_attention/dense/causal_cache/small_t_i8_launch.h"
 #include "core/device.h" // CUDA_CHECK
 #include "ninfer/ops/softmax_attention.h"
 
 #include <cstdint>
 #include <algorithm>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 
 namespace ninfer::ops::detail {
+
+std::string small_t_i8_route_key(std::int32_t q_heads, KvCacheStorage storage,
+                                 std::int32_t width) {
+    const char* coding = "int8";
+    switch (storage) {
+    case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+        coding = "rk8v4";
+        break;
+    case KvCacheStorage::RotatedLloyd4KeyInt4Value:
+        coding = "rk4v4";
+        break;
+    case KvCacheStorage::RotatedInt4KeyInt4ValueE8:
+        coding = "rk4v4-e8";
+        break;
+    case KvCacheStorage::RotatedE8RootKeyInt4Value:
+        coding = "rk2v4-e8";
+        break;
+    default:
+        break;
+    }
+    return "attn_i8_small/h" + std::to_string(q_heads) + "/" + coding + "/w" +
+           std::to_string(width);
+}
+
+int small_t_i8_routed_ctas_per_sm(std::int32_t q_heads, KvCacheStorage storage,
+                                  std::int32_t width, std::int32_t window) {
+    const std::string_view routed =
+        device_route_schedule(small_t_i8_route_key(q_heads, storage, width), window);
+    const std::size_t first = routed.find('x');
+    if (first == std::string_view::npos) { return 0; }
+    const std::size_t second = routed.find('x', first + 1);
+    if (second == std::string_view::npos || second != first + 2) { return 0; }
+    const char ctas = routed[first + 1];
+    return ctas >= '1' && ctas <= '8' ? ctas - '0' : 0;
+}
+
 namespace {
 
 // Supplies an upper bound for the device-side active-split policy over one explicit execution
@@ -110,9 +149,14 @@ std::int32_t causal_small_t_launch_capacity(CausalAttentionExecutionEnvelope env
 }
 
 // CTAs per SM of the partial kernel launch_tc_partial_i8 selects for this width and window (its
-// MinBlocksPerSm): one for the wide-CTA short-window routes, two otherwise.
+// MinBlocksPerSm): one for the wide-CTA short-window routes, two otherwise, or the device profile's
+// tier when it routes one.
 template <typename Geometry>
-int i8_partial_ctas_per_sm(std::int32_t tokens, std::int32_t window) {
+int i8_partial_ctas_per_sm(std::int32_t tokens, std::int32_t window, KvCacheStorage storage) {
+    if (const int routed = small_t_i8_routed_ctas_per_sm(Geometry::QHeads, storage, tokens, window);
+        routed > 0) {
+        return routed;
+    }
     if (tokens >= 6) { return window > 8198 ? 2 : 1; }
     if (tokens == 5) { return window > (Geometry::GroupSize == 6 ? 1029 : 4096) ? 2 : 1; }
     if (tokens == 4) { return window > 1029 ? 2 : 1; }
@@ -138,17 +182,20 @@ int device_multiprocessors() {
 // CTA time. The partial kernel and the reducer take this count and hold their per-window split
 // count to whole waves (causal_small_t_active_splits); zero leaves the tiers alone.
 template <typename Geometry>
-std::int32_t causal_small_t_wave_splits(std::int32_t tokens, std::int32_t implementation_window) {
+std::int32_t causal_small_t_wave_splits(std::int32_t tokens, std::int32_t implementation_window,
+                                        KvCacheStorage storage) {
     return device_multiprocessors() *
-           i8_partial_ctas_per_sm<Geometry>(tokens, implementation_window) / Geometry::KVHeads;
+           i8_partial_ctas_per_sm<Geometry>(tokens, implementation_window, storage) /
+           Geometry::KVHeads;
 }
 
 // The launch capacity the whole-wave policy can reach over the envelope.
 template <typename Geometry>
 std::int32_t causal_small_t_wave_capacity(std::int32_t capacity, std::int32_t tokens,
-                                          CausalAttentionExecutionEnvelope envelope) {
+                                          CausalAttentionExecutionEnvelope envelope,
+                                          KvCacheStorage storage) {
     const auto window = static_cast<std::int32_t>(envelope.max_visible_keys);
-    const int wave    = causal_small_t_wave_splits<Geometry>(tokens, window);
+    const int wave    = causal_small_t_wave_splits<Geometry>(tokens, window, storage);
     if (wave <= 0 || capacity <= wave) { return capacity; }
     return std::min(capacity, wave * div_up(div_up(window, kCausalSmallTSplitKeyLimit), wave));
 }
@@ -180,113 +227,6 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
             cache.block_tables.ne[0], invocation.width, invocation.full_width,
             invocation.column_begin, logical_capacity, scale, static_cast<float*>(partial_acc.data),
             static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
-    CUDA_CHECK(cudaGetLastError());
-}
-
-template <typename Geometry, int TokenTile, bool MultiBatch, bool Masked, typename CacheInput>
-void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
-                          PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
-                          std::int32_t logical_capacity, std::int32_t implementation_window,
-                          std::int32_t splits, std::int32_t wave_splits, Tensor& partial_acc,
-                          Tensor& partial_m, Tensor& partial_l, cudaStream_t stream) {
-    Tensor& cache_k       = cache.k_pages;
-    Tensor& cache_v       = cache.v_pages;
-    Tensor& cache_k_scale = cache.k_scale_pages;
-    Tensor& cache_v_scale = cache.v_scale_pages;
-    // A U8 value plane is the packed signed int4 coding (rk8v4 and the packed-key storages); a
-    // U8 key plane is a packed key coding, told apart by storage.
-    const bool packed_values = cache_v.dtype == DType::U8;
-    auto launch = [&]<int WarpsPerCta, int MinBlocksPerSm, int KeyBlock, bool DynamicArena>() {
-        const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
-        constexpr std::size_t kDynamicBytes =
-            DynamicArena ? static_cast<std::size_t>(4 * KeyBlock * kCausalHeadDim) : 0u;
-        auto issue = [&]<bool PackedValues, KvKeyCoding Keys>() {
-            if constexpr (DynamicArena) {
-                configure_cuda_device_once([&] {
-                    return cudaFuncSetAttribute(
-                        causal_attention_small_t_i8_tiled_kernel<
-                            Geometry, TokenTile, WarpsPerCta, MinBlocksPerSm, KeyBlock, DynamicArena,
-                            MultiBatch, Masked, CacheInput, PackedValues, Keys>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kDynamicBytes));
-                });
-            }
-            causal_attention_small_t_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta,
-                                                     MinBlocksPerSm, KeyBlock, DynamicArena,
-                                                     MultiBatch, Masked, CacheInput, PackedValues,
-                                                     Keys>
-            <<<grid, WarpsPerCta * 32, kDynamicBytes, stream>>>(
-                static_cast<const __nv_bfloat16*>(q.data), input,
-                static_cast<const std::int32_t*>(pos.data), static_cast<std::int8_t*>(cache_k.data),
-                static_cast<std::int8_t*>(cache_v.data), static_cast<__half*>(cache_k_scale.data),
-                static_cast<__half*>(cache_v_scale.data),
-                static_cast<const std::int32_t*>(cache.block_tables.data),
-                invocation.valid_columns == nullptr
-                    ? nullptr
-                    : static_cast<const std::int32_t*>(invocation.valid_columns->data),
-                invocation.table_rows == nullptr
-                    ? nullptr
-                    : static_cast<const std::int32_t*>(invocation.table_rows->data),
-                cache.block_tables.ne[0], invocation.full_width, invocation.column_begin,
-                logical_capacity, wave_splits, scale, static_cast<float*>(partial_acc.data),
-                static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
-        };
-        if (cache.storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
-            issue.template operator()<true, KvKeyCoding::Lloyd4>();
-        } else if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8) {
-            issue.template operator()<true, KvKeyCoding::Int4E8>();
-        } else if (cache.storage == KvCacheStorage::RotatedE8RootKeyInt4Value) {
-            issue.template operator()<true, KvKeyCoding::RootE8>();
-        } else if (packed_values) {
-            issue.template operator()<true, KvKeyCoding::Int8>();
-        } else {
-            issue.template operator()<false, KvKeyCoding::Int8>();
-        }
-    };
-    if constexpr (TokenTile >= 6) {
-        // Small grids need more warps per CTA. From 2K to 8K, Bc=64 halves key
-        // loop iterations; dynamic smem avoids penalizing the long-context path.
-        if (implementation_window > 128 && implementation_window <= 160) {
-            launch.template operator()<24, 1, 32, false>();
-        } else if (implementation_window <= 2054) {
-            launch.template operator()<12, 1, 32, false>();
-        } else if (implementation_window <= 8198) {
-            launch.template operator()<12, 1, 64, true>();
-        } else {
-            launch.template operator()<6, 2, 32, false>();
-        }
-    } else if constexpr (TokenTile == 5) {
-        if constexpr (Geometry::GroupSize == 6) {
-            // Two Q row tiles for the 27B group of six.
-            if (implementation_window > 128 && implementation_window <= 512) {
-                launch.template operator()<32, 1, 32, false>();
-            } else if (implementation_window <= 1029) {
-                launch.template operator()<16, 1, 32, false>();
-            } else {
-                launch.template operator()<8, 2, 32, false>();
-            }
-        } else {
-            // Three Q row tiles for the 35B group of eight. The 24/12-warp
-            // routes retain eight/four consumer warps per tile; the 6-warp
-            // route is reserved for long windows where CTA residency wins.
-            if (implementation_window > 128 && implementation_window <= 512) {
-                launch.template operator()<24, 1, 32, false>();
-            } else if (implementation_window <= 1029) {
-                launch.template operator()<24, 1, 32, false>();
-            } else if (implementation_window <= 4096) {
-                launch.template operator()<12, 1, 32, false>();
-            } else {
-                launch.template operator()<6, 2, 32, false>();
-            }
-        }
-    } else if constexpr (TokenTile == 4) {
-        if (implementation_window <= 1029) {
-            launch.template operator()<16, 1, 32, false>();
-        } else {
-            launch.template operator()<8, 2, 32, false>();
-        }
-    } else {
-        launch.template operator()<8, 2, 32, false>();
-    }
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -325,14 +265,16 @@ std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t 
             return std::min(capacity, std::max({4, grid_limit, page_limit}));
         }
         return i8_family
-                   ? causal_small_t_wave_capacity<CausalD256H24Kv4>(capacity, tokens, envelope)
+                   ? causal_small_t_wave_capacity<CausalD256H24Kv4>(capacity, tokens, envelope,
+                                                                           cache_storage)
                    : capacity;
     }
     if (q_heads == CausalD256H16Kv2::QHeads) {
         const int capacity =
             causal_small_t_launch_capacity<CausalD256H16Kv2>(envelope, tokens, cache_storage);
         return i8_family && batch_size == 1
-                   ? causal_small_t_wave_capacity<CausalD256H16Kv2>(capacity, tokens, envelope)
+                   ? causal_small_t_wave_capacity<CausalD256H16Kv2>(capacity, tokens, envelope,
+                                                                           cache_storage)
                    : capacity;
     }
     throw std::invalid_argument(
@@ -354,7 +296,8 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     const bool i8_family = kv_cache_is_int8_family(cache.storage);
     const std::int32_t wave_splits =
         i8_family && invocation.batch_size == 1
-            ? causal_small_t_wave_splits<Geometry>(invocation.width, implementation_window)
+            ? causal_small_t_wave_splits<Geometry>(invocation.width, implementation_window,
+                                                    cache.storage)
             : 0;
 
     // BF16 keeps its row-tile warp count; INT8 selects its producer/consumer
@@ -363,8 +306,8 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     do {                                                                                           \
         const auto launch_profile = [&]<bool MultiBatch, bool Masked>() {                          \
             if (kv_cache_is_int8_family(cache.storage)) {                                          \
-                launch_tc_partial_i8<Geometry, (TOKENS), MultiBatch, Masked>(                      \
-                    q, input, pos, scale, cache, invocation, logical_capacity,                     \
+                launch_small_t_i8<Geometry, (TOKENS), CacheInput>(                                 \
+                    MultiBatch, Masked, q, input, pos, scale, cache, invocation, logical_capacity, \
                     implementation_window, splits, wave_splits, partial_acc, partial_m, partial_l, \
                     stream);                                                                       \
             } else {                                                                               \

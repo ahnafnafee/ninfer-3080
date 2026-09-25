@@ -1,14 +1,44 @@
 #include "ops/linear_attention/gated_delta_net/chunked/launch.h"
 #include "ops/linear_attention/gated_delta_net/chunked/output.cuh"
 
+#include <array>
+#include <atomic>
+#include <cstddef>
+
 namespace ninfer::ops::detail::gated_delta_net::chunked {
 namespace {
 
 namespace kernel = output;
 
-constexpr std::int64_t kRtx5090SmCount = 170;
-constexpr std::int64_t kCtasPerSm      = 4;
-constexpr std::int64_t kTargetCtas     = kRtx5090SmCount * kCtasPerSm;
+// One resident wave of the output kernel on the current device: its SM count times the CTAs the
+// kernel keeps resident per SM (four on the parts it was tuned on). Cached per device index because
+// a model split over several GPUs launches each stage on its own device.
+template <bool MULTI_JOB>
+std::int64_t resident_wave_ctas() {
+    constexpr int kCachedDevices = 64;
+    static std::array<std::atomic<std::int64_t>, kCachedDevices> cache{};
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess || device < 0 || device >= kCachedDevices) {
+        return 170 * 4;
+    }
+    const std::int64_t known = cache[static_cast<std::size_t>(device)].load(std::memory_order_relaxed);
+    if (known > 0) { return known; }
+    int sms    = 0;
+    int blocks = 0;
+    constexpr int smem_bytes = kernel::kernel_dims::SMEM_BYTES;
+    if (cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device) != cudaSuccess ||
+        cudaFuncSetAttribute(kernel::output_kernel<MULTI_JOB>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes) != cudaSuccess ||
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, kernel::output_kernel<MULTI_JOB>,
+                                                      kernel::THREADS, smem_bytes) != cudaSuccess ||
+        sms <= 0 || blocks <= 0) {
+        cudaGetLastError();
+        return 170 * 4;
+    }
+    const std::int64_t ctas = static_cast<std::int64_t>(sms) * blocks;
+    cache[static_cast<std::size_t>(device)].store(ctas, std::memory_order_relaxed);
+    return ctas;
+}
 
 template <bool MULTI_JOB>
 cudaError_t launch_fixed(const chunk_output_config& cfg, dim3 grid, head_map qk_map, int chunks) {
@@ -40,10 +70,11 @@ cudaError_t launch_output(const chunk_output_config& cfg) {
     const auto qk_map     = head_map::of((int)cfg.H_qk, (int)cfg.H_v);
     const std::int64_t NT = cfg.L / BT;
 
-    // Keep at most one resident RTX 5090 wave and distribute chunks evenly
-    // across it. Small grids retain one logical job per CTA.
+    // Keep at most one resident wave of this device and distribute chunks evenly across it. Small
+    // grids retain one logical job per CTA.
+    const std::int64_t target_ctas    = resident_wave_ctas<true>();
     const std::int64_t logical_jobs   = NT * cfg.H_v;
-    const std::int64_t jobs_per_block = (logical_jobs + kTargetCtas - 1) / kTargetCtas;
+    const std::int64_t jobs_per_block = (logical_jobs + target_ctas - 1) / target_ctas;
     const std::int64_t grid_chunks    = (NT + jobs_per_block - 1) / jobs_per_block;
     NINFER_GATED_DELTA_NET_PROPAGATE(v.check_grid(grid_chunks, cfg.H_v));
 

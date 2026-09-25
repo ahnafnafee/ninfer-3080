@@ -3,6 +3,8 @@
 
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_kernels.h"
 
+#include "ops/common/device_route.h"
+
 #include <array>
 #include <limits>
 #include <stdexcept>
@@ -251,6 +253,22 @@ Q4Q5GdnInputPlan q4_q5_gdn_input_resolve_plan(const Q4Q5GdnInputProblem& problem
     if (!q4_q5_gdn_input_admits(problem)) {
         throw std::invalid_argument(
             "Q4/Q5 GDN input: exact problem or column count is not admitted");
+    }
+    using Id = Q4Q5GdnInputScheduleId;
+    static constexpr std::array<DeviceRouteCandidate<Id>, 9> kCandidates{{
+        {"independent_direct", Id::IndependentDirectFixed, 15},
+        {"small_t_mma", Id::SmallTMma, 32},
+        {"grouped_r64_c8", Id::GroupedMixedMmaR64C8, 0},
+        {"grouped_r64_c16", Id::GroupedMixedMmaR64C16, 0},
+        {"grouped_r64_c32", Id::GroupedMixedMmaR64C32, 0},
+        {"grouped_r64_c64", Id::GroupedMixedMmaR64C64, 0},
+        {"grouped_r64_c128", Id::GroupedMixedMmaR64C128, 0},
+        {"grouped_r32_c32_s2", Id::GroupedMixedMmaR32C32S2, 0},
+        {"grouped_r32_c64_s4", Id::GroupedMixedMmaR32C64S4, 0},
+    }};
+    if (const auto* routed = routed_candidate<Id>("q4_q5_gdn_input/5120x4096x12288", problem.cols,
+                                                  kCandidates)) {
+        return {routed->id};
     }
 
     for (const RouteSpec& route : kRoutes) {

@@ -144,7 +144,7 @@ static_assert(kCausalPromptI8SmemBytes == 93184);
 // where the INT8 path issues its cp.async, stay in flight across the PV MMAs, and are expanded into
 // the unchanged INT8 K tile before the tile barrier.
 template <typename Geometry, typename Metadata, bool PackedValues = false,
-          KvKeyCoding Keys = KvKeyCoding::Int8>
+          KvKeyCoding Keys = KvKeyCoding::Int8, bool PvF16 = false>
 __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8_kernel(
     const __nv_bfloat16* __restrict__ q, const std::int8_t* __restrict__ cache_k,
     const std::int8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
@@ -575,6 +575,9 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
             acc[n][3] *= alpha1;
         }
 
+        // PvF16: the tile's products are summed in FP16 (P is at most one after the running maximum
+        // and the tile spans Bc keys) and folded into the FP32 accumulator once per tile.
+        unsigned tile_acc[PvF16 ? PVNtPerWarp : 1][2] = {};
 #pragma unroll
         for (int k = 0; k < PVKs; ++k) {
             unsigned pf[4];
@@ -591,11 +594,28 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
                 ldmatrix_x2_t(vf[0], vf[1],
                               smem_addr(&v_f16[vrow * D + causal_prompt_swz(vrow, vcol)]));
 #if NINFER_PROMPT_I8_ABLATE == 0
-                mma_f16(acc[n][0], acc[n][1], acc[n][2], acc[n][3], pf[0], pf[1], pf[2], pf[3],
-                        vf[0], vf[1]);
+                if constexpr (PvF16) {
+                    mma_f16_f16acc(tile_acc[n][0], tile_acc[n][1], pf[0], pf[1], pf[2], pf[3],
+                                   vf[0], vf[1]);
+                } else {
+                    mma_f16(acc[n][0], acc[n][1], acc[n][2], acc[n][3], pf[0], pf[1], pf[2],
+                            pf[3], vf[0], vf[1]);
+                }
 #else
                 acc[n][0] += static_cast<float>(vf[0] & 1u); // keep the loads live
 #endif
+            }
+        }
+        if constexpr (PvF16) {
+#pragma unroll
+            for (int n = 0; n < PVNtPerWarp; ++n) {
+                const float2 top = __half22float2(*reinterpret_cast<const __half2*>(&tile_acc[n][0]));
+                const float2 bottom =
+                    __half22float2(*reinterpret_cast<const __half2*>(&tile_acc[n][1]));
+                acc[n][0] += top.x;
+                acc[n][1] += top.y;
+                acc[n][2] += bottom.x;
+                acc[n][3] += bottom.y;
             }
         }
         if (has_next) {
