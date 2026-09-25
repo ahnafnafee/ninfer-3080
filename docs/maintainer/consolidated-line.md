@@ -2,7 +2,9 @@
 
 `master` of this repository is the `master` of
 [ashalliants/ninfer-3090](https://github.com/ashalliants/ninfer-3090) (v0.11.0 and the multi-GPU
-pipeline stages) plus this fork's production behaviours and ternary work, the patches of
+pipeline stages, most of both written by Warlax (WarlaxZ); that line continues
+[Don-Chad/ninfer-3090](https://github.com/Don-Chad/ninfer-3090), a fork of Neroued's NInfer) plus
+this fork's production behaviours and ternary work, the patches of
 [TertiumOrganum1/ninfer-3090](https://github.com/TertiumOrganum1/ninfer-3090), ideas from
 [UDPSendToFailed/ninfer-4090](https://github.com/UDPSendToFailed/ninfer-4090), pull requests to
 [Neroued/ninfer](https://github.com/Neroued/ninfer) and work from the forks listed below. When the
@@ -43,7 +45,7 @@ Patches taken from TertiumOrganum1's fork of this line, with their authorship:
 
 | area | behaviour | where it lives in the tree |
 |---|---|---|
-| KV cache | `rk4v4-e8`: keys rotated by H256 as in `rk8v4`, scaled per G64 group by absmax/7 and rounded per octet to the nearest E8 point, stored as int4 nibbles (the coset bit is not stored); values keep the packed int4 G32 plane of `rk8v4`. 280 bytes per token and KV head against 408 | `core/paged_kv_storage.h`, `ops/kv_cache/int8_g64_codec.cuh`, `ops/kv_cache/append/`, the packed-key paths of `causal_cache/prompt_i8.cuh` and `small_t_i8.cuh`, `serve/serve_options.cpp` |
+| KV cache | `rk4v4-e8`: keys rotated by H256 as in `rk8v4`, scaled per G64 group by absmax/7 and rounded per octet to the nearest E8 point, stored as int4 nibbles (the coset bit is not stored); values keep the packed int4 G32 plane of `rk8v4`. 280 bytes per token and KV head against 408. The E8-lattice KV codecs first appeared in UDPSendToFailed's NInfer-4090 (2026-08-16), hardened there by Daniel Parker | `core/paged_kv_storage.h`, `ops/kv_cache/int8_g64_codec.cuh`, `ops/kv_cache/append/`, the packed-key paths of `causal_cache/prompt_i8.cuh` and `small_t_i8.cuh`, `serve/serve_options.cpp` |
 | ops | the T2 integer prefill route runs a 128x64 int8 tile: activations quantised per token and 128-K group, the int32 sum converted once per four MMAs; `NINFER_T2_A8_TILE=off` restores the 64-row kernel | `ops/linear/t2/t2_prefill_i8.cuh`, `ops/linear/t2/t2_a8.{h,cu}` |
 | frontend | a region that opens a function but fails the strict reader goes through a recovery pass; readable calls are kept and the counters reach the parse diagnostics and both request logs | `models/qwen3_5/frontend/tool_call_parser.{h,cpp}`, `serve/{operational,request}_log.cpp` |
 | context cache | a shared capture whose replacement releases more than assessed keeps the surplus; one that releases less is aborted like any other capture instead of failing the engine | `models/qwen3_5/program/transactions/capture.cpp` |
@@ -56,19 +58,19 @@ Ideas taken from UDPSendToFailed's NInfer-4090, re-implemented on this tree:
 
 | area | behaviour | where it lives in the tree |
 |---|---|---|
-| build | `ninfer_core` and `ninfer_ops` compile whole-program: no relocatable device code and no device link (1,155 kernels with a stack frame become 927; the server binary grows from 498 to 637 MB) | `cmake/NinferTargets.cmake`, `docs/maintainer/build-system.md` |
+| build | `ninfer_core` and `ninfer_ops` compile whole-program: no relocatable device code and no device link (1,155 kernels with a stack frame become 927; the server binary grows from 498 to 637 MB); Matt Anderson's change in NInfer-4090 | `cmake/NinferTargets.cmake`, `docs/maintainer/build-system.md` |
 | attention | the INT8-family small-T and prompt kernels read the query, key and value scales each lane needs from shared memory; the shuffles from a computed lane they replace compiled to out-of-line calls | `ops/softmax_attention/dense/causal_cache/{small_t_i8,prompt_i8}.cuh` |
 | serve | the listening socket sets `TCP_NODELAY`, which accepted connections inherit | `serve/http_server.cpp` |
 | ops | sigmoid and silu evaluate `ex2.approx` and a correctly rounded reciprocal; softplus keeps `expf`/`log1pf` unless the build sets `NINFER_SFU_SOFTPLUS`, which evaluates ln 2 · lg2(1 + 2^(x log2 e)) and takes the log1p series where e^x < 1/16 | `ops/common/math.cuh`, `CMakeLists.txt`, `tests/ops/test_gdn_gating.cpp` |
 | attention | a small-T split whose keys span more than the 64 page IDs it stages in shared memory reads each page's physical index from the block table; the visible-key limit rises from 262,144 to 1,048,576 | `ops/softmax_attention/dense/causal_cache/small_t{,_bf16,_fp8,_i8,_k8v4,_nvfp4}.cuh`, `small_t.cu`, `include/ninfer/ops/softmax_attention.h` |
 | model | positions up to four times `max_position_embeddings`; `--rope-yarn` applies YaRN at factor `max_context` / native as Hugging Face computes it (correction range from beta_fast 32 and beta_slow 1, attention factor 0.1 ln s + 1 on cos and sin) to the text and MTP layers; the DFlash adapter keeps plain RoPE | `ops/launcher/rope.cu`, `ops/kernel/rope.cuh`, `ops/wrapper/rope.cpp`, `models/qwen3_5/program/planning/startup.cpp`, `models/qwen3_5/execution/{attention,text}.cpp` |
 | KV cache | `rk2v4-e8`: keys rotated and scaled per G64 group as in `rk4v4-e8`, each 8-dimension block stored as the nearest of E8's 240 roots plus a byte of 4-bit log-radius and signed residual axis (64-byte key rows); values keep `rk8v4`'s plane; 216 bytes per token and KV head. The read side expands a block to int8 codes in the INT8 layout, so QK stays the same s8 MMA | `ops/kv_cache/e8_root_codec.cuh`, `ops/kv_cache/int8_g64_codec.cuh` (`KvKeyCoding`), `ops/kv_cache/append/`, `causal_cache/{prompt_i8,small_t_i8}.cuh`, `core/paged_kv_storage.h` |
-| core | Windows builds with `NINFER_D3D12_RESIDENCY`: `--wddm-evictable-budget` allocates owning device arenas from a shared D3D12 heap made resident at maximum priority (over-budget denied) and imported into CUDA, checked by a read-back, released with its arena; KV is planned against the adapter's memory less the weights and a 512 MiB desktop floor | `core/arena.{h,cu}`, `runtime/engine/model_instance.cpp` |
+| core | Windows builds with `NINFER_D3D12_RESIDENCY`: `--wddm-evictable-budget` allocates owning device arenas from a shared D3D12 heap made resident at maximum priority (over-budget denied) and imported into CUDA, checked by a read-back, released with its arena; KV is planned against the adapter's memory less the weights and a 512 MiB desktop floor; keylimesoda's opt-in and round-trip check are part of it | `core/arena.{h,cu}`, `runtime/engine/model_instance.cpp` |
 | core | `--disk-kv-directstorage` (Windows builds with `NINFER_DIRECTSTORAGE`): the disk tier's restores read a staging batch of claimed pages through one DirectStorage queue into host memory, check each CRC, and fall back to mapped reads when a batch fails or does not complete in 10 s; `dstorage.dll` is delay-loaded | `core/direct_storage_reader.{h,cpp}`, `core/disk_kv_bridge.cpp` (`restore_pages_direct`), `core/disk_kv_store.cpp` (`claim_read`), `CMakeLists.txt`, `apps/CMakeLists.txt` |
 | serve | a server default reasoning effort for requests that name none | `serve/serve_options.cpp`, `serve/translate.cpp` |
 | build | `NINFER_NVCC_SPLIT_COMPILE` (`--split-compile N`) and `NINFER_PTXAS_VERBOSE` | `CMakeLists.txt` |
 | speculative | MTP draft windows up to 15: the frame domain, the envelope array, the round transition and every guard take K up to 15 | `models/qwen3_5/program/round_buffers.h`, `internal.h`, `product/speculative_options.h` |
-| serve | `/metrics`, `/slots` and `/props` and llama.cpp model discovery fields (with Sergiusz Michalik's `/metrics`) | `serve/http_server.cpp`, `serve/openai_common.cpp` |
+| serve | `/metrics`, `/slots` and `/props` and llama.cpp model discovery fields (`/metrics` and `/slots` by Sergiusz Michalik) | `serve/http_server.cpp`, `serve/openai_common.cpp` |
 | serve | a WebUI compiled in from `NINFER_WEBUI_DIR`, served at `/` with the API base announced | `serve/webui/`, `serve/CMakeLists.txt`, `serve/http_server.cpp` |
 | serve | output limits bounded only by the context when a request names none | `serve/serve_options.cpp`, `serve/openai_*_request.cpp` |
 | ops | the block sampler keeps each thread's candidates in shared memory | `ops/kernel/sampling_device.cuh` |
@@ -108,8 +110,8 @@ From other forks and upstream `master`:
 | IMGillusion | `--context-cache-policy rolling`: a capture that extends a resident the request matched exactly inherits that resident's demand within its cache session | `runtime/engine/context_cache/resource_manager.h` |
 | IMGillusion | `--first-token-logprobs`: Chat Completions `top_logprobs` report the first generated token's log probability and alternatives from the logits copied before sampling | `core/token_logprobs.{h,cpp}`, `models/qwen3_5/execution/text.cpp`, `program/prefill.cpp`, `serve/openai_chat_{request,response}.cpp` |
 | [MirkoCovizzi/ninfer-rtx5090-mobile](https://github.com/MirkoCovizzi/ninfer-rtx5090-mobile) | `--adaptive-mtp`: each MTP round verifies the width its controller picks from measured draft survival and measured round cost, with CUDA Graphs per width | `models/qwen3_5/program/speculative/mtp_adaptive.h`, `decode.cpp`, `graphs.cpp`, `round_buffers.cpp` (`verification_view`), `planning/graph_profiles.cpp` |
-| [Wallawalla47/ninfer-custom](https://github.com/Wallawalla47/ninfer-custom) | `--fast-prefill-kernel`: an INT8-G64 prompt attention kernel with FP16 PV per 64-key tile, and prefill chunks rounded to whole attention waves | `ops/softmax_attention/dense/causal_cache/prompt_i8_fast.cuh`, `prompt.cu`, `planning/startup.cpp` |
-| Wallawalla47 | the engine worker recovers from an out-of-memory failure (with Gideon Zenz); `--kv-headroom-mib`, `--cuda-graph-allowance-mib`, `--thinking-budget-message` | `runtime/engine/engine_core.h`, `serve/serve_options.cpp` |
+| [Wallawalla47/ninfer-custom](https://github.com/Wallawalla47/ninfer-custom) (Ian Ranson) | `--fast-prefill-kernel`: an INT8-G64 prompt attention kernel with FP16 PV per 64-key tile (this line extends it to `rk8v4` and the packed key codings and lets the device profile turn it on), and prefill chunks rounded to whole attention waves | `ops/softmax_attention/dense/causal_cache/prompt_i8_fast.cuh`, `prompt.cu`, `planning/startup.cpp` |
+| Wallawalla47 (Ian Ranson) | the engine worker recovers from an out-of-memory failure (Gideon Zenz's change in gzenz/ninfer, ported by Ian Ranson); `--kv-headroom-mib`, `--cuda-graph-allowance-mib`, `--thinking-budget-message` | `runtime/engine/engine_core.h`, `serve/serve_options.cpp` |
 | [tmark00/ninfer](https://github.com/tmark00/ninfer) | `rk2v4-e8` root codes decoded from tables; the gated RMSNorm prefetch cutoff from the device's SM count; the WebUI's MCP traffic relayed behind `--webui-mcp-proxy`; the GDN projection test bound; LF chat templates and fixtures | `ops/kv_cache/e8_root_codec.cuh`, `ops/launcher/rmsnorm.cu`, `serve/mcp_proxy.{h,cpp}`, `.gitattributes` |
 | pelebel, natpate | the server announces openable URLs, indexes the API base and echoes preflight headers | `serve/operational_log.cpp`, `serve/http_server.cpp`, `serve/openai_common.cpp` |
 | Matt Anderson | registers for the wide Q5 split tiles and a two-row kernel from eight columns; an idle Engine fails only the request it cannot place | `ops/linear/q5/`, `runtime/engine/engine_core.h` |
@@ -139,9 +141,9 @@ Assessed and not taken:
   re-derived there, and the route exists only on native Blackwell builds.
 - Already in the base or in this line under another name: #61's per-image Vision budget
   (`--vision-max-merged`), #152's shared-prefix candidate at the system/developer frontier (the
-  Engine's structural candidate, kept enabled for OpenAI requests), #221's MTP topology classes,
+  Engine's structural candidate, kept enabled for OpenAI requests), #221's MTP topology classes (Mykhailo Dementii),
   #235's lower CUDA floor (12.8 here), the Windows builds of #59, #84 and #233, and #173's
-  `rk2v4-e8`.
+  `rk2v4-e8` (Daniel Parker's upstream PR of the E8-root codec that UDPSendToFailed's NInfer-4090 carried first).
 - #274 raises a context-cache default; `--max-shared-prefixes 7` gives the same capacity. #300 is
   an RFC bag whose items are in the base, taken above, or declined.
 - The LRU catalog policy, the host-state byte budget, the context-trace diagnostics and the
@@ -153,6 +155,23 @@ The ternary path is measured on one GPU; a ternary artifact split across devices
 pipeline stages (`--devices A,B,...`) has not been run. The Windows-only options
 (`NINFER_D3D12_RESIDENCY`, `NINFER_DIRECTSTORAGE`) pass a syntax check against Windows headers
 and have not been run.
+
+## Device profiles and the September 2026 performance round
+
+| area | behaviour | where it lives in the tree |
+|---|---|---|
+| ops | device route profiles: per hardware class and SM count, the schedule each route key takes per width band, installed per CUDA device before any Op runs; `DeviceRouteForce` for calibration | `ops/common/device_route.{h,cpp}` |
+| calibration | `calibrate_device_routes` times every route family through the inference dispatch on synthetic weights and caches, L2 flushed per sample; a candidate wins only 3 % ahead, again in a second interleaved round, and with output within 5 % of the compiled route | `calibration/device_calibration.{h,cu}`, `apps/calibrate/main.cpp` (`ninfer-calibrate`) |
+| runtime | profiles come from the user's file, then the built-in table (`device_profiles.json`, embedded at configure time: RTX 3090, 4090, 5090), else a calibration at first start that is saved; `--device-profile auto\|off\|calibrate`, `--device-profile-path` | `runtime/engine/device_profile.{h,cpp}`, `device_profiles_builtin.cpp.in`, `model_instance.cpp`, `serve/serve_options.cpp` |
+| attention | INT8-family small-T tiers routed by profile: warps, CTAs per SM, key block, split QK across producer warps (`q`), the next tile's codes and scales staged in registers a whole iteration ahead (`e`), both (`qe`) | `ops/softmax_attention/dense/causal_cache/small_t_i8{.cuh,_launch.cuh}`, `small_t.cu` |
+| attention | FP16 accumulation of P·V per key tile (small-T and INT8 prompt kernels), by profile (`attn_pv_f16`) or `NINFER_SMALLT_PV_F16` / `NINFER_PROMPT_PV_F16` | `small_t_i8.cuh`, `prompt_i8.cuh`, `ops/common/mma.cuh` |
+| attention | the fast prompt kernel also serves `rk8v4` (packed int4 values decoded from byte-pair `ldmatrix.trans`) and the packed key codings (`rk4v4`, `rk4v4-e8`, `rk2v4-e8`, expanded into the stage's INT8 tile); on by profile (`attn_prompt_fast`), `NINFER_PROMPT_FAST`, or `--fast-prefill-kernel` | `prompt_i8_fast.cuh`, `prompt.cu` |
+| planning | the prefill chunk is the multiple of 128 near the request whose prompt-attention grid leaves the least of a last wave idle on the device, for either prompt kernel (Ian Ranson's fast kernel rounded its own chunks down to whole waves); `NINFER_PREFILL_ALIGN=0` keeps the request | `causal_softmax_attention.cpp`, `models/qwen3_5/program/planning/startup.cpp` |
+| ops | grids sized from the device: the chunked GDN output wave from occupancy, the sparse-MoE prefill cap from the SM count | `linear_attention/gated_delta_net/chunked/output.cu`, `sparse_moe/prefill/sparse_moe_prefill_kernels.cu` |
+| ops | ternary small-T band up to 64 columns, with 16-row 32-column and 32-row 16-column K8 schedules | `ops/linear/t2/t2_a8.{h,cu}` |
+| graphs | MTP draft windows past eight verify columns build one CUDA Graph executable per profile (Mykhailo Dementii's topology classes, #221, cover up to eight) | `models/qwen3_5/program/planning/graph_profiles.cpp` |
+| graphs | MTP and one-token decode profiles share an executable only when every attention call they capture takes the same route, as `causal_softmax_attention_route_family` reports for the model's geometry and KV storage (BF16 takes the prompt kernel up to 128 keys); MTP class ids get a per-width stride of 64 | `models/qwen3_5/program/planning/graph_profiles.cpp`, `graphs.cpp`, `startup.cpp`, `ops/.../causal_softmax_attention.cpp` |
+| build | the INT8 small-T launch compiles in 28 units (width, geometry, input) | `ops/softmax_attention/sources.cmake` |
 
 ## Verification
 
@@ -187,6 +206,14 @@ and have not been run.
   structured output under MTP and DFlash2, adaptive MTP against fixed windows, and the disk tier
   end to end under MTP, DFlash2 and without speculation (a restored prefix answers exactly as the
   resident one did).
+- This round, on the final code: the full `ctest` (170 tests with `ninfer_device_profile_test`) on
+  an RTX 3090 (`sm_86`), RTX 4090 (`sm_89`) and RTX 5090 (`sm_120a`); the real-model tests with the
+  Bonsai and Qwen3.8 artifacts (the MoE and DFlash v1 tests need other artifacts, and the prefix test
+  has no prompt golden for the Bonsai template); each card started with no profile file, took its
+  built-in profile and wrote none; `ninfer_qwen3_5_mtp_graph_profiles_test` over both geometries,
+  every storage and the one-token profiles, and 21 server starts per card across KV storages, MTP
+  widths 3 to 15 (adaptive included), DFlash2, four lanes and small BF16 windows; four 60,000-token
+  needle documents at once returned all twelve codes on an RTX 5090.
 - sm_120a: on an RTX 5090 both the default compatibility build and the native build
   (`NINFER_SM120_NATIVE`) pass `ctest` (169 tests), and the native build converts and serves the
   RedHatAI Qwen3.6-35B-A3B NVFP4 checkpoint.

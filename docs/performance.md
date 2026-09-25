@@ -5,6 +5,7 @@
 >
 > | section | hardware | measured by |
 > |---|---|---|
+> | [Reference measurements, September 2026](performance/reference-2026-09.md): Ternary Bonsai 2 27B and Qwen3.8-27B at full context, the largest context per card, draft lengths 1 to 15 | RTX 3090, RTX 4090, RTX 5090, CUDA 13.1 | this line |
 > | [RTX 3090 (`sm_86`) findings](#rtx-3090-sm_86-findings-this-fork) below | RTX 3090, `sm_86`, CUDA 12.8 | this fork |
 > | [Vision residency on RTX 3090](performance/qwen3.8-27b.md#vision-residency-on-rtx-3090-groupwise-int-sm_86) | RTX 3090, `sm_86` | this fork |
 > | Every per-model page under `performance/` | **RTX 5090, `sm_120a`, CUDA 13.1** | upstream |
