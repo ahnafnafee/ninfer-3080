@@ -96,12 +96,13 @@ function Start-Server([string]$name, $cfg) {
     [ordered]@{ profile = $name; pid = $proc.Id; started = (Get-Date).ToString('o'); port = $cfg.port } |
         ConvertTo-Json | Set-Content -LiteralPath $StateFile -Encoding utf8
     Write-Host "starting $name ($($p.note))"
+    $shown = $null
     for ($i = 0; $i -lt 300; $i++) {
         if (Test-Ready $cfg) { Write-Host "serving $name on http://127.0.0.1:$($cfg.port)/v1"; return }
         if ($proc.HasExited) { break }
         if ($i % 5 -eq 4 -and (Test-Path -LiteralPath $Log)) {
             $last = Get-Content -LiteralPath $Log -Tail 1
-            if ($last) { Write-Host ('  ' + $last.Substring(0, [math]::Min(110, $last.Length))) }
+            if ($last -and $last -ne $shown) { Write-Host ('  ' + $last.Substring(0, [math]::Min(110, $last.Length))); $shown = $last }
         }
         Start-Sleep 1
     }
