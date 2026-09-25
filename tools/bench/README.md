@@ -197,6 +197,24 @@ worker aggregation uses the serving `throughput.host_work` interval deltas. The 
 temperature/top-p/top-k/min-p/presence/frequency profile explicitly, so model-default changes do
 not alter the measurement method.
 
+## Reference measurements (`refbench.py`)
+
+`refbench.py` drives one running `ninfer-serve` through the suites behind
+[the September 2026 reference tables](../../docs/performance/reference-2026-09.md): idle device
+memory, short chat (five 512-token answers), cold documents of given depths with a ~400-word
+answer (`--depth-question long`), needles at 33/66/90 % of a document, and concurrent requests.
+Documents are cut by tokens from text files under `--corpus-dir`:
+
+```bash
+python3 tools/bench/refbench.py --base-url http://127.0.0.1:8080 --model bonsai2-27b \
+  --out results/bonsai-rk8v4 --tokenizer tokenizer.json \
+  --corpus-dir eval/corpora/perplexity-1m/data/pg19,eval/corpora/perplexity-1m/data/wikitext \
+  --suites idle,warmup,accept,depth,niah --depths 1024,32768,131072,261120 \
+  --gen 512 --depth-question long --niah 261120
+```
+
+Rows land in `<out>/<suite>.jsonl`; a rerun skips the keys already there.
+
 ## Chat decode A/B (`run_chat_decode.py`)
 
 Decode rate on a chat prompt set through `ninfer-serve`'s OpenAI Chat Completions endpoint,
