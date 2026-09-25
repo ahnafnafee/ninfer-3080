@@ -1,6 +1,6 @@
 # The checks that do not need a GPU.
 #
-# Building this repository needs CUDA 12.8 and its tests need a real sm_86 device, so the suite
+# Building this repository needs CUDA 12.8 or newer and its tests need a real sm_86 device, so the suite
 # cannot run on a GitHub-hosted runner. Two things can, and both exist in the tree already without
 # anything invoking them:
 #
@@ -34,10 +34,10 @@ jobs:
     name: Config calculator arithmetic
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
       # No dependencies and no build step: the test loads the page's own <script> into a vm
       # sandbox, which is what keeps docs/config-calculator.html a single file.
       - name: Run docs/config-calculator.test.mjs
@@ -50,7 +50,7 @@ jobs:
     name: Host KV clamp arithmetic
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and run tests/host/test_host_kv_clamp.cpp
         run: |
           g++ -std=c++20 -Wall -Wextra -Isrc tests/host/test_host_kv_clamp.cpp \
@@ -61,7 +61,7 @@ jobs:
     name: Linux launcher and downloader guard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The checkout must not normalize line endings, or the CRLF check tests nothing. Git's
       # default is to write out whatever .gitattributes says, which is exactly what a release
       # archive would carry, so this is the honest input.
