@@ -11,14 +11,14 @@
     "96k": {
       "note": "Ternary Bonsai 2 Heretic, no speculation, 96K, rk2v4-e8 KV (RTX 3080: 70 tok/s short, 53 full)",
       "exe": "{repo}\\build-ninja\\apps\\ninfer-serve.exe",
-      "args": ["{models}\\Ternary-Bonsai-2-27B-Heretic-ninfer.ninfer", "--model-id", "bonsai2-heretic",
+      "args": ["{models}\\Ternary-Bonsai-2-27B-Heretic-ninfer.ninfer", "--model-id", "bonsai2-heretic-96k",
                "--max-context", "98304", "--kv-capacity", "98304", "--kv-dtype", "rk2v4-e8", "--gdn-state-fp16",
                "--max-concurrency", "1"]
     },
     "mtp48": {
       "note": "Ternary Bonsai 2 Heretic, MTP 3 drafts, 48K, rk4v4 KV for higher KV precision (RTX 3080: 137 tok/s short)",
       "exe": "{repo}\\build-ninja\\apps\\ninfer-serve.exe",
-      "args": ["{models}\\Ternary-Bonsai-2-27B-Heretic-ninfer.ninfer", "--model-id", "bonsai2-heretic",
+      "args": ["{models}\\Ternary-Bonsai-2-27B-Heretic-ninfer.ninfer", "--model-id", "bonsai2-heretic-48k",
                "--max-context", "49152", "--kv-capacity", "49152", "--kv-dtype", "rk4v4", "--gdn-state-fp16",
                "--spec", "mtp", "--draft-tokens", "3", "--max-concurrency", "1"]
     }
