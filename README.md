@@ -1,3 +1,14 @@
+# NInfer-3080
+
+This fork runs NInfer on a **10 GB RTX 3080 under native Windows**. It builds with MSVC and CUDA
+13.x, ships a built-in RTX 3080 device profile, and adds `ninfer-switch` for Windows. With Ternary
+Bonsai 2 27B it serves 139 tok/s on short answers with MTP at a 64K window, and keeps 53 tok/s with
+a 96K window nearly full. Setup, model choice and measurements:
+[docs/rtx-3080.md](docs/rtx-3080.md). Everything below is the NInfer-3090 consolidated README this
+fork builds on.
+
+---
+
 # NInfer-3090 consolidated
 
 One line of [NInfer](https://github.com/Neroued/ninfer) for the RTX 3090, RTX 4090 and RTX 5090,
