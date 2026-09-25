@@ -114,14 +114,24 @@ std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
     // profiles of that class through an in-place update, which cannot cross a change of node
     // count. Past a verify width of six the attention route turns on the envelope visible-key
     // count, so the frontier breaks where the route flips and the class follows the same
-    // predicate; the MTP draft cap (five) keeps both inert today.
+    // predicate.
     const std::uint32_t flip_target = verify_route_flip_target(verify_window);
     if (flip_target != 0U) { add_shifted(flip_target, verify_window + 1); }
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
 
     std::vector<GraphExecutionProfile> profiles = graph_profiles_through(capacity - 1, ends);
-    for (GraphExecutionProfile& profile : profiles) {
+    // Past eight verify columns the small-T attention runs in chunks whose launches change with the
+    // window in more places than that flip, and an in-place update across them fails at startup
+    // (MTP with 10 or 15 drafts). Those widths give every profile its own executable, as DFlash2
+    // does.
+    constexpr std::uint32_t kSmallTColumns = 8;
+    for (std::size_t index = 0; index < profiles.size(); ++index) {
+        GraphExecutionProfile& profile = profiles[index];
+        if (verify_window + 1U > kSmallTColumns) {
+            profile.topology_class = static_cast<std::uint32_t>(index);
+            continue;
+        }
         const std::uint32_t target_max = static_cast<std::uint32_t>(std::min<std::uint64_t>(
             capacity, static_cast<std::uint64_t>(profile.max) + verify_window + 1ULL));
         profile.topology_class =
