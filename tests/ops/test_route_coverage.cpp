@@ -210,6 +210,7 @@ int main() {
                                                                          cols})
                                .schedule;
                        })},
+#if defined(NINFER_SM8X_COMPAT)
                        {"attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c32.s4",
                         "attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c64.s4",
                         "attn_input_proj.q4_q5.mixed.r32.c32.k128.s2",
@@ -217,6 +218,13 @@ int main() {
                         "attn_input_proj.q4_q5.pair.r32.c64.s3",
                         "attn_input_proj.q4_q5.pair.r32.c64.s4",
                         "attn_input_proj.q4_q5.parent_split_fixed"}));
+#else
+                       // A native sm_120 build takes upstream's routes: the mixed and pair tiles
+                       // and ParentSplitFixed run there, and the sm_86 small-T MMA does not.
+                       {"attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c32.s4",
+                        "attn_input_proj.q4_q5.grouped_homogeneous_pair.mma.r32.c64.s4",
+                        "attn_input_proj.q4_q5.small_t.mma"}));
+#endif
 
     std::size_t total = 0;
     bool identity_changed = false;
@@ -272,7 +280,11 @@ int main() {
     //
     // All of them are kept on purpose: deleting an upstream schedule costs merge effort at every
     // future catch-up for no measured gain here. The point is that the set is written down.
+#if defined(NINFER_SM8X_COMPAT)
     constexpr std::size_t kExpectedUnrouted = 32;
+#else
+    constexpr std::size_t kExpectedUnrouted = 28;
+#endif
     if (total != kExpectedUnrouted) {
         std::cerr << "route coverage changed: " << total << " unrouted schedules, expected "
                   << kExpectedUnrouted
