@@ -76,6 +76,15 @@ __device__ __forceinline__ void mma_fp8_e4m3(float& c0, float& c1, float& c2, fl
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
+// TF32 MMA consumes already converted operands. Passing arbitrary FP32 bit patterns directly
+// discards their low mantissa bits on sm_86 instead of rounding them to nearest.
+__device__ __forceinline__ unsigned float_to_tf32_bits(float value) {
+    unsigned bits;
+    asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(bits) : "f"(value));
+    return bits;
+}
+
+// Every operand must be a TF32 encoding, including exact widened BF16 values.
 __device__ __forceinline__ void mma_tf32_bits(float& c0, float& c1, float& c2, float& c3,
                                               unsigned a0, unsigned a1, unsigned a2, unsigned a3,
                                               unsigned b0, unsigned b1) {
@@ -87,8 +96,9 @@ __device__ __forceinline__ void mma_tf32_bits(float& c0, float& c1, float& c2, f
 
 __device__ __forceinline__ void mma_tf32(float& c0, float& c1, float& c2, float& c3, float a0,
                                          float a1, float a2, float a3, float b0, float b1) {
-    mma_tf32_bits(c0, c1, c2, c3, __float_as_uint(a0), __float_as_uint(a1), __float_as_uint(a2),
-                  __float_as_uint(a3), __float_as_uint(b0), __float_as_uint(b1));
+    mma_tf32_bits(c0, c1, c2, c3, float_to_tf32_bits(a0), float_to_tf32_bits(a1),
+                  float_to_tf32_bits(a2), float_to_tf32_bits(a3), float_to_tf32_bits(b0),
+                  float_to_tf32_bits(b1));
 }
 
 __device__ __forceinline__ void mma_nvfp4_e4m3(float& c0, float& c1, float& c2, float& c3,

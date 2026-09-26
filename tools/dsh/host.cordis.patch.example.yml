@@ -1,0 +1,12 @@
+# Merge this operation into the DSH home's cordis.patch.yml once.
+# Update an existing native-ninfer row instead of registering it twice.
+- insert:
+    - id: native-ninfer
+      name: '{{NATIVE_PLUGIN_URL}}'
+      config:
+        baseURL: http://127.0.0.1:18020/v1
+        model: bonsai2-heretic
+        maxTokens: 8192
+        summaryMaxTokens: 4096
+        minOutputTokens: 4096
+        reserveTokens: 256

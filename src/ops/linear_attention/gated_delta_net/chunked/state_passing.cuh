@@ -13,6 +13,7 @@
 namespace ninfer::ops::detail::gated_delta_net::chunked::state_passing {
 
 using ninfer::ops::mma_tf32_bits;
+using ninfer::ops::float_to_tf32_bits;
 using ninfer::ops::ldmatrix_x2;
 using ninfer::ops::ldmatrix_x2_t;
 using ninfer::ops::smem_addr;
@@ -391,6 +392,8 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
                 const unsigned b_addr = smem_addr(&snap.at(b_row, b_col));
                 unsigned ub0, ub1;
                 ldmatrix_x2(ub0, ub1, b_addr);
+                ub0 = float_to_tf32_bits(__uint_as_float(ub0));
+                ub1 = float_to_tf32_bits(__uint_as_float(ub1));
 
 #pragma unroll
                 for (int m_mm1 = 0; m_mm1 < M_TILES_MM1_PW; ++m_mm1) {
@@ -477,11 +480,11 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
         for (int kt = 0; kt < K_TILES_MM2; ++kt) {
             const int k_off_local = kt * MMA_K;
 
-            const int row_t0 = k_off_local + lane_t;
-            const int row_t1 = row_t0 + 4;
-            const int col_g  = warp_d_local + lane_g;
-            const float b0   = vd_view.at(row_t0, col_g);
-            const float b1   = vd_view.at(row_t1, col_g);
+            const int row_t0  = k_off_local + lane_t;
+            const int row_t1  = row_t0 + 4;
+            const int col_g   = warp_d_local + lane_g;
+            const unsigned b0 = float_to_tf32_bits(vd_view.at(row_t0, col_g));
+            const unsigned b1 = float_to_tf32_bits(vd_view.at(row_t1, col_g));
 
 #pragma unroll
             for (int m = 0; m < M_TILES_H_PW; ++m) {
@@ -495,7 +498,7 @@ __launch_bounds__(kernel_dims<NStrip>::THREADS, kernel_dims<NStrip>::MIN_BLOCKS)
                 unpack_bf16x2_to_fp32_bits(packed1, ua1, ua3);
 
                 mma_tf32_bits(h_frag[m][0], h_frag[m][1], h_frag[m][2], h_frag[m][3], ua0, ua1, ua2,
-                              ua3, __float_as_uint(b0), __float_as_uint(b1));
+                              ua3, b0, b1);
             }
         }
 

@@ -1,0 +1,3 @@
+name: Bonsai 2 Heretic (RTX 3080, 64K)
+description: Local coding with 64K context, FP32 recurrent state, bounded medium thinking, MTP 3, exact context checks, concise tools, and retrievable history checkpoints.
+order: 3

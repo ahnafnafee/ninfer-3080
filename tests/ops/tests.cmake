@@ -36,6 +36,11 @@ ninfer_add_op_test(ninfer_linear_topk_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_linear_topk.cu"
   LIBRARIES ninfer_ops)
 
+# Operand-rounding accuracy of the TF32 primitive used by the chunked GDN recurrence.
+ninfer_add_op_test(ninfer_tf32_mma_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_tf32_mma.cu"
+  LIBRARIES ninfer_ops)
+
 ninfer_add_op_test(ninfer_candidate_selector_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_candidate_selector.cpp"
   LIBRARIES ninfer_ops)

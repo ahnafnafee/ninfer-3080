@@ -1,6 +1,26 @@
 {
   "port": 8080,
   "profiles": {
+    "reason64": {
+      "note": "Default: Bonsai 2 Heretic, 64K minimum, medium reasoning capped at 2048, RK2 KV, FP32 recurrent state, MTP 3",
+      "minimumContext": 65536,
+      "exe": "{repo}\\build-ninja\\apps\\ninfer-serve.exe",
+      "args": ["{models}\\Ternary-Bonsai-2-27B-Heretic-ninfer.ninfer", "--model-id", "bonsai2-heretic",
+               "--max-context", "65536", "--kv-capacity", "65536", "--kv-dtype", "rk2v4-e8",
+               "--prefill-chunk", "128", "--default-reasoning-effort", "medium",
+               "--default-thinking-budget", "2048",
+               "--device-state-slots", "0", "--host-state-slots", "4",
+               "--default-max-tokens", "8192",
+               "--spec", "mtp", "--draft-tokens", "3", "--max-concurrency", "1"]
+    },
+    "reason8": {
+      "note": "Short-context precision option: medium reasoning, INT8 KV at 8K, FP32 recurrent state, MTP 3 drafts",
+      "exe": "{repo}\\build-ninja\\apps\\ninfer-serve.exe",
+      "args": ["{models}\\Ternary-Bonsai-2-27B-Heretic-ninfer.ninfer", "--model-id", "bonsai2-heretic",
+               "--max-context", "8192", "--kv-capacity", "8192", "--kv-dtype", "int8",
+               "--default-reasoning-effort", "medium",
+               "--spec", "mtp", "--draft-tokens", "3", "--max-concurrency", "1"]
+    },
     "mtp": {
       "note": "Ternary Bonsai 2 Heretic, MTP 3 drafts, 64K, rk2v4-e8 KV (RTX 3080: 139 tok/s short, 94 full)",
       "exe": "{repo}\\build-ninja\\apps\\ninfer-serve.exe",
@@ -14,6 +34,13 @@
       "args": ["{models}\\Ternary-Bonsai-2-27B-Heretic-ninfer.ninfer", "--model-id", "bonsai2-heretic-96k",
                "--max-context", "98304", "--kv-capacity", "98304", "--kv-dtype", "rk2v4-e8", "--gdn-state-fp16",
                "--max-concurrency", "1"]
+    },
+    "precision16": {
+      "note": "Ternary Bonsai 2 Heretic, MTP 3 drafts, 16K, INT8 KV for higher cache precision on a 10 GB RTX 3080",
+      "exe": "{repo}\\build-ninja\\apps\\ninfer-serve.exe",
+      "args": ["{models}\\Ternary-Bonsai-2-27B-Heretic-ninfer.ninfer", "--model-id", "bonsai2-heretic-precision",
+               "--max-context", "16384", "--kv-capacity", "16384", "--kv-dtype", "int8", "--gdn-state-fp16",
+               "--spec", "mtp", "--draft-tokens", "3", "--max-concurrency", "1"]
     },
     "mtp48": {
       "note": "Ternary Bonsai 2 Heretic, MTP 3 drafts, 48K, rk4v4 KV for higher KV precision (RTX 3080: 137 tok/s short)",

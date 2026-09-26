@@ -84,6 +84,12 @@ function Start-Server([string]$name, $cfg) {
     foreach ($a in $argv) {
         if ($a -match '\.(ninfer|gguf)$' -and -not (Test-Path -LiteralPath $a)) { throw "model not found: $a" }
     }
+    $ctx = [array]::IndexOf($argv, '--max-context')
+    $cap = [array]::IndexOf($argv, '--kv-capacity')
+    $minimumContext = if ($p.minimumContext) { [int]$p.minimumContext } else { 16384 }
+    if ($p.minimumContext -and ($ctx -lt 0 -or $minimumContext -lt 1 -or $minimumContext -gt [int]$argv[$ctx + 1])) {
+        throw "profile '$name' has an invalid minimumContext"
+    }
     if (Stop-Server $cfg) { Write-Host 'stopped the running server' }
     $o = Get-Owner $cfg
     if ($o -and -not $o.Ours) {
@@ -93,14 +99,12 @@ function Start-Server([string]$name, $cfg) {
     Write-Host "starting $name ($($p.note))"
     # The desktop's own share of the card moves by several hundred MB, so a window that fit when the
     # profile was measured can be refused later. NInfer refuses before loading anything else, so
-    # stepping --max-context and --kv-capacity down by 8K and retrying is cheap; nothing else retries.
-    $ctx = [array]::IndexOf($argv, '--max-context')
-    $cap = [array]::IndexOf($argv, '--kv-capacity')
+    # stepping down by 8K is cheap, but an explicit minimumContext is a hard floor.
     while ($true) {
         if (Invoke-Launch $name $exe $argv $cfg) { return }
         $refused = (Test-Path -LiteralPath $Log) -and (Select-String -LiteralPath $Log -Pattern 'runtime reservation requires' -Quiet)
-        if (-not $refused -or $ctx -lt 0 -or [int]$argv[$ctx + 1] -le 16384) { break }
-        $smaller = [int]$argv[$ctx + 1] - 8192
+        if (-not $refused -or $ctx -lt 0 -or [int]$argv[$ctx + 1] -le $minimumContext) { break }
+        $smaller = [math]::Max($minimumContext, [int]$argv[$ctx + 1] - 8192)
         $argv[$ctx + 1] = "$smaller"
         if ($cap -ge 0 -and $argv[$cap + 1] -ne 'auto') { $argv[$cap + 1] = "$smaller" }
         Write-Host "  not enough free VRAM for that window; retrying with $smaller tokens" -ForegroundColor Yellow

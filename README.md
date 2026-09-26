@@ -62,7 +62,8 @@ Tokens per second. "Nearly full" is one request whose prompt fills about 92% of 
 - **Without speculation, speed is the limit.** A 104K window starts, but decode drops to 49.7 tok/s
   at 99,391 tokens, so 96K is the largest window that stays above 50 tok/s when full.
 - **The desktop moves the ceiling.** The monitor's share of the card varied from 0.4 to 1.3 GB during
-  these runs. At the high end the 64K MTP window does not fit, and `ninfer-switch` starts it at 56K.
+  these runs. At the high end the historical `mtp` profile fell back to 56K. The current
+  `reason64` default instead refuses startup if its full 64K allocation cannot fit.
 
 ### Perplexity (KV cache quality)
 
@@ -126,7 +127,7 @@ MTP in llama.cpp made the ternary models slower on this card (58 down to 43-51 t
 3. **Serve it.** Add `tools\windows` to `PATH`, then:
 
    ```text
-   ninfer-switch mtp
+   ninfer-switch reason64
    ```
 
 The server listens on `http://127.0.0.1:8080/v1` and speaks both the OpenAI and the Anthropic API.
@@ -135,14 +136,35 @@ The server listens on `http://127.0.0.1:8080/v1` and speaks both the OpenAI and 
 
 | Profile | Model id | Use it for |
 |---|---|---|
-| `mtp` | `bonsai2-heretic` | everyday use: fastest, up to a 64K window |
+| `reason64` (default) | `bonsai2-heretic` | at least 64K, medium reasoning, compressed KV, FP32 recurrent state and MTP; cached state snapshots in host RAM |
+| `reason8` | `bonsai2-heretic` | optional short-context precision: INT8 KV and FP32 recurrent state at 8K, with MTP |
+| `mtp` | `bonsai2-heretic` | up to a 64K window with more aggressive cache compression |
 | `96k` | `bonsai2-heretic-96k` | long documents: the largest window that stays above 50 tok/s |
 | `mtp48` | `bonsai2-heretic-48k` | higher KV precision (`rk4v4`) at 48K |
+| `precision16` | `bonsai2-heretic-precision` | INT8 KV for higher cache precision at 16K, with MTP |
 
 Profiles live in [`tools/windows/profiles.json`](tools/windows/profiles.json). The official,
 non-abliterated model is
 [WaveCut/Ternary-Bonsai-2-27B-NInfer-v3](https://huggingface.co/WaveCut/Ternary-Bonsai-2-27B-NInfer-v3);
 point a profile at it to serve it instead.
+
+For short contexts, `precision16` improves cache precision while keeping the weights compressed
+and using native Ampere arithmetic. On the measured 256-token prompt it decoded at 127.5 tok/s
+versus 119.5 for `rk2v4-e8` at the same 16K capacity; on the quick perplexity corpus it scored
+5.8751 versus 6.0881. See [RTX 3080 precision](docs/rtx-3080-precision.md) for the workload,
+memory tradeoffs, verification limits, and the capacity analysis of the original Huihui 27B model.
+
+The default `reason64` keeps thinking enabled at `medium` effort, limits each thinking phase to
+2,048 tokens within an 8,192-token output allowance, and uses FP32 recurrent state.
+The CUDA GDN path now explicitly rounds FP32 operands before native TF32 matrix operations;
+independent numerical regressions fail with the old arithmetic and pass with the correction.
+All six short-context diagnostic coding runs finished naturally and their functions passed the independent
+checks, but two answers still contained invalid generated tests. These changes improve numerical
+precision and mitigate observed overthinking; they do not establish a universal looping fix.
+See the guide's [reliability findings](docs/rtx-3080-precision.md#reasoning-reliability).
+
+`ninfer-switch start` remembers the last profile; when no saved choice exists it selects
+`reason64`. Select `ninfer-switch reason64` once to replace a previously remembered profile.
 
 ## ninfer-switch
 
@@ -158,14 +180,17 @@ window that started it.
 | `ninfer-switch start` | start the last profile again |
 | `ninfer-switch list` | list the profiles |
 
-- **Short on VRAM?** When NInfer refuses a window, the tool retries 8K smaller (down to 16K) and says
-  which window it got.
+- **Short on VRAM?** `reason64` refuses to start rather than shrinking below its 64K minimum.
+  Other profiles retry in 8K steps down to their `minimumContext`, or 16K when none is specified.
 - **Your own profiles.** A second file named by `NINFER_PROFILES` adds or replaces profiles and can
   set `"port"` and `"models"`, so servers of other engines fit behind the same command.
 - **Safe on a shared port.** It only stops server binaries it can start; anything else on the port is
   reported and left alone.
 
 ## Connecting a client
+
+The [DSH Bonsai preset bundle](tools/dsh/README.md) includes the local plugins, configuration
+fragments, installation steps and offline regression tests used for the 64K coding workflow.
 
 Point any OpenAI-compatible client at the endpoint, with the model id of the running profile. The
 server needs no key; for clients that insist on one, any placeholder works.
@@ -175,12 +200,13 @@ Thinking is on by default. Choose the level per request with `reasoning_effort`:
 | `reasoning_effort` | Effect |
 |---|---|
 | `none` | thinking off |
-| `medium` | shorter reasoning |
-| `xhigh` | full reasoning, the default |
+| `medium` | no extra extended-reasoning instruction; default in `reason64` and `reason8` |
+| `xhigh` | extended reasoning; checkpoint default in the other profiles |
 
-`low` is accepted, but this checkpoint does not support it and reasons about as long as `xhigh`. For
-a client with an off / low / medium / high ladder, send `none` / `medium` / `medium` / `xhigh`; that
-mapping also works with llama.cpp, whose Qwen template rejects `high`.
+The Qwen3.8 template also accepts `low`, which adds an instruction to keep thinking brief.
+An effort instruction alone is not a token limit. `reason64` additionally applies its 2,048-token
+thinking budget to thinking-enabled requests; non-thinking requests are unaffected. Clients should
+leave at least 4,096 output tokens available so that closing the thinking phase leaves room to act.
 
 ## Building
 

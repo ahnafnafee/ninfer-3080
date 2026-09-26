@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -27,30 +28,13 @@ constexpr ReductionCriterion gated_delta_net_output_bf16_criterion() {
             /*gross_relative_to_max_reference=*/kBf16GrossRelativeFloor};
 }
 
-// The state output is FP32, so #20's BF16 floor was left off it on the grounds that dtype rounding
-// of the *output* cannot be its floor. That is true and beside the point: measured, the error's
-// source is BF16 anyway, and the floor does reach it.
-//
-// NINFER_OP_REPORT_STATS=1 over the whole matrix splits cleanly in two:
-//
-//     path                                  max_abs    max_reference   steps
-//     decode / small-T / batch update      1.2e-8 .. 3.5e-8   ~0.09     0.00
-//     exact chunk / chunk-tail / two-chunk 4.6e-4 .. 8.1e-4   ~0.23     0.53-0.88
-//
-// The non-chunked paths are exact to eight decimal places -- there is no accumulation to speak of.
-// Everything above 1e-4 comes from the chunked recurrence, where the carried state crosses a BF16
-// intermediate at each chunk boundary. Slightly under one BF16 rounding step of the state's own
-// magnitude is exactly what one such round-trip costs, so this *is* the BF16 argument, arriving
-// through the carried state rather than through the output dtype.
-//
-// That makes the previous 3.9e-3 the same mistake #20 was written to fix. It is about 1.0 rounding
-// step, and the observed worst case is 0.88 of one -- 12% headroom, and the bound and the error
-// are the same quantity. Use `kBf16GrossRelativeFloor` (two steps) like every other criterion the
-// audit touched, which puts the worst observed case at 0.44 of its limit.
-//
-// `relative_l2` is untouched at 2.7e-3 against a measured 2.582e-3. It sits at 0.96, which is
-// tight, but it is the criterion that constrains kernel accuracy and #20's convention leaves it
-// alone deliberately -- loosening it would stop the chunked recurrence being checked at all.
+// FP32 state storage does not imply FP32-only arithmetic. The chunked path materializes
+// normalized Q/K and its W/U factors in BF16 and rounds matrix operands to TF32. These internal
+// approximations affect the final state even though that state remains FP32 between chunks.
+// The gross-error bound therefore allows two BF16 steps at the reference state's magnitude;
+// relative L2 separately constrains the aggregate recurrence error against the FP64 oracle.
+// Recurrent and chunked routes share this criterion so route selection does not change the
+// public numerical contract. TF32 operand rounding has separate regression coverage.
 constexpr ReductionCriterion gated_delta_net_state_fp32_criterion() {
     return {/*relative_l2=*/2.7e-3, /*gross_absolute=*/1.0e-5,
             /*gross_relative_to_max_reference=*/kBf16GrossRelativeFloor};
@@ -448,6 +432,71 @@ int contract_rejection_cases() {
     return failures;
 }
 
+int chunk_state_operand_rounding_case() {
+    constexpr int kQkHeads    = 16;
+    constexpr int kValueHeads = 48;
+    constexpr int kTokens     = 64;
+    // Three quarters of a TF32 step above one distinguishes nearest rounding from truncation.
+    constexpr float kInitial = 1.0F + 0x1.8p-11F;
+    const float scale        = 1.0F / std::sqrt(static_cast<float>(kStateDim));
+    gdn_ref::Inputs in;
+    in.head_dim    = kStateDim;
+    in.qk_heads    = kQkHeads;
+    in.value_heads = kValueHeads;
+    in.tokens      = kTokens;
+    in.q.assign(kStateDim * kQkHeads * kTokens, 0.0F);
+    in.k.assign(in.q.size(), 0.0F);
+    in.v.assign(kStateDim * kValueHeads * kTokens, 0.0F);
+    in.g.assign(kValueHeads * kTokens, 0.0F);
+    in.beta.assign(in.g.size(), 0.0F);
+    in.state.assign(kStateDim * kStateDim * kValueHeads, 0.0F);
+    for (int head = 0; head < kQkHeads; ++head) {
+        in.k[head * kStateDim] = 1.0F;
+        for (int token = 0; token < kTokens; ++token) {
+            in.q[(token * kQkHeads + head) * kStateDim] = 1.0F;
+        }
+    }
+    for (int head = 0; head < kValueHeads; ++head) {
+        in.beta[head] = 1.0F;
+        for (int value = 0; value < kStateDim; ++value) {
+            in.state[(head * kStateDim + value) * kStateDim] = kInitial;
+        }
+    }
+    const gdn_ref::Result ref = gdn_ref::evaluate(in, scale, false);
+    DeviceInputs device(in);
+    GuardedDeviceBuffer state(in.state.size() * sizeof(float));
+    GuardedDeviceBuffer out(in.v.size() * sizeof(std::uint16_t));
+    state.copy_from_host(in.state.data(), state.bytes());
+    out.fill(0xff);
+    Tensor q(device.q.p, DType::BF16, {kStateDim, kQkHeads, kTokens});
+    Tensor k(device.k.p, DType::BF16, {kStateDim, kQkHeads, kTokens});
+    Tensor v(device.v.p, DType::BF16, {kStateDim, kValueHeads, kTokens});
+    Tensor g(device.g.p, DType::FP32, {kValueHeads, kTokens});
+    Tensor beta(device.beta.p, DType::FP32, {kValueHeads, kTokens});
+    Tensor state_tensor(state.data(), DType::FP32, {kStateDim, kStateDim, kValueHeads});
+    Tensor out_tensor(out.data(), DType::BF16, {kStateDim, kValueHeads, kTokens});
+    WorkspaceArena workspace(ops::gated_delta_net_workspace_capacity_bytes(
+        kQkHeads, kValueHeads, false, kTokens, kTokens));
+    ops::gated_delta_net(q, k, v, g, beta, scale, false, workspace, state_tensor, out_tensor,
+                         nullptr);
+    cuda_synchronize();
+
+    // The exact recurrence erases the selected state coordinate at token zero; later beta=0
+    // and g=0 leave that zero unchanged. All BF16 factors are exact in this fixture, so the
+    // only lossy state operand is kInitial. Its nearest-TF32 error is at most half a step;
+    // allow four FP32 epsilons for the addition. This bound also admits a more accurate route.
+    constexpr PointwiseCriterion state_criterion{
+        0x1p-11 + 4.0 * std::numeric_limits<float>::epsilon() * kInitial, 0.0};
+    int failures =
+        verify_pointwise("chunk state operand rounding", read_f32(state.data(), in.state.size()),
+                         ref.final_state, state_criterion);
+    failures += state.verify_guards("chunk state operand rounding state");
+    failures += out.verify_guards("chunk state operand rounding output");
+    failures += verify_common_inputs_unchanged("chunk state operand rounding", in, device.q,
+                                               device.k, device.v, device.g, device.beta);
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -479,6 +528,7 @@ int main() {
         ++failures;
     } catch (const std::invalid_argument&) {}
     failures += contract_rejection_cases();
+    failures += chunk_state_operand_rounding_case();
 
     // Registered 27B/35B-A3B geometries, public state forms, and the recurrent/chunk/tail route
     // boundary are all qualified directly against the same complete FP64 recurrence.

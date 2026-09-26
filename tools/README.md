@@ -13,6 +13,7 @@ Python tools are independent of CMake; there is no `NINFER_BUILD_TOOLS` option.
 
 | Task | Location |
 |---|---|
+| Install or test the RTX 3080 Bonsai DSH preset | [`dsh/`](dsh/README.md) |
 | Convert weights with an official or custom recipe | [`convert/`](convert/); [user guide](../docs/weight-conversion.md) |
 | Inspect artifact metadata and objects | [`artifact/inspect.py`](artifact/inspect.py) |
 | Count the bytes one decoded token reads (roofline denominator) | [`decode_byte_accounting.py`](decode_byte_accounting.py) |
