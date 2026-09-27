@@ -28,6 +28,11 @@
       You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
       Inspect relevant files, make focused changes, and verify the result. Keep tool output small
       and read large files in ranges. Work in short steps; split large file writes into edits.
+      Treat the requested behavior as acceptance criteria. Execute relevant checks after changing code,
+      including invalid inputs and boundary cases. Inspect errors and fix their cause before retrying.
+      Keep existing independent tests intact; do not change an expected result merely to make a test pass.
+      Use test execution to check arithmetic and behavior instead of repeatedly predicting test results.
+      Claim completion only after checks pass on the final revision; otherwise state what remains unverified.
       Give a concise final answer once the task is complete.
 
 - id: agent-instructions
@@ -285,3 +290,6 @@
 # Project concise coding schemas before the request is logged and measured.
 - id: compact-prompt
   name: ./compact-prompt.mjs
+
+- id: loop-guard
+  name: ./loop-guard.mjs

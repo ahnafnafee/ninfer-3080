@@ -2,6 +2,6 @@
 agent-default-model:
   provider: qwen-3080
   model: bonsai2-heretic
-  reasoningEffort: medium
+  reasoningEffort: low
 agent-presets:
   default: bonsai2-heretic-3080

@@ -25,12 +25,23 @@ const { Context } = await moduleOf('@deepseek-ai/cordis');
 const { default: LlmRuntime, createUserMessage } = await moduleOf('@deepseek-ai/dsh-llm');
 const { default: CompactWithoutTools } = await import('../bonsai2-heretic-3080/compact-without-tools.mjs');
 
-test('saved Bonsai routes use the exact-count adapter and medium reasoning without duplicate provider ownership', () => {
+test('host fragment replaces the stock stats owner through actual DSH patch composition', async () => {
+  const { composeEntries } = await moduleOf('@deepseek-ai/dsh-app-boot');
+  const warnings = [];
+  const entries = composeEntries([[{ insert: [{ id: 'session-stats', name: '@deepseek-ai/dsh-session-stats' }] }], patch], warning => warnings.push(warning));
+  assert.deepEqual(warnings, []);
+  assert.equal(entries.find(entry => entry.id === 'session-stats').disabled, true);
+  assert.equal(entries.filter(entry => entry.id === 'ninfer-session-stats' && !entry.disabled).length, 1);
+  assert.ok(preset.some(entry => entry.id === 'loop-guard' && !entry.disabled));
+});
+
+test('saved Bonsai routes use the exact-count adapter and focused reasoning without duplicate provider ownership', () => {
   assert.equal(nativeRows.length, 1, 'one host-level native adapter owns both local routes');
   const route = settings['agent-default-model'];
   assert.equal(route.provider, 'qwen-3080');
   assert.equal(route.model, nativeRows[0].config.model);
-  assert.equal(route.reasoningEffort, 'medium');
+  assert.equal(route.reasoningEffort, 'low');
+  assert.equal(nativeRows[0].config.temperature, 0.2);
   assert.equal(settings['llm-pi-ai']?.providers?.['qwen-3080'], undefined);
   assert.equal(settings['llm-pi-ai']?.providers?.['qwen-3080-summary'], undefined);
   assert.equal(compact.summarizationProvider, 'qwen-3080-summary');

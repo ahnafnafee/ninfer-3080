@@ -933,6 +933,15 @@ does not emit the Chat Completions `[DONE]` sentinel. With tools enabled, ordina
 streams immediately; only an ambiguous tool-call marker prefix or the structured tool region is
 held. Tool markup that never opens a function is flushed back as ordinary text without losing bytes.
 
+Terminal Responses also carry a local `timings` extension in both aggregate and streaming mode:
+`predicted_n` is the generated token count, `predicted_ms` is Engine wall time from first through
+last generated token, and `ttft_ms` is generation-request latency to the first token, excluding
+host prompt preparation. Decode throughput is `max(predicted_n - 1, 0) * 1000 / predicted_ms` when
+the duration is positive; the first token comes from prefill. These measurements include tokens
+held by the tool parser. Clients must not measure tool-only generation from function-argument SSE
+arrival times, because those events can arrive together at completion. This extension does not
+change output Items, usage, or terminal status.
+
 ### Local response state and resources
 
 `store` defaults to `true`. Stored Responses live only in this server process and are bounded by an

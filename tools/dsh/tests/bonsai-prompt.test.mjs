@@ -25,7 +25,9 @@ test('restored maximum-thinking and output settings are migrated only for Bonsai
   apply({ on: (name, fn) => listeners.set(name, fn) });
   const request = listeners.get('agent/request');
   const old = { provider: 'qwen-3080', model: 'bonsai2-heretic', reasoningEffort: 'high', maxTokens: 32768 };
-  assert.deepEqual(await request({}, async () => old), { ...old, reasoningEffort: 'medium', maxTokens: 8192 });
+  assert.deepEqual(await request({}, async () => old), { ...old, reasoningEffort: 'low', maxTokens: 8192 });
+  assert.equal((await request({}, async () => ({ ...old, reasoningEffort: 'medium' }))).reasoningEffort, 'medium');
+  assert.equal((await request({}, async () => ({ ...old, reasoningEffort: 'low' }))).reasoningEffort, 'low');
   assert.equal((await request({}, async () => ({ ...old, reasoningEffort: 'off' }))).reasoningEffort, 'off');
   const other = { ...old, provider: 'fast-qwen' };
   assert.equal(await request({}, async () => other), other);
