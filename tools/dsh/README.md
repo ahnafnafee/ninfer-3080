@@ -4,6 +4,9 @@ This directory is the repository copy of the RTX 3080 Bonsai coding preset and i
 Make future changes here, run the tests, and copy the preset files to the DSH installation.
 The server profile remains in [`../windows/profiles.json`](../windows/profiles.json).
 
+To select these and the other configured DSH models in Codex CLI, use the
+[client gateway and `/model` setup](client-gateway/README.md).
+
 The eight files in [`bonsai2-heretic-3080/`](bonsai2-heretic-3080/) contain the preset composition,
 native NInfer adapter, timing projection, loop guard, prompt projection, recoverable compaction,
 and on-demand skill discovery. The six JavaScript modules match the deployed implementation. The configuration derives the
