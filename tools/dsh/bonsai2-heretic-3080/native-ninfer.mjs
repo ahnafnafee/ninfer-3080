@@ -1,6 +1,8 @@
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { measuredTimings } from './ninfer-session-stats.mjs';
+import { isRecoveryNotice } from './loop-guard.mjs';
 
 const requireDsh = createRequire(join(dirname(process.execPath), 'node_modules/@deepseek-ai/dsh/package.json'));
 const { LlmAdapter, LlmError, attributionHeaders } = await import(pathToFileURL(requireDsh.resolve('@deepseek-ai/dsh-llm')));
@@ -21,11 +23,13 @@ function contentText(blocks) {
   }).join('\n');
 }
 
-/** Translate the persisted message blocks without dropping user or tool-result content. */
-export function responseInput(messages) {
+/** Translate history; pressure relief may omit older reasoning, never user/tool facts. */
+export function responseInput(messages, { latestReasoningOnly = false } = {}) {
   const resultIds = new Set(messages.flatMap(message => message.content.filter(block => block.type === 'tool-result').map(block => block.toolCallId)));
   const input = [];
-  for (const message of messages) {
+  const latestAssistant = messages.findLastIndex(message => message.role === 'assistant');
+  const recoveryBoundary = messages.findLastIndex(isRecoveryNotice);
+  for (const [messageIndex, message] of messages.entries()) {
     for (const block of message.content) {
       if (block.type === 'tool-result') {
         input.push({ type: 'function_call_output', call_id: block.toolCallId, output: contentText(block.content) || '(no output)' });
@@ -40,6 +44,8 @@ export function responseInput(messages) {
           input.push({ type: 'message', role: 'assistant', content: `[Unexecuted tool call ${block.name}: ${block.arguments}]` });
         }
       } else if (message.role === 'assistant' && block.type === 'reasoning') {
+        if (messageIndex < recoveryBoundary) continue;
+        if (latestReasoningOnly && messageIndex !== latestAssistant) continue;
         if (block.text) input.push({ type: 'reasoning', content: [{ type: 'reasoning_text', text: block.text }] });
       } else if (block.type === 'text' || block.type === 'file') {
         const text = contentText([block]);
@@ -59,7 +65,7 @@ export function responseRequest(options) {
     model: options.model,
     input: responseInput(options.messages),
     ...(options.system ? { instructions: options.system } : {}),
-    reasoning: { effort: options.provider === 'qwen-3080-summary' || options.purpose === 'session-title' ? 'none' : (options.reasoningEffort === 'off' ? 'none' : options.reasoningEffort ?? 'medium') },
+    reasoning: { effort: options.provider === 'qwen-3080-summary' || options.purpose === 'session-title' ? 'none' : (options.reasoningEffort === 'off' ? 'none' : options.reasoningEffort ?? 'low') },
     ...(options.tools?.length ? { tools: options.tools.map(tool => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters, strict: false })) } : {}),
     truncation: 'disabled',
   };
@@ -141,6 +147,7 @@ export async function* responseChunks(events) {
         yield { type: 'block-end', index: block.index, block: { type: block.type, text: block.text } };
       }
       const response = event.response ?? {};
+      const timing = measuredTimings(response.timings, response.usage?.output_tokens);
       for (const item of pendingTools) {
         const index = nextIndex++;
         let args;
@@ -167,7 +174,8 @@ export async function* responseChunks(events) {
       } else if (event.type === 'response.cancelled') {
         yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'NInfer generation was cancelled.' } } };
       } else {
-        yield { type: 'finish', reason: { kind: event.type === 'response.incomplete' ? 'max-tokens' : sawTool ? 'tool-calls' : 'stop' } };
+        yield { type: 'finish', reason: { kind: event.type === 'response.incomplete' ? 'max-tokens' : sawTool ? 'tool-calls' : 'stop' },
+          ...(timing ? { replayState: { response: { ninferTimings: timing } } } : {}) };
       }
       return;
     }
@@ -185,6 +193,8 @@ export class NativeNinferAdapter extends LlmAdapter {
     this.minOutputTokens = positiveInteger(config.minOutputTokens ?? 4096, 'minOutputTokens');
     this.reserveTokens = positiveInteger(config.reserveTokens ?? 256, 'reserveTokens');
     this.generationTimeoutMs = positiveInteger(config.generationTimeoutMs ?? 600000, 'generationTimeoutMs');
+    this.temperature = config.temperature ?? 0.2;
+    if (!Number.isFinite(this.temperature) || this.temperature < 0 || this.temperature > 2) throw new Error('temperature must be between 0 and 2');
     this.fetchImpl = fetchImpl;
   }
   providerInfo(provider) { return { id: provider, name: provider.endsWith('-summary') ? 'NInfer Bonsai summary' : 'NInfer Bonsai (RTX 3080)' }; }
@@ -210,7 +220,7 @@ export class NativeNinferAdapter extends LlmAdapter {
     const capacity = entry?.context_window ?? entry?.max_model_len;
     if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new LlmError('NInfer did not advertise the selected model and its context capacity.', 'MODEL_NOT_FOUND');
     const summary = provider === 'qwen-3080-summary';
-    return { provider, id: model, name: 'Bonsai 2 Heretic', inputModalities: ['text'], context: { contextWindow: capacity }, defaultMaxTokens: summary ? this.summaryMaxTokens : this.maxTokens, reasoning: { efforts: (summary ? ['off'] : ['medium', 'off']).map(id => ({ id, name: id })), defaultEffort: summary ? 'off' : 'medium' } };
+    return { provider, id: model, name: 'Bonsai 2 Heretic', inputModalities: ['text'], context: { contextWindow: capacity }, defaultMaxTokens: summary ? this.summaryMaxTokens : this.maxTokens, reasoning: { efforts: (summary ? ['off'] : ['low', 'medium', 'off']).map(id => ({ id, name: id })), defaultEffort: summary ? 'off' : 'low' } };
   }
   async listModels(provider) { return [await this.metadata(provider, this.model)]; }
   async resolveModel(provider, model, signal) { return this.metadata(provider, model, signal); }
@@ -221,19 +231,50 @@ export class NativeNinferAdapter extends LlmAdapter {
   async *stream(options) { yield* this.streamWithMetadata(options, await this.metadata(options.provider, options.model, options.signal)); }
   async *streamWithMetadata(options, metadata) {
     try {
-      const body = responseRequest(options);
-      const counted = await (await this.request('/responses/input_tokens', body, options.signal)).json();
-      const inputTokens = counted.input_tokens;
-      if (!Number.isSafeInteger(inputTokens) || inputTokens < 0) throw new LlmError('NInfer returned an invalid prompt token count.', 'INVALID_RESPONSE');
+      let body = responseRequest(options);
+      let reclaimed = false;
+      const reclaimReasoning = () => {
+        const input = responseInput(options.messages, { latestReasoningOnly: true });
+        if (input.length === body.input.length) return false;
+        body = { ...body, input };
+        reclaimed = true;
+        return true;
+      };
+      const countInput = async () => {
+        const counted = await (await this.request('/responses/input_tokens', body, options.signal)).json();
+        if (!Number.isSafeInteger(counted.input_tokens) || counted.input_tokens < 0) throw new LlmError('NInfer returned an invalid prompt token count.', 'INVALID_RESPONSE');
+        return counted.input_tokens;
+      };
+      let inputTokens;
+      try { inputTokens = await countInput(); }
+      catch (error) {
+        if (error instanceof LlmError && error.failure.code === 'CONTEXT_WINDOW_EXCEEDED' && reclaimReasoning()) inputTokens = await countInput();
+        else throw error;
+      }
       const requested = Math.min(positiveInteger(options.maxTokens ?? metadata.defaultMaxTokens, 'maxTokens'), metadata.defaultMaxTokens);
-      const available = metadata.context.contextWindow - inputTokens - this.reserveTokens;
+      let available = metadata.context.contextWindow - inputTokens - this.reserveTokens;
       const minimum = options.provider === 'qwen-3080-summary' ? requested : Math.min(requested, this.minOutputTokens);
+      // Long coding turns can fill the window with already-executed reasoning.
+      // Recount the exact replacement before requesting semantic compaction.
+      // Stored messages stay intact, as do every call, result and visible answer.
+      if (available < minimum && !reclaimed && reclaimReasoning()) {
+        inputTokens = await countInput();
+        available = metadata.context.contextWindow - inputTokens - this.reserveTokens;
+      }
       if (available < minimum) {
         throw new LlmError(`The prepared prompt uses ${inputTokens} tokens; at least ${minimum} output tokens and ${this.reserveTokens} reserve tokens require compaction within the active ${metadata.context.contextWindow}-token NInfer context. If automatic compaction cannot make room, shorten the latest message or supply large material as files to read in smaller sections.`, 'CONTEXT_WINDOW_EXCEEDED');
       }
-      const response = await this.request('/responses', { ...body, max_output_tokens: Math.min(requested, available), ...(options.temperature === undefined ? {} : { temperature: options.temperature }), stream: true, store: false }, options.signal);
+      const response = await this.request('/responses', { ...body, max_output_tokens: Math.min(requested, available), temperature: options.temperature ?? this.temperature, stream: true, store: false }, options.signal);
       if (!response.body) throw new LlmError('NInfer response has no stream body.', 'TRANSPORT');
-      yield* responseChunks(sseEvents(response.body));
+      const originalReasoningBlocks = options.messages.filter(message => message.role === 'assistant')
+        .reduce((count, message) => count + message.content.filter(block => block.type === 'reasoning' && block.text).length, 0);
+      const omittedReasoningBlocks = originalReasoningBlocks - body.input.filter(item => item.type === 'reasoning').length;
+      for await (const chunk of responseChunks(sseEvents(response.body))) {
+        if (omittedReasoningBlocks && chunk.type === 'finish') {
+          yield { ...chunk, replayState: { ...chunk.replayState, response: { ...chunk.replayState?.response,
+            omittedReasoningBlocks } } };
+        } else yield chunk;
+      }
     } catch (error) {
       if (options.signal?.aborted) {
         yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'NInfer request cancelled.' } } };

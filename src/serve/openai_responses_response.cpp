@@ -4,6 +4,7 @@
 #include "serve/openai_common.h"
 
 #include <algorithm>
+#include <cmath>
 #include <iterator>
 #include <stdexcept>
 #include <string>
@@ -204,6 +205,15 @@ BuiltOpenAIResponse build_response(const std::string& id, std::int64_t created_a
              {"output_tokens", outcome.completion_tokens},
              {"output_tokens_details", Json{{"reasoning_tokens", outcome.reasoning_tokens}}},
              {"total_tokens", outcome.prompt_tokens + outcome.completion_tokens}};
+    // Function calls are parsed atomically at completion. Their SSE arrival
+    // times cannot measure model decode speed; publish the Engine wall clock.
+    const auto milliseconds = [](double seconds) {
+        return std::isfinite(seconds) && seconds > 0.0 ? seconds * 1000.0 : 0.0;
+    };
+    response["timings"] = Json{
+        {"predicted_n", outcome.completion_tokens},
+        {"predicted_ms", milliseconds(outcome.metrics.generation_wall_seconds)},
+        {"ttft_ms", milliseconds(outcome.metrics.ttft_seconds)}};
     built.body = std::move(response);
     return built;
 }

@@ -109,6 +109,8 @@ GenerationOutcome sample_outcome() {
     outcome.reasoning_tokens                = 3;
     outcome.finish_reason                   = ninfer::FinishReason::StopToken;
     outcome.metrics.prefix_cache_hit_tokens = 4;
+    outcome.metrics.generation_wall_seconds = 0.125;
+    outcome.metrics.ttft_seconds = 0.25;
     return outcome;
 }
 
@@ -1051,6 +1053,10 @@ int test_response_object() {
         make_openai_response_object("resp_test", 123, request, runtime, sample_outcome());
     const Json& response = built.body;
     int failures         = 0;
+    failures += check(response.at("timings").at("predicted_n") == 7 &&
+                          response.at("timings").at("predicted_ms") == 125.0 &&
+                          response.at("timings").at("ttft_ms") == 250.0,
+                      "response timings preserve measured Engine generation intervals and TTFT");
     // RequestJson keeps insertion order and compares objects in it; the response is built with
     // sorted keys, so the expected parts are written in that order.
     const Json summary =

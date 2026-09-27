@@ -10,3 +10,11 @@
         summaryMaxTokens: 4096
         minOutputTokens: 4096
         reserveTokens: 256
+        temperature: 0.2
+
+# Replace the stock projection so buffered tool calls cannot inflate speed.
+- id: session-stats
+  disabled: true
+- insert:
+    - id: ninfer-session-stats
+      name: '{{STATS_PLUGIN_URL}}'

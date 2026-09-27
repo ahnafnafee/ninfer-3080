@@ -2,8 +2,9 @@
 
 NInfer does not require NVFP4 weights. This fork already runs the local Ternary Bonsai 2
 Heretic model through Ampere's native integer and BF16 arithmetic. The default `reason64`
-profile preserves a 64K minimum with compressed KV, FP32 recurrent state, medium reasoning
-and MTP speculation. Cached recurrent-state snapshots use host RAM to preserve device capacity.
+profile preserves a 64K minimum with RK4 KV, FP32 recurrent state, low reasoning and temperature
+0.2. The MTP draft head is unloaded to reserve VRAM for cache precision. Cached recurrent-state
+snapshots use host RAM to preserve device capacity.
 The CUDA GDN path also corrects an avoidable TF32 operand-rounding error. The measurements
 below distinguish that numerical correction from cache quality and generation reliability.
 
@@ -195,20 +196,19 @@ effort unset, exercising the profile's default; no schema or protocol behavior c
 
 ### Default with a 64K minimum
 
-The final default is `reason64`, preserving the requested 65,536-token capacity. It keeps
-the corrected TF32 arithmetic, FP32 recurrent state, medium thinking and MTP3, but uses
-`rk2v4-e8` KV instead of INT8. At this capacity the RK4 candidate required 1,681,680,128 bytes
-of runtime reservation against 1,422,073,856 available and was rejected. Compressed KV plus
-zero cached device-state slots and four host-state slots allowed the full 64K window to start.
-The active recurrent state remains on the GPU; this change places reusable snapshots in RAM.
+The default `reason64` preserves the requested 65,536-token capacity and uses `rk4v4` KV,
+corrected TF32 arithmetic, FP32 recurrent state, low thinking and temperature 0.2. An earlier
+configuration retained MTP3 and used `rk2v4-e8`. RK4 with MTP still exceeded the available
+runtime reservation in the September 26 test: 1,527,725,824 bytes required versus 1,250,082,816
+available. Unloading the draft head reduced resident weights from 7.12 to 6.70 GiB and made
+the more accurate cache fit without reducing the context window.
 
-The successful startup reported all 1,024 KV pages, a 1.16 GiB runtime reservation and
-374.4 MiB free. Prefill uses 128-token chunks to reduce workspace pressure. The profile sets
-an 8,192-token default output limit, a 2,048-token thinking budget, and an explicit 65,536
-`minimumContext`; the switcher
-will not silently lower it. This meets the capacity requirement while retaining the arithmetic
-fix, but compressed KV retains a precision tradeoff and these startup figures do not establish
-long-context reasoning accuracy or a new throughput result.
+The resulting startup reported all 1,024 KV pages, a 1.27 GiB runtime reservation and 419.1 MiB
+free. Actual desktop allocations affect that margin. Zero cached device-state slots and four
+host-state slots preserve GPU capacity; active recurrent state remains on the GPU. Prefill uses
+128-token chunks. The profile retains an 8,192-token output limit, 2,048-token thinking budget,
+and explicit 65,536 `minimumContext`; the switcher cannot silently lower it. This is a memory
+allocation and cache-precision tradeoff, not evidence that MTP was generating incorrect tokens.
 
 ### DSH context handling and coding diagnostics
 
@@ -216,7 +216,8 @@ The local DSH default now selects `bonsai2-heretic-3080` and the `qwen-3080` rou
 adapter uses NInfer's Responses API directly, discovers the loaded context capacity, and counts
 the exact rendered prompt, including tools, before generation. It avoids the previous provider's
 fixed 4,096-token safety deduction. Ordinary agent requests reserve at least 4,096 output tokens
-and 256 context tokens, with an 8,192-token maximum; insufficient room triggers compaction before
+and 256 context tokens, with an 8,192-token maximum; insufficient room first reclaims older
+reasoning from the prompt, then triggers compaction if necessary, before
 sending the generation request. Incomplete responses remain marked incomplete, and partial tool
 arguments are never executed. Summaries and short session titles disable thinking.
 
@@ -264,10 +265,164 @@ fragments and offline regression suites. Local live-test reports remain in
 `C:\Users\ahnaf\.dsh\tests\` under the `bonsai-` prefix. The changes use local DSH plugins and do
 not patch installed packages.
 
+#### Repeated tool calls and misleading DSH throughput
+
+The September 26 `bonsai-loop` diagnostic found 642 tool calls in two turns. One identical
+PowerShell command appeared 427 times and another 159 times. The final command repeatedly
+reported a missing variable sigil (`numFiles = ...` rather than `$numFiles = ...`), while its
+nonterminating PowerShell error still allowed a successful process exit. DSH's built-in detector
+only advises the model at three, five, and eight repeats; it does not stop execution. Its state
+survives compaction, so compaction was not the cause of this unbounded run.
+
+The approximately 89,038 tokens/s display was a separate timing defect. The old adapter emitted
+parsed tool arguments at completion, and NInfer's Responses encoder also held those arguments
+until completion. DSH consequently attributed almost all generation time to first-token latency:
+272,993 output tokens were divided by only 3.066 seconds of supposed decode time. Server logs for
+the last repeated calls reported approximately 158–162 decode tokens/s instead.
+
+The preset prevents a fourth execution after three unchanged call/result pairs.
+It warns earlier, retains evidence across compaction, reconstructs recent evidence on resume, and
+allows changing results and background-job polling. An independent agent or new human input has
+its own count. The adapter records measured server timings and the replacement host projection
+uses generation intervals, excluding buffered historical calls that lack a real measurement.
+Usage totals and conversation events remain unchanged. Replaying the original session retained
+one valid streamed measurement, 313 tokens over 2.707 seconds (about 116 tokens/s), while excluding
+641 buffered measurements. The authenticated live DSH session snapshot returned that corrected
+projection after deployment.
+
+The September 27 update adds one bounded recovery attempt after denying the duplicate. The
+adapter omits reasoning before that recovery notice while preserving every instruction, visible
+answer and tool result. A changed operation can proceed; another blocked duplicate ends the turn.
+Recovery state is reconstructed on resume, and a denial cannot reset the repeated-result count.
+
+The initial September 26 version passed 54 offline checks on Node 24.19.0 / DSH 0.1.5-rc.3,
+including the actual agent loop stopping after three executions and one denied call. The host-only
+Responses C++ suite passed under MSVC 14.44, linked against the existing CUDA 13.1 build libraries;
+the inherited build tree was not reconfigured. The updated server and plugins were deployed,
+and `/v1/models` again advertised 65,536 tokens after sufficient desktop VRAM was freed. A live
+tool-only response reported 43 generated tokens and 255.5002 ms of generation wall time, giving
+164.38 tokens/s through the new timing path. This is a functional timing check, not a speedup.
+
+At that stage the live semantic probe failed: with thinking disabled, both a plain request and a request
+including the concise shell guidance returned `numFiles = 3` as the purported correction. The
+probe executed no shell command. This establishes a remaining model reasoning error, not a
+timing or JSON-transport failure. The guard limits the resulting runaway behavior; it does not
+recover lost model accuracy or certify the model as a reliable autonomous programmer. New sessions
+now use low thinking. Existing sessions retain their selected effort until changed; the investigated
+`bonsai-loop` session still had medium selected when it was resumed on September 27.
+
 The local prompts, exact commands, captured answers, numerical checks and summaries are in
 `profiles/looping-3080/`. `probe.py` reproduces the CLI cases; `check_answers.py` checks the manually
 inspected code outputs. A failure in that checker records a model answer defect rather than an
 engine test failure.
+
+### End-to-end coding qualification
+
+The follow-up separated literal copying, language correction, tool serialization and generation.
+At 64K capacity, literal `$numFiles = 3` survived both text and tool output. Correcting the invalid
+assignment in plain text also worked. Correcting it inside a tool call failed with thinking off
+in NInfer both with and without MTP, and in the independent Prism runtime loading the corresponding
+Heretic PTQ1 GGUF. Thus neither dollar-sign transport nor speculative acceptance explains that
+reproduction. Medium thinking fixed the original RK2 control, but a later RK4 control still failed
+in medium mode; additional cache precision is not a general semantic correction.
+
+The selected profile uses low thinking, which adds the template's brief-reasoning instruction,
+and temperature 0.2. The four copy/correction probes passed through the final profile, including
+the original tool-call failure. No shell command was executed by those probes. The code-generation
+preset additionally requires tests of the final revision, inspection of errors, and preservation
+of independently specified expected results. These settings were selected as a combined operating
+point; the tests do not establish an isolated causal improvement from temperature alone.
+
+The live evaluator in [`tools/dsh/eval`](../tools/dsh/eval/) mounts DSH's actual agent loop, native
+adapter, prompt projection and repetition guard. Its file tools operate on isolated in-memory
+source, and its verification tool runs a fixed independent oracle in a JavaScript VM. It does
+not execute an actual shell command, and the model cannot edit the oracle.
+Currency conversion has 126 cases including decimal lengths, signs, malformed strings and exact
+safe-integer boundaries; duration parsing has 106 cases; interval merging has 83 cases checking
+coverage, ordering, touching/nested intervals, aliasing and input preservation. Oracle regressions
+accept known-correct functions and reject the deliberately broken starting implementations.
+Passing requires both correct final code and an observed verification followed by normal turn
+completion. A model's own completion claim is insufficient.
+
+All three short tasks completed on the final RK4 profile, passing all 315 cases. The money and
+duration tasks each required one repair after a failed verifier call. The measured complete runs
+took 208, 174 and 46 seconds respectively, including reasoning, tool requests and verification.
+They used 9, 10 and 5 model steps. These are small coding fixtures, not a representative benchmark
+or a first-draft accuracy percentage.
+
+A long-context run placed the money specification before approximately 51K background tokens.
+It initially reproduced `1.2` becoming 102 cents and later repaired the code through oracle
+feedback, but failed before its final response: the next prompt was 62,627 tokens, leaving less
+than the required 4,096-token answer reserve. That run is incomplete despite its passing code.
+The adapter now reclaims older assistant reasoning only when exact preflight cannot leave enough
+answer space, retains the newest step's reasoning, and recounts the exact replacement. User
+instructions, visible answers, code and all tool-call/result pairs remain intact. Complete
+reasoning remains in durable DSH history, and response metadata records omitted reasoning blocks.
+
+The repeated long run completed normally in 149 seconds, reached 58,543 prompt tokens, and passed
+all 126 money checks after repair. Decode in that run was approximately 57–59 tokens/s; this is
+an observed request rate on the final configuration, not a controlled speedup over MTP. A separate
+live boundary regression reduced a 74,901-token prompt to 200 tokens by omitting its artificial
+old reasoning, preserved the verifier result, and returned the expected final answer. The
+original message objects remained unchanged. Offline coverage also reproduces the 62,627-token
+answer-reserve failure and checks recovery when prompt preparation itself rejects the length.
+All 60 offline regressions passed on Node 24.19.0 and DSH 0.1.5-rc.3. GPU runs used the same
+RTX 3080 10 GB, CUDA 13.1 binary and corrected GDN arithmetic described above; no further CUDA
+mathematics was changed for this follow-up.
+
+These tests qualify the exercised correction and verification workflows at 64K. They do not
+reconstruct information lost during checkpoint quantization or certify arbitrary first drafts.
+The unchanged-target MTP control and independent-runtime reproduction give no basis for claiming
+that another CUDA arithmetic change would fix this semantic error. The numerical improvement here
+is selecting the already-qualified RK4 cache with FP32 recurrent state, using draft-head memory
+to keep the full context window. Local commands, outputs and traces are in
+`profiles/accuracy-3080/`; reusable evaluators, preset and regression tests are in the repository.
+
+### September 27 session recovery
+
+The next reported failure in `bonsai-loop` ended with a blocked turn after three identical
+PowerShell reads and a denied fourth call. Two compaction attempts had also exhausted their
+4,096-token summary allowance. The session still selected medium thinking, overriding the new
+low default. Its recorded stop was therefore the repetition guard, not an HTTP context rejection
+or CUDA error. NInfer was offline when inspected later; the available log does not establish why
+it stopped. The full 65,536-token `reason64` profile was restored successfully.
+
+The guard now gives the model one recovery attempt after denying the duplicate, omitting earlier
+reasoning from the projected prompt while preserving instructions, visible answers and tool
+evidence. Another blocked duplicate ends the turn; a different operation can proceed. Recovery
+and denied-call state survive resume, so a denial cannot reset the unchanged-result count. The
+actual DSH agent-loop regression covers both successful changed-command recovery and a model that
+keeps repeating, which remains bounded to three executions and five model requests.
+
+A detached replay of the failing session through the native adapter used low thinking and the
+recovery notice. It omitted 16 earlier reasoning blocks and submitted 41,745 input tokens. In
+approximately 83 seconds, the model proposed scanning from byte 9,900, past the closing brace
+visible at byte 9,899, instead of repeating the read from byte 9,897. The replay generated 2,439
+output tokens. This establishes a meaningful changed operation on the recorded evidence; the
+proposed command was not executed, and the underlying file-analysis task is not verified complete.
+
+Compaction needed a separate correction. Moving checkpoint instructions to the system role and
+subdividing overflowing fragments did not reliably produce a complete summary of the original
+history. The compactor now bounds those retries and, when a large history cannot be summarized,
+uses whole verbatim source excerpts with the complete indexed archive. The fallback explicitly
+identifies excerpts as incomplete and not independently verified; it never accepts a truncated
+model summary. Earlier checkpoint claims remain source claims, and omitted requirements must be
+retrieved from the archive. The ordinary compaction transaction still requires a smaller
+replacement before committing it, and durable conversation events remain unchanged.
+
+Replaying the exact 28-message compaction input completed through this fallback after three
+model requests in approximately 190 seconds. An additional regression exercises the actual DSH
+compactor, verifies the smaller committed checkpoint and latest human instruction, and checks
+that the original durable events remain intact. All 67 offline regressions passed on Node
+24.19.0 and DSH 0.1.5-rc.3. Live replays used the RTX 3080 10 GB and the existing CUDA 13.1
+`reason64` server; no CUDA mathematics changed in this recovery fix. Local evidence is in
+`profiles/accuracy-3080/session-repeat-20260927/`.
+
+After the authorized DSH restart, the live catalog and `bonsai-loop` selection both reported low
+thinking. All eight deployed preset files matched the repository copy, and the healthy NInfer
+server advertised 65,536 tokens. The existing session was left idle with its history preserved.
+Its timing projection reported 26,918 measured decode tokens over 428.813 seconds, approximately
+62.8 tokens/s; historical calls without valid decode measurements remain excluded.
 
 ### Repetition controls
 

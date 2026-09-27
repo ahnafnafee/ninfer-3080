@@ -21,7 +21,7 @@ after(async () => {
   await rm(workspace, { recursive: true, force: true });
 });
 
-async function setup({ capacity = 8192, compactConfig = {}, summaryResponse = 'The user wants main.cpp repaired. Earlier work inspected files; preserve pending tests and continue with the latest request.' } = {}) {
+async function setup({ capacity = 8192, compactConfig = {}, summaryResponse = 'The user wants main.cpp repaired. Earlier work inspected files; preserve pending tests and continue with the latest request.', summaryFinish = 'stop' } = {}) {
   const ctx = new Context();
   const calls = [];
   ctx.provide('llm', {
@@ -31,7 +31,7 @@ async function setup({ capacity = 8192, compactConfig = {}, summaryResponse = 'T
     async *stream(call) {
       calls.push(call);
       yield { type: 'text-delta', index: 0, text: summaryResponse };
-      yield { type: 'finish', reason: { kind: 'stop' } };
+      yield { type: 'finish', reason: { kind: summaryFinish } };
     },
   });
   await ctx.plugin(SessionProjections);
@@ -65,6 +65,30 @@ function appendToolTurn(session, agent, outputs, closed = true) {
   if (closed) session.append('step/end', { turn: 1, step: 1 });
   return { call, results };
 }
+
+test('source fallback commits a smaller recoverable checkpoint after model summary overflow', async () => {
+  const { ctx, engine, session, agent, calls, user, header } = await setup({ capacity: 65536,
+    compactConfig: { maxTokens: 4096 }, summaryResponse: 'INCOMPLETE MODEL OUTPUT', summaryFinish: 'max-tokens' });
+  try {
+    header();
+    const history = user('Original code and constraints.\n'.repeat(4000));
+    const latest = user('Continue the repair and verify the final source.');
+    const original = session.snapshotEvents();
+    const before = ctx.tokenMeter.measure(session).totalTokens;
+    const result = await engine.compactRegion(history.seq, history.seq, agent, AbortSignal.timeout(5000));
+    assert.ok(result);
+    assert.equal(calls.length, 2);
+    assert.ok(ctx.tokenMeter.measure(session).totalTokens < before / 2);
+    assert.deepEqual(session.snapshotEvents(0, original.length), original);
+    assert.ok(session.surface.nodes.includes(latest.seq));
+    const messages = session.deriveMessages();
+    const checkpoint = messages.find(message => message.source?.plugin === 'compact').content.map(block => block.text).join('\n');
+    assert.match(checkpoint, /Checkpoint recovery/);
+    assert.match(checkpoint, /\[\[context-archive:[a-f0-9]{64}\]\]/);
+    assert.ok(!checkpoint.includes('INCOMPLETE MODEL OUTPUT'));
+    assert.notEqual(session.snapshotEvents().findLast(event => event.type === 'compaction/summary').data.llmStreamCall, true);
+  } finally { await ctx.fiber.dispose(); }
+});
 
 test('recoverable exact-preflight error compacts restored oversized history after the tool header refreshes', async () => {
   const { ctx, session, agent, calls, user, header } = await setup();

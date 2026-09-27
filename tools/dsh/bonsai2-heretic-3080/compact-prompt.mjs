@@ -4,7 +4,7 @@ export const name = 'bonsai-compact-prompt';
 export const inject = ['systemPrompt'];
 
 export const descriptions = Object.freeze({
-  pwsh: 'Execute PowerShell in the workspace. Inspect failed commands. Use background jobs for long commands; request wider access only after a sandbox denial and approval.',
+  pwsh: 'Execute PowerShell in the workspace. Variables require $. Inspect stderr even when exit code is zero; correct failures before retrying. Use background jobs for long commands; request wider access only after a sandbox denial and approval.',
   bash: 'Execute a shell command in the workspace. Inspect failures; use background jobs for long commands.',
   read: 'Read a UTF-8 file with line numbers. Use offset and limit for small relevant ranges.',
   write: 'Write a complete UTF-8 file. Read existing files first and use the same file_path spelling; preserve unrelated content.',
@@ -46,6 +46,6 @@ export function apply(ctx) {
   ctx.on('agent/request', async (_request, next) => {
     const config = await next();
     if (config.provider !== 'qwen-3080' || config.model !== 'bonsai2-heretic') return config;
-    return { ...config, reasoningEffort: config.reasoningEffort === 'off' ? 'off' : 'medium', maxTokens: 8192 };
+    return { ...config, reasoningEffort: ['off', 'low', 'medium'].includes(config.reasoningEffort) ? config.reasoningEffort : 'low', maxTokens: 8192 };
   });
 }
