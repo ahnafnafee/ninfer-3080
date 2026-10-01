@@ -1,25 +1,26 @@
-# ninfer-switch <profile>|start|restart|status|kill|logs [-f]|list
+# llm-switch <profile>|start|restart|status|kill|logs [-f]|list
 #
-# Windows counterpart of a systemd-driven switcher: there is no service manager here, so the server
+# Runs one local LLM server at a time on the GPU: NInfer, llama.cpp, Strata, or any server that
+# takes --host and --port and answers GET /health. Windows has no service manager, so the server
 # runs as a hidden background process that outlives the terminal, and the choice is remembered in a
 # state file so `start` and `restart` bring back the last profile.
 #
-# Profiles come from profiles.json next to this script. NINFER_PROFILES names a second file whose
+# Profiles come from profiles.json next to this script. LLM_SWITCH_PROFILES names a second file whose
 # profiles are added on top (same name replaces), and whose "models" and "port" override the
 # defaults. In exe and args, {repo} is this checkout, {models} is the models directory
-# (NINFER_MODELS, else the overlay's "models", else {repo}\models), and {here} is the directory of
+# (LLM_SWITCH_MODELS, else the overlay's "models", else {repo}\models), and {here} is the directory of
 # the file that defines the profile. --host and --port are appended, so profiles never repeat them.
 param([Parameter(Position = 0)][string]$Command = 'help', [Parameter(Position = 1)][string]$Arg)
 
 $ErrorActionPreference = 'Stop'
 $Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$StateDir = Join-Path $env:LOCALAPPDATA 'ninfer'
+$StateDir = Join-Path $env:LOCALAPPDATA 'llm-switch'
 $StateFile = Join-Path $StateDir 'switch-state.json'
 $Log = Join-Path $StateDir 'serve.log'
 
 function Read-Profiles {
     $files = @(Join-Path $PSScriptRoot 'profiles.json')
-    if ($env:NINFER_PROFILES) { $files += $env:NINFER_PROFILES }
+    if ($env:LLM_SWITCH_PROFILES) { $files += $env:LLM_SWITCH_PROFILES }
     $cfg = @{ port = 8080; models = (Join-Path $Repo 'models'); profiles = [ordered]@{} }
     foreach ($f in $files) {
         if (-not (Test-Path -LiteralPath $f)) { throw "profiles file not found: $f" }
@@ -31,8 +32,8 @@ function Read-Profiles {
             $cfg.profiles[$p.Name] = $p.Value
         }
     }
-    if ($env:NINFER_MODELS) { $cfg.models = $env:NINFER_MODELS }
-    if ($env:NINFER_PORT) { $cfg.port = [int]$env:NINFER_PORT }
+    if ($env:LLM_SWITCH_MODELS) { $cfg.models = $env:LLM_SWITCH_MODELS }
+    if ($env:LLM_SWITCH_PORT) { $cfg.port = [int]$env:LLM_SWITCH_PORT }
     $cfg
 }
 
@@ -77,7 +78,7 @@ function Stop-Server($cfg) {
 
 function Start-Server([string]$name, $cfg) {
     $p = $cfg.profiles[$name]
-    if (-not $p) { throw "unknown profile '$name'. Run: ninfer-switch list" }
+    if (-not $p) { throw "unknown profile '$name'. Run: llm-switch list" }
     $exe = Expand $p.exe $cfg $p
     $argv = @($p.args | ForEach-Object { Expand $_ $cfg $p }) + @('--host', '127.0.0.1', '--port', "$($cfg.port)")
     if (-not (Test-Path -LiteralPath $exe)) { throw "server binary not found: $exe" }
@@ -93,7 +94,7 @@ function Start-Server([string]$name, $cfg) {
     if (Stop-Server $cfg) { Write-Host 'stopped the running server' }
     $o = Get-Owner $cfg
     if ($o -and -not $o.Ours) {
-        throw "port $($cfg.port) is taken by $($o.Process.ProcessName) (pid $($o.Process.Id)); set NINFER_PORT or ""port"" in profiles"
+        throw "port $($cfg.port) is taken by $($o.Process.ProcessName) (pid $($o.Process.Id)); set LLM_SWITCH_PORT or ""port"" in profiles"
     }
     New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
     Write-Host "starting $name ($($p.note))"
@@ -148,7 +149,7 @@ function Show-Status($cfg) {
         $server = if ($ours) { $o.Process } else { $proc }
         $since = if ($state) { [datetime]$state.started } else { $server.StartTime }
         $up = (Get-Date) - $since
-        $name = if ($state) { $state.profile } else { 'unknown (not started by ninfer-switch)' }
+        $name = if ($state) { $state.profile } else { 'unknown (not started by llm-switch)' }
         $note = if ($state -and $cfg.profiles.Contains($state.profile)) { " ($($cfg.profiles[$state.profile].note))" }
         "profile   : $name$note"
         "process   : $($server.ProcessName) pid $($server.Id), up {0:%d}d {0:hh}h {0:mm}m (since {1:yyyy-MM-dd HH:mm})" -f $up, $since
@@ -197,7 +198,7 @@ switch ($Command) {
         break
     }
     { $_ -in 'help', 'list', '-h', '--help' } {
-        'usage: ninfer-switch <profile>|start [profile]|restart|status|kill|logs [-f]|list'
+        'usage: llm-switch <profile>|start [profile]|restart|status|kill|logs [-f]|list'
         ''
         'profiles:'
         foreach ($k in $cfg.profiles.Keys) { '  {0,-8} {1}' -f $k, $cfg.profiles[$k].note }

@@ -25,7 +25,7 @@ other GPUs and the complete engine reference, see the
 - [Benchmarks](#benchmarks)
 - [Quick start](#quick-start)
 - [Profiles](#profiles)
-- [ninfer-switch](#ninfer-switch)
+- [llm-switch](#llm-switch)
 - [Connecting a client](#connecting-a-client)
 - [Building](#building)
 - [VRAM on a desktop card](#vram-on-a-desktop-card)
@@ -118,7 +118,7 @@ MTP in llama.cpp made the ternary models slower on this card (58 down to 43-51 t
    .\scripts\build.ps1
    ```
 
-2. **Get the model** into `models\`, or point `NINFER_MODELS` at its folder:
+2. **Get the model** into `models\`, or point `LLM_SWITCH_MODELS` at its folder:
 
    ```powershell
    hf download emiltsoi/Ternary-Bonsai-2-27B-Uncensored-Heretic-NInfer --local-dir models
@@ -127,7 +127,7 @@ MTP in llama.cpp made the ternary models slower on this card (58 down to 43-51 t
 3. **Serve it.** Add `tools\windows` to `PATH`, then:
 
    ```text
-   ninfer-switch reason64
+   llm-switch reason64
    ```
 
 The server listens on `http://127.0.0.1:8080/v1` and speaks both the OpenAI and the Anthropic API.
@@ -163,27 +163,29 @@ checks, but two answers still contained invalid generated tests. These changes i
 precision and mitigate observed overthinking; they do not establish a universal looping fix.
 See the guide's [reliability findings](docs/rtx-3080-precision.md#reasoning-reliability).
 
-`ninfer-switch start` remembers the last profile; when no saved choice exists it selects
-`reason64`. Select `ninfer-switch reason64` once to replace a previously remembered profile.
+`llm-switch start` remembers the last profile; when no saved choice exists it selects
+`reason64`. Select `llm-switch reason64` once to replace a previously remembered profile.
 
-## ninfer-switch
+## llm-switch
 
-Start, switch, stop and inspect the server from any terminal. The server runs hidden and outlives the
-window that started it.
+Start, switch, stop and inspect the local LLM server from any terminal. One server holds the GPU at a
+time, whichever engine it uses. The server runs hidden and outlives the window that started it.
 
 | Command | Does |
 |---|---|
-| `ninfer-switch <profile>` | start a profile, stopping whatever runs now |
-| `ninfer-switch status` | profile, uptime, port owner, served model, GPU memory, KV capacity, last rate |
-| `ninfer-switch logs [-f]` | show or follow the server log |
-| `ninfer-switch kill` | stop the server |
-| `ninfer-switch start` | start the last profile again |
-| `ninfer-switch list` | list the profiles |
+| `llm-switch <profile>` | start a profile, stopping whatever runs now |
+| `llm-switch status` | profile, uptime, port owner, served model, GPU memory, KV capacity, last rate |
+| `llm-switch logs [-f]` | show or follow the server log |
+| `llm-switch kill` | stop the server |
+| `llm-switch start` | start the last profile again |
+| `llm-switch list` | list the profiles |
 
 - **Short on VRAM?** `reason64` refuses to start rather than shrinking below its 64K minimum.
   Other profiles retry in 8K steps down to their `minimumContext`, or 16K when none is specified.
-- **Your own profiles.** A second file named by `NINFER_PROFILES` adds or replaces profiles and can
-  set `"port"` and `"models"`, so servers of other engines fit behind the same command.
+- **Your own profiles.** A second file named by `LLM_SWITCH_PROFILES` adds or replaces profiles and
+  can set `"port"` and `"models"`. Any server that takes `--host` and `--port` and answers
+  `GET /health` fits, such as llama.cpp's `llama-server` or [Strata](https://github.com/Niko1221/Strata)'s
+  `serve/server.py`.
 - **Safe on a shared port.** It only stops server binaries it can start; anything else on the port is
   reported and left alone.
 
@@ -248,7 +250,7 @@ system RAM and decode fell by 30 to 90% with no error at all. Two things help:
 | `scripts/build.ps1` finds VS 2022, CUDA 13.x and vcpkg | it never looked in `Program Files` for VS 2022 IDE editions, knew only CUDA 12.8 and 12.9, and passed no vcpkg toolchain |
 | Built-in RTX 3080 device profile | the card starts on measured routes instead of calibrating for 76 s on first launch |
 | `--kv-headroom-mib` listed in `--help` | `--kv-capacity auto` holds back 1 GiB by default, which a 10 GB card cannot spare |
-| `tools/windows/ninfer-switch` | start, switch, stop and inspect profiles on Windows |
+| `tools/windows/llm-switch` | start, switch, stop and inspect local LLM servers on Windows |
 | CI on checkout v7, setup-node v7 and Node 24 | the Linux script guard passes again, and nothing runs on the deprecated Node 20 runtime |
 
 ## Credits and license
