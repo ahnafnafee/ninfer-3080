@@ -104,7 +104,7 @@ lost when the model's weights were originally quantized.
 Start the profile from this checkout so the switcher reads the updated profile file:
 
 ```powershell
-.\tools\windows\ninfer-switch.ps1 precision16
+.\tools\windows\llm-switch.ps1 precision16
 ```
 
 Reproduce the accuracy runs from the repository root, changing the cache and output directory:
@@ -165,7 +165,7 @@ standalone assertion tests. This small experiment does not isolate the source of
 but it supplies no basis for treating removal of INT8 activation rounding as a general cure.
 
 ```powershell
-.\tools\windows\ninfer-switch.ps1 reason64
+.\tools\windows\llm-switch.ps1 reason64
 ```
 
 The short-context diagnostic profile additionally uses FP32 recurrent-state storage and the corrected

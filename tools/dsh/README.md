@@ -56,7 +56,7 @@ After the adapter and stats registrations are installed, later module updates on
 copy. Restart DSH to load the updated modules; use `dsh web --port 3081 --no-open` to retain the
 existing browser tab without opening another.
 
-Start NInfer with `./tools/windows/ninfer-switch.ps1 reason64`. That profile supplies the 65,536-token
+Start NInfer with `./tools/windows/llm-switch.ps1 reason64`. That profile supplies the 65,536-token
 minimum, RK4 KV, FP32 recurrent state, low thinking capped at 2,048 tokens per step, temperature 0.2,
 and 8,192 maximum output tokens. It unloads the MTP draft head to make room for the more accurate
 cache. The client discovers actual server capacity; its preset does not allocate GPU context.
